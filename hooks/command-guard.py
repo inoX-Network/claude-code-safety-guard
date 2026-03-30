@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Command Guard Hook for Claude Code PreToolUse.
 
-Checks Bash commands against security-rules.json before execution.
+Checks Bash and Read tool calls against security-rules.json before execution.
 Exit 0 = allow, Exit 2 = block.
 
 Part of: claude-code-safety-guard
@@ -181,6 +181,63 @@ def check_injection(command: str, keywords: list[str]) -> list[str]:
     return found
 
 
+def check_read_protection(file_path: str, rules: dict) -> tuple[bool, str]:
+    """Check if a Read tool access to a file should be blocked.
+
+    Returns: (blocked, reason)
+    - (False, "") = allow
+    - (True, reason) = block with error message
+    """
+    protected = rules.get("protected_reads", {})
+    expanded = file_path.replace("~", str(Path.home()))
+
+    # 1. Always blocked (no override can unlock these)
+    for pattern in protected.get("always_blocked_reads", []):
+        pat_expanded = expand_path(pattern)
+        if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
+            return True, f"ALWAYS BLOCKED: {pattern} — no override possible"
+
+    # 2. Always allowed (public keys, config, etc.)
+    for pattern in protected.get("always_allowed", []):
+        pat_expanded = expand_path(pattern)
+        if "*" in pattern:
+            # Glob pattern: ~/.ssh/*.pub → directory prefix + extension
+            parts = pattern.split("*")
+            dir_prefix = expand_path(parts[0])
+            extension = parts[1] if len(parts) > 1 else ""
+            if expanded.startswith(dir_prefix) and expanded.endswith(extension):
+                return False, ""
+        elif expanded == pat_expanded or expanded.startswith(pat_expanded + "/"):
+            return False, ""
+
+    # 3. Requires override Level 1+ (private keys, credentials)
+    for pattern in protected.get("require_override_1", []):
+        pat_expanded = expand_path(pattern)
+        if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
+            override = load_override()
+            if override and override.get("override_level", 0) >= 1:
+                level = override.get("override_level", 1)
+                print(
+                    f"READ ALLOWED (Override Level {level}): {file_path}",
+                    file=sys.stderr,
+                )
+                return False, ""
+            return True, (
+                f"BLOCKED: Reading {pattern} requires Override Level 1+. "
+                f"Ask the operator for an override."
+            )
+
+    return False, ""
+
+
+def check_force_push(command: str, patterns: list[str]) -> str | None:
+    """Check if a force-push to main/master is attempted."""
+    for pattern in patterns:
+        if re.search(pattern, command):
+            return pattern
+    return None
+
+
 def main():
     """Main function — reads tool input from stdin, checks against rules."""
     try:
@@ -190,6 +247,20 @@ def main():
         sys.exit(0)
 
     tool_name = input_data.get("tool_name", "")
+
+    # Read tool: Credential protection
+    if tool_name == "Read":
+        tool_input = input_data.get("tool_input", {})
+        file_path = tool_input.get("file_path", "")
+        if file_path:
+            rules = load_rules()
+            if rules:
+                blocked, reason = check_read_protection(file_path, rules)
+                if blocked:
+                    print(reason, file=sys.stderr)
+                    sys.exit(2)
+        sys.exit(0)
+
     if tool_name != "Bash":
         sys.exit(0)
 
@@ -209,8 +280,19 @@ def main():
         print(f"BLOCKED: Dangerous pattern detected: {blocked}", file=sys.stderr)
         sys.exit(2)
 
-    # Override check: If active, skip all further checks
-    # blocked_patterns above remains as safety net (rm -rf /, mkfs, etc.)
+    # 2. Force-push on main/master — ALWAYS blocked, no override possible
+    force_push = check_force_push(
+        command, rules.get("blocked_bash_patterns_force_push", [])
+    )
+    if force_push:
+        print(
+            "BLOCKED: Force-push to main/master — ALWAYS blocked, no override possible.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Override check: If active, skip remaining checks
+    # blocked_patterns + force_push above remain as safety net
     override = load_override()
     if override:
         level = override.get("override_level", 1)
@@ -219,24 +301,24 @@ def main():
         print(
             f"OVERRIDE ACTIVE: Level {level} ({label}) — "
             f"Task \"{override.get('task', '?')}\" [{source}] — "
-            f"Checks 2-5 skipped for: {command[:100]}",
+            f"Checks 3-6 skipped for: {command[:100]}",
             file=sys.stderr,
         )
         sys.exit(0)
 
-    # 2. Protected paths
+    # 3. Protected paths
     blocked_path = check_blocked_paths(command, rules.get("blocked_paths_write", []))
     if blocked_path:
         print(f"BLOCKED: Write access to protected path: {blocked_path}", file=sys.stderr)
         sys.exit(2)
 
-    # 3. Sudo check
+    # 4. Sudo check
     bad_sudo = check_sudo(command, rules.get("allowed_sudo", []))
     if bad_sudo:
         print(f"BLOCKED: sudo with disallowed command: {bad_sudo}", file=sys.stderr)
         sys.exit(2)
 
-    # 4. Confirmation-required commands — desktop notification
+    # 5. Confirmation-required commands — desktop notification
     if check_confirmation(command, rules.get("require_confirmation", [])):
         try:
             subprocess.Popen(
@@ -249,7 +331,7 @@ def main():
         except FileNotFoundError:
             pass  # notify-send not installed — no problem
 
-    # 5. Prompt injection warning (no block, just warning)
+    # 6. Prompt injection warning (no block, just warning)
     injections = check_injection(command, rules.get("prompt_injection_keywords", []))
     if injections:
         print(

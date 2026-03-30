@@ -11,6 +11,8 @@ A **PreToolUse hook system** that prevents destructive system operations in Clau
 
 - **Blocked patterns** — `rm -rf /`, `mkfs`, `chmod 777`, fork bombs, pipe-to-shell, recursive chown/chmod on system paths. These are **always** blocked, even with an active override.
 - **Protected paths** — No write operations to `~/.ssh`, `/etc/shadow`, `/boot`, `/usr/bin`, etc. unless an override is active.
+- **Credential read protection** — Prevents the Read tool from accessing private keys, AWS credentials, `.npmrc`, Docker config, and GnuPG files without an override. Public keys and SSH config are always allowed. `/etc/shadow` is always blocked.
+- **Force-push protection** — `git push --force` to `main`/`master` is **always** blocked. No override can unlock this.
 - **Sudo whitelist** — Only pre-approved commands can follow `sudo`. Everything else is blocked.
 - **3-level override system** — Because sometimes you *need* elevated permissions. Scoped, explicit, and auditable.
 - **Per-instance override files** — Multiple Claude Code sessions can run in parallel, each with their own scoped override.
@@ -22,18 +24,34 @@ A **PreToolUse hook system** that prevents destructive system operations in Clau
 ```
 User prompt → Claude Code → PreToolUse Hook → command-guard.py
                                                     │
-                                          ┌─────────┼─────────┐
-                                          ▼         ▼         ▼
-                                    Blocked     Override   Normal
-                                    Pattern?    Active?    Checks
-                                      │           │         │
-                                    EXIT 2      EXIT 0    Path/Sudo/
-                                   (block)     (allow)    Injection
+                                          ┌─────────┼──────────┐
+                                          ▼         ▼          ▼
+                                      Read Tool  Bash Tool   Other
+                                        │           │        Tools
+                                        ▼           ▼          │
+                                   Credential   Blocked      EXIT 0
+                                   Protection   Pattern?     (allow)
+                                     │  │          │
+                                     │  │       Force-Push
+                                     │  │       on main?
+                                     │  │          │
+                              ┌──────┘  └──┐    Override
+                              ▼            ▼    Active?
+                           Blocked      Allowed    │
+                           EXIT 2       EXIT 0   Path/Sudo/
+                                                 Injection
 ```
 
+### Bash tool checks (in order):
 1. **Blocked patterns** are checked first — always, regardless of overrides
-2. If an **override** is active, remaining checks are skipped (the operator explicitly granted permissions)
-3. Otherwise: **protected paths**, **sudo whitelist**, **notifications**, and **injection detection** run in sequence
+2. **Force-push protection** blocks `git push --force` to main/master — always, no override
+3. If an **override** is active, remaining checks are skipped (the operator explicitly granted permissions)
+4. Otherwise: **protected paths**, **sudo whitelist**, **notifications**, and **injection detection** run in sequence
+
+### Read tool checks:
+1. **Always blocked** files (`/etc/shadow`, `/etc/gshadow`) — no override possible
+2. **Always allowed** files (public keys, `~/.ssh/config`) — no restriction
+3. **Override required** files (private keys, credentials) — needs Level 1+ override
 
 ## Installation
 
@@ -71,6 +89,15 @@ Add the hook to your Claude Code settings (`~/.claude/settings.json`):
             "command": "python3 ~/.claude/hooks/command-guard.py"
           }
         ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/command-guard.py"
+          }
+        ]
       }
     ]
   }
@@ -86,6 +113,39 @@ Edit `~/.claude/safety-guard/security-rules.json` to match your system:
 - **`allowed_sudo`** — Which commands are allowed after `sudo`. The example includes `apt`, `docker`, `systemctl`. Add or remove based on your workflow.
 - **`blocked_paths_write`** — Paths that are protected from write operations. Add project-specific paths if needed.
 - **`require_confirmation`** — Package managers that trigger desktop notifications.
+- **`protected_reads`** — Files the Read tool can/cannot access. See [Credential Read Protection](#credential-read-protection) below.
+
+## Credential Read Protection
+
+The hook intercepts **Read tool** calls and checks the file path against three tiers of protection:
+
+| Tier | Behavior | Examples | Override |
+|------|----------|----------|----------|
+| **Always Allowed** | No restriction | `~/.ssh/*.pub`, `~/.ssh/config`, `~/.ssh/known_hosts` | Not needed |
+| **Override Required** | Blocked without Level 1+ override | `~/.ssh/id_*` (private keys), `~/.aws/credentials`, `~/.npmrc`, `~/.docker/config.json`, `~/.gnupg/` | Level 1+ |
+| **Always Blocked** | Cannot be read by any means | `/etc/shadow`, `/etc/gshadow` | None (always blocked) |
+
+### Why this matters
+
+Claude Code's Read tool can access any file on your system. Without this guard, a prompt injection or confused-deputy attack could trick Claude into reading your private SSH key, AWS credentials, or Docker auth tokens — and then exfiltrating them via a subsequent command.
+
+The three-tier system ensures:
+- **Safe files** (public keys, config) are never blocked — no friction for normal work
+- **Sensitive files** require explicit operator permission — you know when Claude accesses credentials
+- **Critical files** are always blocked — even an operator override cannot unlock `/etc/shadow`
+
+## Force-Push Protection
+
+Force-pushing to `main` or `master` is **always blocked**, regardless of any active override:
+
+```
+$ git push --force origin main        → BLOCKED
+$ git push -f origin master           → BLOCKED
+$ git push --force-with-lease master  → BLOCKED
+$ git push --force origin feature/x   → Allowed (not main/master)
+```
+
+This prevents accidental history rewrites on primary branches. Force-pushing to feature branches remains allowed.
 
 ## The Override System
 
@@ -93,14 +153,14 @@ The key insight: a static blocklist isn't enough. Sometimes you legitimately nee
 
 ### Level 1: EXTENDED
 
-**For:** Deployments, container management, single-file config changes
+**For:** Deployments, container management, single-file config changes, reading credentials
 
 ```
 Operator: "Level 1 granted for deploying the web app."
 ```
 
-Unlocks: Additional sudo commands (e.g. `docker`, `docker compose`), single-file ops on protected paths.
-Still blocked: Recursive operations on protected paths, system path modifications.
+Unlocks: Additional sudo commands (e.g. `docker`, `docker compose`), single-file ops on protected paths, reading credential files.
+Still blocked: Recursive operations on protected paths, system path modifications, force-push to main/master.
 
 ### Level 2: FULL
 
@@ -110,8 +170,8 @@ Still blocked: Recursive operations on protected paths, system path modification
 Operator: "Yes, Level 2 for SSH hardening."
 ```
 
-Unlocks: All sudo commands, write access to all protected paths.
-Still blocked: Recursive operations on system paths (`chown -R /etc/`), all blocked patterns.
+Unlocks: All sudo commands, write access to all protected paths, reading credential files.
+Still blocked: Recursive operations on system paths (`chown -R /etc/`), all blocked patterns, force-push to main/master.
 
 ### Level 3: CRITICAL
 
@@ -122,7 +182,7 @@ Operator: "Level 3 confirmed. Snapshot ID: snap-abc123."
 ```
 
 Prerequisites: System snapshot, documented snapshot ID, maximum runtime, double confirmation, no background agents.
-Still blocked: All blocked patterns (`rm -rf /`, `mkfs`, `chmod 777`). **These can never be unlocked.**
+Still blocked: All blocked patterns (`rm -rf /`, `mkfs`, `chmod 777`), force-push to main/master, reading `/etc/shadow`. **These can never be unlocked.**
 
 ### How Overrides Work
 
@@ -176,6 +236,8 @@ These patterns cannot be unlocked by any override:
 | `curl ... \| sh`, `wget ... \| bash` | Arbitrary code execution |
 | `eval.*base64` | Obfuscated code execution |
 | `chown -R` / `chmod -R` / `chgrp -R` on system paths | The exact pattern from [the incident](https://github.com/anthropics/claude-code/issues/39283) |
+| `git push --force` to main/master | History rewrite on primary branch |
+| Reading `/etc/shadow`, `/etc/gshadow` | System credential files |
 
 ## Configuration Reference
 
@@ -187,6 +249,11 @@ These patterns cannot be unlocked by any override:
 | `blocked_paths_write` | `string[]` | Paths protected from write operations (supports `~`) |
 | `allowed_sudo` | `string[]` | Commands allowed after `sudo` |
 | `require_confirmation` | `string[]` | Patterns that trigger desktop notifications |
+| `protected_reads` | `object` | Read tool access control (see below) |
+| `protected_reads.always_allowed` | `string[]` | Files the Read tool can always access (supports `*` globs) |
+| `protected_reads.require_override_1` | `string[]` | Files that need Level 1+ override for Read access |
+| `protected_reads.always_blocked_reads` | `string[]` | Files that can never be read (no override) |
+| `blocked_bash_patterns_force_push` | `string[]` | Regex patterns to block force-push on primary branches |
 | `prompt_injection_keywords` | `string[]` | Keywords that trigger warnings (not blocks) |
 
 ### Override file format
@@ -217,6 +284,12 @@ A: No — it only logs warnings to stderr. It's meant as a heads-up, not a hard 
 
 **Q: Can I use this with multiple Claude Code sessions?**
 A: Yes. Each session creates its own override file in `~/.claude/.sudo-overrides/`. They don't interfere with each other.
+
+**Q: Why is force-push to main/master always blocked?**
+A: Rewriting history on primary branches is almost always a mistake when done by an AI agent. If you genuinely need to force-push to main, do it manually outside of Claude Code.
+
+**Q: Can Claude read my private SSH key?**
+A: Not without an explicit Level 1+ override from you. The hook blocks all Read tool access to `~/.ssh/id_*`, `~/.aws/credentials`, and similar files by default. Public keys (`*.pub`) and `~/.ssh/config` are always allowed.
 
 ## Contributing
 

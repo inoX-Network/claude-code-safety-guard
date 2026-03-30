@@ -66,6 +66,35 @@
     "go install"
   ],
 
+  "_comment_protected_reads": "Controls which files the Read tool can access. Three tiers: always_allowed (no restriction), require_override_1 (needs Level 1+ override), always_blocked_reads (no override can unlock).",
+  "protected_reads": {
+    "always_allowed": [
+      "~/.ssh/config",
+      "~/.ssh/known_hosts",
+      "~/.ssh/authorized_keys",
+      "~/.ssh/*.pub"
+    ],
+    "require_override_1": [
+      "~/.ssh/id_",
+      "~/.aws/credentials",
+      "~/.aws/config",
+      "~/.npmrc",
+      "~/.docker/config.json",
+      "~/.gnupg/"
+    ],
+    "always_blocked_reads": [
+      "/etc/shadow",
+      "/etc/gshadow"
+    ]
+  },
+
+  "_comment_blocked_bash_patterns_force_push": "Force-push to main/master is ALWAYS blocked, even with an active override. This prevents accidental history rewrites on primary branches.",
+  "blocked_bash_patterns_force_push": [
+    "git push.*--force.*\\b(main|master)\\b",
+    "git push.*-f .*\\b(main|master)\\b",
+    "git push --force-with-lease.*\\b(main|master)\\b"
+  ],
+
   "_comment_prompt_injection_keywords": "Commands containing these keywords trigger a warning (not a block). Helps detect prompt injection attempts embedded in file contents or command arguments.",
   "prompt_injection_keywords": [
     "ignore previous",
