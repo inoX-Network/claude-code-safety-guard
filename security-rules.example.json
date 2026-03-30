@@ -1,0 +1,83 @@
+{
+  "_comment_blocked_patterns": "These patterns are ALWAYS blocked, even with an active override. They represent catastrophic operations that should never be executed by an AI agent.",
+  "blocked_patterns": [
+    "rm -rf /",
+    "rm -rf ~",
+    "rm -rf /*",
+    "rm -rf .",
+    "rm -rf $HOME",
+    "chmod 777",
+    "chmod -R 777",
+    "mkfs",
+    "dd if=.* of=/dev/",
+    "> /dev/sd",
+    ":(){ :|:& };:",
+    "curl .* | sh",
+    "curl .* | bash",
+    "wget .* | sh",
+    "wget .* | bash",
+    "eval.*base64",
+    "python.*-c.*import.*os.*system",
+    "chown -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
+    "chmod -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
+    "chgrp -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)"
+  ],
+
+  "_comment_blocked_paths_write": "Write operations to these paths are blocked unless an override is active. Customize for your system.",
+  "blocked_paths_write": [
+    "~/.ssh",
+    "~/.gnupg",
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/etc/fstab",
+    "/boot",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/sbin",
+    "/bin"
+  ],
+
+  "_comment_allowed_sudo": "Only these commands are allowed after 'sudo'. Adjust to your workflow. Everything else is blocked unless an override grants it.",
+  "allowed_sudo": [
+    "apt",
+    "apt-get",
+    "systemctl",
+    "ufw",
+    "docker",
+    "chown",
+    "chmod",
+    "mkdir",
+    "cp",
+    "mv",
+    "tee",
+    "cat"
+  ],
+
+  "_comment_require_confirmation": "Commands matching these patterns trigger a desktop notification (via notify-send) so you know what's being installed.",
+  "require_confirmation": [
+    "pip install",
+    "pnpm add",
+    "npm install",
+    "apt install",
+    "apt-get install",
+    "cargo install",
+    "go install"
+  ],
+
+  "_comment_prompt_injection_keywords": "Commands containing these keywords trigger a warning (not a block). Helps detect prompt injection attempts embedded in file contents or command arguments.",
+  "prompt_injection_keywords": [
+    "ignore previous",
+    "ignore all",
+    "disregard",
+    "new instructions",
+    "system prompt",
+    "you are now",
+    "forget everything",
+    "override",
+    "jailbreak",
+    "DAN",
+    "do anything now"
+  ]
+}

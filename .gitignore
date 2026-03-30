@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.sudo-overrides/
+security-rules.json
