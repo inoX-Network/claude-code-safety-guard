@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Command Guard Hook for Claude Code PreToolUse.
 
-Checks Bash and Read tool calls against security-rules.json before execution.
+Checks tool calls against security-rules.json before they are executed.
 Exit 0 = allow, Exit 2 = block.
 
 Part of: claude-code-safety-guard
@@ -13,10 +13,65 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-# Path to the security rules file
-RULES_PATH = Path.home() / ".claude" / "safety-guard" / "security-rules.json"
+# Path to the security rules file.
+# Override with CLAUDE_SECURITY_RULES (used by the test suite and for relocation).
+RULES_PATH = Path(
+    os.environ.get(
+        "CLAUDE_SECURITY_RULES",
+        Path.home() / ".claude" / "safety-guard" / "security-rules.json",
+    )
+)
+
+# Self-protection of the security system: these paths must NEVER be written by
+# AI tool calls (Bash AND Write/Edit). NO override lifts this — only the owner
+# via ! (which bypasses the guard). Deliberately hardcoded (NOT in
+# security-rules.json), otherwise the protection list would be modifiable
+# through itself (chicken/egg). The pending directory
+# (~/.claude/.sudo-overrides-pending) is DELIBERATELY NOT protected — the AI may
+# write override proposals there, but only the owner activates them into the
+# (protected) active directory.
+SELF_PROTECT_PATHS = [
+    "~/.claude/.sudo-overrides",                          # active override directory
+    "~/.claude/bin",                                      # approval scripts
+    "~/.claude/.hook-dev-mode",                           # dev-mode flag (only owner can set it via !)
+    "~/.claude/hooks",                                    # all hooks incl. command-guard symlink
+    "~/.claude/safety-guard/security-rules.json",
+    "~/.claude/settings.json",
+    "~/.claude/settings.local.json",
+    "~/.claude/CLAUDE.md",
+    "~/.claude/rules",                                    # the rules themselves
+]
+
+# Hook development mode (Option B): the owner can lift the self-protection ONLY
+# for this subset temporarily, to allow hook changes by the AI under
+# supervision. Override directory, settings.json, bin/, CLAUDE.md and rules/
+# stay hard-protected EVEN in dev mode — otherwise the AI could write itself
+# overrides or approvals while in dev mode.
+DEV_UNLOCKABLE_PATHS = [
+    "~/.claude/hooks",
+    "~/.claude/safety-guard/security-rules.json",
+]
+
+# Dev-mode flag file. Lives in SELF_PROTECT (see above) — the AI cannot set it
+# via Write/Bash, only the owner via !. JSON with mandatory expires_at.
+HOOK_DEV_FLAG = "~/.claude/.hook-dev-mode"
+
+# Write-command indicators — shared by check_blocked_paths and
+# command_hits_self_protect, so both use the same write-access detection.
+WRITE_INDICATORS = [
+    ">", ">>", "tee ", "cp ", "mv ", "rm ", "touch ",
+    "chmod ", "chown ", "mkdir ", "rmdir ", "ln ",
+    "sed -i", "truncate ", "dd ", "install ",
+]
+
+# Path boundary for the Bash self-protection detection: the protected path must
+# be followed by a separator (/, whitespace, quote, redirect, paren) or the end
+# of the string. This prevents '~/.claude/.sudo-overrides' from wrongly matching
+# '~/.claude/.sudo-overrides-pending' (after 'overrides' there is a '-').
+_PATH_BOUNDARY = r"(?:/|\s|['\";|&>)]|$)"
 
 
 def load_rules() -> dict:
@@ -33,31 +88,42 @@ def expand_path(path: str) -> str:
     return path.replace("~", str(Path.home()))
 
 
+_REGEX_METACHARS = re.compile(r"[.*+?^${}()|\[\]\\]")
+
+
 def check_blocked_patterns(command: str, patterns: list[str]) -> str | None:
-    """Check if the command matches a blocked pattern."""
+    """Check whether the command contains a blocked pattern.
+
+    Automatically detects whether a pattern contains regex metacharacters:
+    - With metacharacters: evaluate as regex
+    - Without metacharacters: check as literal substring
+
+    Important: an unescaped pipe | acts as OR in regex and produces
+    false positives (e.g. matches " sh" in "stash show"). Patterns that
+    mean a literal pipe must write it as \\|.
+    """
     for pattern in patterns:
-        if ".*" in pattern:
-            # Regex pattern
-            if re.search(pattern, command):
-                return pattern
+        if _REGEX_METACHARS.search(pattern):
+            try:
+                if re.search(pattern, command):
+                    return pattern
+            except re.error:
+                # Broken regex: fall back to substring
+                if pattern in command:
+                    return pattern
         elif pattern in command:
             return pattern
     return None
 
 
 def check_blocked_paths(command: str, paths: list[str]) -> str | None:
-    """Check if the command writes to a protected path."""
-    # Remove standard redirects (/dev/null is harmless)
+    """Check whether the command writes to a protected path."""
+    # Remove standard redirects (>/dev/null, 2>/dev/null are harmless)
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
 
     # Detect write operations
-    write_indicators = [
-        ">", ">>", "tee ", "cp ", "mv ", "rm ", "touch ",
-        "chmod ", "chown ", "mkdir ", "rmdir ", "ln ",
-        "sed -i", "truncate ",
-    ]
-    is_write = any(indicator in cleaned for indicator in write_indicators)
+    is_write = any(indicator in cleaned for indicator in WRITE_INDICATORS)
     if not is_write:
         return None
 
@@ -70,101 +136,258 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     return None
 
 
-def load_override() -> dict | None:
-    """Load active overrides from ~/.claude/.sudo-overrides/ directory.
+def _expiry_ok(data: dict, require_expiry: bool) -> bool:
+    """Check the expiry field 'expires_at' (ISO-8601).
 
-    Each Claude Code instance creates its own override file:
-    - With project: {name}.json (e.g. deploy-webapp.json)
-    - Without project: system-{description}.json (e.g. system-maintenance.json)
+    require_expiry=True (main-session hygiene, K1): expires_at is MANDATORY —
+    must be present, parsable, and in the future. If missing, the override is
+    invalid. This keeps small the time window in which a (hypothetical)
+    agent_id-less subagent could inherit a main-session override, and prevents
+    eternally valid override leftovers.
 
-    Format:
-    {
-        "override_level": 1,
-        "label": "EXTENDED",
-        "task": "Description of the task",
-        "project": "my-project" or null,
-        "confirmed": true,
-        "timestamp": "ISO-8601",
-        "expires_after": "task_completion"
-    }
+    require_expiry=False (agent overrides): expires_at is optional. If missing,
+    the override applies (the binding to agent_id limits the risk anyway).
+    If set, it must be parsable and in the future.
 
-    The hook returns the override with the HIGHEST level.
-    blocked_patterns remain ALWAYS active — even at Level 3.
-
-    Backwards compatibility: Legacy .sudo-override.json is also read.
+    'expires_after: task_completion' cannot be determined by the hook itself —
+    such overrides must be removed by the coordinator after the task ends.
     """
-    overrides_dir = Path.home() / ".claude" / ".sudo-overrides"
+    exp = data.get("expires_at")
+    if not exp:
+        return not require_expiry  # main session without expires_at -> invalid
+    try:
+        dt = datetime.fromisoformat(exp)
+    except (ValueError, TypeError):
+        return False  # unparsable -> fail-closed (H3): do NOT treat as valid
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt > datetime.now(timezone.utc)
+
+
+def load_override(agent_id: str | None = None) -> dict | None:
+    """Load the matching active override for the calling context.
+
+    Directory: $CLAUDE_SUDO_OVERRIDES_DIR (for tests) or
+    ~/.claude/.sudo-overrides/. Each instance/agent has its own file:
+    - Coordinator/system (main session): {name}.json / system-{...}.json,
+      WITHOUT an 'agent_id' field.
+    - Subagent: agent-{agent_id}.json, WITH an 'agent_id' field == the hook agent_id.
+
+    NO INHERITANCE: a subagent command (agent_id set) only pulls override files
+    whose 'agent_id' matches exactly. Coordinator overrides (without agent_id)
+    NEVER apply to subagents. Conversely, the main session (agent_id=None) only
+    sees files WITHOUT agent_id. That was the gap: an agent inherited the
+    coordinator's privileges.
+
+    Expired overrides (expires_at < now) are ignored.
+    With multiple matches, the highest override_level wins.
+    blocked_patterns stay ALWAYS active — even at level 3.
+    """
+    dir_env = os.environ.get("CLAUDE_SUDO_OVERRIDES_DIR")
+    overrides_dir = Path(dir_env) if dir_env else (Path.home() / ".claude" / ".sudo-overrides")
     active_overrides = []
 
-    # New directory-based system
+    def _matches_context(data: dict) -> bool:
+        file_agent = data.get("agent_id")
+        if agent_id is None:
+            return file_agent is None      # main session: only agent-free overrides
+        return file_agent == agent_id      # subagent: only exactly bound ones
+
+    def _valid_level(data: dict) -> bool:
+        # override_level MUST be an int in {0,1,2,3}. bool counts as int in
+        # Python, so explicitly exclude it. Otherwise discard the file (default-deny, H4).
+        lvl = data.get("override_level")
+        return isinstance(lvl, int) and not isinstance(lvl, bool) and lvl in (0, 1, 2, 3)
+
     if overrides_dir.is_dir():
         for filepath in overrides_dir.glob("*.json"):
             try:
                 with open(filepath, encoding="utf-8") as f:
                     data = json.load(f)
-                if data.get("confirmed") is True and data.get("task"):
-                    data["_source_file"] = filepath.name
-                    active_overrides.append(data)
-            except (json.JSONDecodeError, KeyError):
-                pass
+            except (json.JSONDecodeError, OSError):
+                continue
+            if data.get("confirmed") is not True or not data.get("task"):
+                continue
+            if not _valid_level(data):
+                continue
+            # Main-session overrides (agent_id None) require mandatory expires_at.
+            if not _expiry_ok(data, require_expiry=(agent_id is None)):
+                continue
+            if not _matches_context(data):
+                continue
+            data["_source_file"] = filepath.name
+            active_overrides.append(data)
 
-    # Backwards compatibility: Legacy single file
-    legacy_path = Path.home() / ".claude" / ".sudo-override.json"
-    if legacy_path.exists():
-        try:
-            with open(legacy_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if data.get("confirmed") is True and data.get("task"):
-                data["_source_file"] = ".sudo-override.json (legacy)"
-                active_overrides.append(data)
-        except (json.JSONDecodeError, KeyError):
-            pass
+    # Backwards compatibility: old single file — applies only to the main session
+    if agent_id is None:
+        legacy_path = Path.home() / ".claude" / ".sudo-override.json"
+        if legacy_path.exists():
+            try:
+                with open(legacy_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if (data.get("confirmed") is True and data.get("task")
+                        and data.get("agent_id") is None
+                        and _valid_level(data)
+                        and _expiry_ok(data, require_expiry=True)):
+                    data["_source_file"] = ".sudo-override.json (legacy)"
+                    active_overrides.append(data)
+            except (json.JSONDecodeError, OSError):
+                pass
 
     if not active_overrides:
         return None
 
-    # Return the highest override level
-    return max(active_overrides, key=lambda o: o.get("override_level", 1))
+    # All collected overrides have a valid level (0-3); default 0 is only a
+    # theoretical fallback and consistent with main().
+    return max(active_overrides, key=lambda o: o.get("override_level", 0))
 
 
 def check_sudo(command: str, allowed: list[str]) -> str | None:
-    """Check if sudo is only used with allowed commands."""
-    if "sudo " not in command:
+    """Return the first sudo command that is NOT in `allowed`, otherwise None.
+
+    `allowed` is the already fully assembled allowlist (base + level grants).
+    The override merge happens in the caller (main), so the entire level logic
+    sits in one place and load_override is not called twice (here without
+    agent_id).
+    """
+    # 'sudo' as a standalone word, followed by whitespace (space, tab, ...).
+    # \bsudo\b prevents matching 'pseudo'; \s+ closes the tab bypass (M2).
+    matches = list(re.finditer(r"\bsudo\b\s+", command))
+    if not matches:
         return None
 
-    # Load temporary overrides and merge with base allowlist
-    override = load_override()
-    override_commands = []
-    if override:
-        # New format: grants.additional_sudo
-        grants = override.get("grants", {})
-        additional = grants.get("additional_sudo", [])
-        if additional == "all":
-            return None  # Level 2+: All sudo allowed
-        if isinstance(additional, list):
-            override_commands = additional
-        # Legacy format: commands
-        override_commands += override.get("commands", [])
-    all_allowed = allowed + override_commands
-
-    # Extract the command after sudo (skip flags like -S, -E, -u)
-    parts = command.split("sudo ")
-    for part in parts[1:]:
-        tokens = part.strip().split()
-        # Skip sudo flags (start with -)
+    for m in matches:
+        tokens = command[m.end():].split()
         cmd_after_sudo = ""
         for token in tokens:
-            if token.startswith("-"):
+            if token.startswith("-"):  # skip sudo flags (-S, -E, -u, -n)
                 continue
             cmd_after_sudo = token
             break
-        if cmd_after_sudo and cmd_after_sudo not in all_allowed:
+        if cmd_after_sudo and cmd_after_sudo not in allowed:
             return cmd_after_sudo
     return None
 
 
+def grant_covers_path(blocked_path: str, allowed_paths: list[str]) -> bool:
+    """True if a grant covers the concretely touched protected path.
+
+    Deliberately NARROW (H1): the grant must be at least as specific as the
+    protected path. A broad grant '/etc' does NOT cover '/etc/shadow' — only
+    '/etc/shadow' itself or a path below it. This prevents a harmlessly meant
+    grant from defeating the entire path protection.
+
+    Rule: grant == blocked_path OR grant lies below blocked_path.
+    """
+    bp = expand_path(blocked_path).rstrip("/")
+    for ap in allowed_paths:
+        if not isinstance(ap, str) or not ap:
+            continue
+        ap_exp = expand_path(ap).rstrip("/")
+        if ap_exp == bp or ap_exp.startswith(bp + "/"):
+            return True
+    return False
+
+
+def dev_mode_active() -> bool:
+    """True if the hook development mode (Option B) is active.
+
+    Reads the flag file ~/.claude/.hook-dev-mode (JSON with mandatory
+    expires_at). Fail-closed: if the file is missing, unparsable, or expires_at
+    is missing/expired -> dev mode OFF. Prevents eternally open dev leftovers.
+
+    The flag file lives in SELF_PROTECT — only the owner can set it via !.
+    """
+    flag_env = os.environ.get("CLAUDE_HOOK_DEV_FLAG")
+    flag = Path(flag_env) if flag_env else Path(expand_path(HOOK_DEV_FLAG))
+    if not flag.exists():
+        return False
+    try:
+        data = json.loads(flag.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    return _expiry_ok(data, require_expiry=True)
+
+
+def _dev_unlocked(prot: str) -> bool:
+    """True if the matched self-protection path `prot` is unlocked in the active
+    dev mode (subset DEV_UNLOCKABLE_PATHS)."""
+    if not dev_mode_active():
+        return False
+    pe = expand_path(prot).rstrip("/")
+    for u in DEV_UNLOCKABLE_PATHS:
+        ue = expand_path(u).rstrip("/")
+        if pe == ue or pe.startswith(ue + "/"):
+            return True
+    return False
+
+
+def hits_self_protect(file_path: str) -> str | None:
+    """Return the self-protection path that `file_path` touches — otherwise None.
+
+    For Write/Edit/MultiEdit (exact path). Path-boundary-exact:
+    '~/.claude/.sudo-overrides' covers the directory and everything below it,
+    but NOT '~/.claude/.sudo-overrides-pending' (where the AI may place
+    proposals). NO override lifts a match — only dev mode unlocks the hook
+    source files (DEV_UNLOCKABLE_PATHS).
+    """
+    fp = expand_path(file_path).rstrip("/")
+    for prot in SELF_PROTECT_PATHS:
+        p = expand_path(prot).rstrip("/")
+        if fp == p or fp.startswith(p + "/"):
+            return None if _dev_unlocked(prot) else prot
+    return None
+
+
+def command_hits_self_protect(command: str) -> str | None:
+    """Return the self-protection path a Bash write command targets.
+
+    Best-effort counterpart to hits_self_protect for the Bash side: closes the
+    gap 'echo x > ~/.claude/hooks/command-guard.py'. Only on detected write
+    access (WRITE_INDICATORS). Path boundary via _PATH_BOUNDARY, so the pending
+    directory is not wrongly matched. NO override lifts a match — only dev mode
+    unlocks DEV_UNLOCKABLE_PATHS.
+
+    If a command targets multiple self-protection paths, the first one NOT
+    unlocked in dev mode blocks.
+    """
+    cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
+    cleaned = re.sub(r'\d*>&\d+', '', cleaned)
+    if not any(indicator in cleaned for indicator in WRITE_INDICATORS):
+        return None
+    cleaned_expanded = cleaned.replace("~", str(Path.home()))
+    for prot in SELF_PROTECT_PATHS:
+        p = re.escape(expand_path(prot).rstrip("/"))
+        if re.search(p + _PATH_BOUNDARY, cleaned_expanded) and not _dev_unlocked(prot):
+            return prot
+    return None
+
+
+def path_decision(blocked_path: str, level: int, grants: dict) -> tuple[bool, str]:
+    """Level decision for a touched protected path (blocked_paths_write).
+
+    Shared logic for Bash check 3 AND the Write/Edit block — avoids drift.
+    Level 0: no protected path. Level 1: only explicitly granted ones
+    (allowed_paths, path-boundary-exact via grant_covers_path). Level 2+: all
+    protected paths (single ops; recursive-system stays hard-blocked via
+    blocked_patterns).
+
+    The 'system_paths' flag is deliberately NOT evaluated (H2) — otherwise a
+    level-1 file could grant itself level-2 path rights.
+
+    Returns: (allowed, needed_text).
+    """
+    system_paths_granted = level >= 2
+    granted_single = level >= 1 and grant_covers_path(blocked_path, grants.get("allowed_paths", []))
+    allowed = system_paths_granted or granted_single
+    need = f"level 2 OR an allowed_paths grant for '{blocked_path}'"
+    return allowed, need
+
+
 def check_confirmation(command: str, patterns: list[str]) -> bool:
-    """Check if the command requires confirmation (desktop notification)."""
+    """Check whether the command requires confirmation (desktop notification)."""
     for pattern in patterns:
         if pattern in command:
             return True
@@ -182,7 +405,7 @@ def check_injection(command: str, keywords: list[str]) -> list[str]:
 
 
 def check_read_protection(file_path: str, rules: dict) -> tuple[bool, str]:
-    """Check if a Read tool access to a file should be blocked.
+    """Check whether a Read access to protected files is allowed.
 
     Returns: (blocked, reason)
     - (False, "") = allow
@@ -191,7 +414,7 @@ def check_read_protection(file_path: str, rules: dict) -> tuple[bool, str]:
     protected = rules.get("protected_reads", {})
     expanded = file_path.replace("~", str(Path.home()))
 
-    # 1. Always blocked (no override can unlock these)
+    # 1. Always blocked (no override helps)
     for pattern in protected.get("always_blocked_reads", []):
         pat_expanded = expand_path(pattern)
         if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
@@ -201,7 +424,7 @@ def check_read_protection(file_path: str, rules: dict) -> tuple[bool, str]:
     for pattern in protected.get("always_allowed", []):
         pat_expanded = expand_path(pattern)
         if "*" in pattern:
-            # Glob pattern: ~/.ssh/*.pub → directory prefix + extension
+            # Glob pattern: ~/.ssh/*.pub → directory + extension
             parts = pattern.split("*")
             dir_prefix = expand_path(parts[0])
             extension = parts[1] if len(parts) > 1 else ""
@@ -210,7 +433,7 @@ def check_read_protection(file_path: str, rules: dict) -> tuple[bool, str]:
         elif expanded == pat_expanded or expanded.startswith(pat_expanded + "/"):
             return False, ""
 
-    # 3. Requires override Level 1+ (private keys, credentials)
+    # 3. Requires override level 1 (private keys, credentials)
     for pattern in protected.get("require_override_1", []):
         pat_expanded = expand_path(pattern)
         if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
@@ -218,24 +441,128 @@ def check_read_protection(file_path: str, rules: dict) -> tuple[bool, str]:
             if override and override.get("override_level", 0) >= 1:
                 level = override.get("override_level", 1)
                 print(
-                    f"READ ALLOWED (Override Level {level}): {file_path}",
+                    f"READ ALLOWED (override level {level}): {file_path}",
                     file=sys.stderr,
                 )
                 return False, ""
             return True, (
-                f"BLOCKED: Reading {pattern} requires Override Level 1+. "
-                f"Ask the operator for an override."
+                f"BLOCKED: reading {pattern} requires override level 1+. "
+                f"Ask the owner for an override."
             )
 
     return False, ""
 
 
 def check_force_push(command: str, patterns: list[str]) -> str | None:
-    """Check if a force-push to main/master is attempted."""
+    """Check whether a force-push to main/master is attempted."""
     for pattern in patterns:
         if re.search(pattern, command):
             return pattern
     return None
+
+
+def check_owner_only(command: str, names: list[str]) -> str | None:
+    """Return the first owner-exclusive command the AI calls via Bash.
+
+    Commands like the grant-override or hook-dev-mode tools activate overrides
+    or lift the hook self-protection. If the AI called them via the normal Bash
+    tool, they would pass through the guard (no dangerous pattern in the string)
+    and the AI could approve itself. Therefore hard-blocked — only the owner's
+    !-invocation bypasses the guard entirely and reaches the script.
+
+    Checked as a whole word (word boundaries) to avoid partial matches inside
+    other words.
+    """
+    for name in names:
+        if re.search(r"\b" + re.escape(name) + r"\b", command):
+            return name
+    return None
+
+
+def check_git_safety(command: str, patterns: list[str]) -> str | None:
+    """Check whether the command violates git-safety rules.
+
+    Technical implementation of the git rules (reset --hard, --no-verify,
+    --amend, git add -A/., git config). These patterns are ALWAYS blocked (even
+    with an override).
+    """
+    for pattern in patterns:
+        if re.search(pattern, command):
+            return pattern
+    return None
+
+
+def check_env_file_read(file_path: str, env_patterns: list[str]) -> bool:
+    """Check whether a path points to a .env file.
+
+    Detects .env at the end of the filename (regardless of directory).
+    """
+    basename = os.path.basename(file_path)
+    for pattern in env_patterns:
+        # Exact filename OR .env in the suffix (.env.production)
+        if basename == pattern:
+            return True
+        if pattern.startswith(".env") and basename.startswith(".env"):
+            return True
+    return False
+
+
+_SECRET_PATTERNS = [
+    # echo 'secret' | sudo -S  ->  password pipe
+    (re.compile(r"echo\s+(['\"]).*?\1(\s*\|\s*sudo)", re.IGNORECASE), r"echo '[REDACTED]'\2"),
+    # key=value / key: value secrets
+    (re.compile(r"(?i)\b(password|passwd|token|secret|api[_-]?key|access[_-]?key|bearer)\b\s*[=:]\s*\S+"),
+     r"\1=[REDACTED]"),
+    # --flag value
+    (re.compile(r"(?i)(--(?:password|token|secret|api-?key))(\s+)\S+"), r"\1\2[REDACTED]"),
+    # Authorization: Bearer xyz
+    (re.compile(r"(?i)(authorization:\s*\w+\s+)\S+"), r"\1[REDACTED]"),
+]
+
+
+def _redact(text: str) -> str:
+    """Strip obvious secrets before a command goes into the audit log.
+
+    Protection against the leak that an audit log itself stores passwords/tokens.
+    Also truncates to 600 characters.
+    """
+    if not text:
+        return text
+    for pattern, repl in _SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text[:600]
+
+
+def _audit(input_data: dict, tool: str, target: str, decision: str,
+           reason: str, level=None) -> None:
+    """Write an audit line (JSONL) — traceability of all actions.
+
+    Directory: $CLAUDE_AUDIT_DIR (tests) or ~/.claude/.agent-audit/.
+    'actor' is the agent_id (subagent) or 'main' (main session). This makes it
+    possible to trace per agent what was done/attempted where.
+
+    Logging errors must NEVER block the guard — everything in try/except.
+    """
+    try:
+        dir_env = os.environ.get("CLAUDE_AUDIT_DIR")
+        audit_dir = Path(dir_env) if dir_env else (Path.home() / ".claude" / ".agent-audit")
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        agent_id = input_data.get("agent_id")
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_id": input_data.get("session_id"),
+            "actor": agent_id if agent_id else "main",
+            "agent_type": input_data.get("agent_type"),
+            "tool": tool,
+            "target": _redact(target),
+            "decision": decision,
+            "reason": reason,
+            "level": level,
+        }
+        with open(audit_dir / "actions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # audit must never break the guard
 
 
 def main():
@@ -243,22 +570,112 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
-        # Invalid input — allow through
+        # No valid input — allow through
         sys.exit(0)
 
     tool_name = input_data.get("tool_name", "")
 
-    # Read tool: Credential protection
+    # Read tool: credential protection
     if tool_name == "Read":
         tool_input = input_data.get("tool_input", {})
         file_path = tool_input.get("file_path", "")
         if file_path:
             rules = load_rules()
             if rules:
+                # 1. .env protection: override level 1+ required
+                env_patterns = rules.get("protected_reads", {}).get(
+                    "env_files_require_override_1", []
+                )
+                if env_patterns and check_env_file_read(file_path, env_patterns):
+                    override = load_override()
+                    if not override or override.get("override_level", 0) < 1:
+                        _audit(input_data, "Read", file_path, "block", "env_protected", 0)
+                        print(
+                            f"BLOCKED: reading the .env file {file_path} requires "
+                            f"override level 1+.",
+                            file=sys.stderr,
+                        )
+                        sys.exit(2)
+                # 2. Further credential checks
                 blocked, reason = check_read_protection(file_path, rules)
                 if blocked:
+                    _audit(input_data, "Read", file_path, "block", "read_protected", 0)
                     print(reason, file=sys.stderr)
                     sys.exit(2)
+            _audit(input_data, "Read", file_path, "allow", "ok")
+        sys.exit(0)
+
+    # Write/Edit/MultiEdit/NotebookEdit: file-based write protection.
+    # Closes the blind spot that these tools were previously unhooked and the AI
+    # could have written protected paths, override files, or the hook itself
+    # through them.
+    if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        tool_input = input_data.get("tool_input", {})
+        file_path = tool_input.get("file_path") or tool_input.get("notebook_path", "")
+        if not file_path:
+            sys.exit(0)
+        agent_id = input_data.get("agent_id")
+
+        # A. SELF-PROTECTION — no override lifts this. Only the owner via !.
+        sp = hits_self_protect(file_path)
+        if sp:
+            _audit(input_data, tool_name, file_path, "block", f"self_protect:{sp}", "hard")
+            print(
+                f"BLOCKED: self-protection — '{file_path}' belongs to the security "
+                f"system ({sp}) and may only be changed by the owner via !. "
+                f"No override lifts this.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        rules = load_rules()
+        if rules:
+            # B. .env write protection (analogous to read protection: override level 1+).
+            env_patterns = rules.get("protected_reads", {}).get(
+                "env_files_require_override_1", []
+            )
+            if env_patterns and check_env_file_read(file_path, env_patterns):
+                override = load_override(agent_id)
+                if not override or override.get("override_level", 0) < 1:
+                    _audit(input_data, tool_name, file_path, "block", "env_write_protected", 0)
+                    print(
+                        f"BLOCKED: writing to the .env file {file_path} requires "
+                        f"override level 1+.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+
+            # C. Protected paths — level-dependent (identical logic to Bash check 3).
+            #    For Write we have the exact target path: prefix comparison with a
+            #    path boundary instead of substring.
+            expanded = expand_path(file_path).rstrip("/")
+            blocked_path = None
+            for p in rules.get("blocked_paths_write", []):
+                pe = expand_path(p).rstrip("/")
+                if expanded == pe or expanded.startswith(pe + "/"):
+                    blocked_path = p
+                    break
+            if blocked_path:
+                override = load_override(agent_id)
+                level = override.get("override_level", 0) if override else 0
+                grants = override.get("grants", {}) if override else {}
+                allowed, need = path_decision(blocked_path, level, grants)
+                if not allowed:
+                    who = f"Agent {agent_id}" if agent_id else "main session"
+                    _audit(input_data, tool_name, file_path, "block",
+                           f"protected_path:{blocked_path}", level)
+                    extra = (f"{who} has no valid override (level 0). " if not override
+                             else f"Current override: level {level}. ")
+                    print(
+                        f"BLOCKED: write access (Write/Edit) to protected path "
+                        f"'{blocked_path}'. {extra}Needed: {need}. "
+                        f"ESCALATION: agent asks the coordinator → coordinator decides "
+                        f"with the owner about adjusting the override file.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+
+        _audit(input_data, tool_name, file_path, "allow", "ok")
         sys.exit(0)
 
     if tool_name != "Bash":
@@ -274,49 +691,118 @@ def main():
     if not rules:
         sys.exit(0)
 
-    # 1. Blocked patterns — ALWAYS active, even with override
+    # 1. Blocked patterns — ALWAYS active, even with an override
     blocked = check_blocked_patterns(command, rules.get("blocked_patterns", []))
     if blocked:
-        print(f"BLOCKED: Dangerous pattern detected: {blocked}", file=sys.stderr)
+        _audit(input_data, "Bash", command, "block", f"blocked_pattern:{blocked}", "hard")
+        print(f"BLOCKED: dangerous pattern detected: {blocked}", file=sys.stderr)
         sys.exit(2)
 
-    # 2. Force-push on main/master — ALWAYS blocked, no override possible
+    # 1b. Owner-exclusive commands — ALWAYS blocked for AI Bash, no override.
+    #     Only the owner's !-invocation bypasses the guard and reaches the script.
+    owner_only = check_owner_only(command, rules.get("owner_only_commands", []))
+    if owner_only:
+        _audit(input_data, "Bash", command, "block", f"owner_only:{owner_only}", "hard")
+        print(
+            f"BLOCKED: '{owner_only}' is an owner-exclusive command (approval channel). "
+            f"The AI cannot run it — only the owner via ! (bypasses the guard). "
+            f"I can write an override PROPOSAL into the pending directory.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # 2. Force-push to main/master — ALWAYS blocked, even with an override
     force_push = check_force_push(
         command, rules.get("blocked_bash_patterns_force_push", [])
     )
     if force_push:
+        _audit(input_data, "Bash", command, "block", "force_push", "hard")
         print(
-            "BLOCKED: Force-push to main/master — ALWAYS blocked, no override possible.",
+            "BLOCKED: force-push to main/master — ALWAYS blocked, no override possible.",
             file=sys.stderr,
         )
         sys.exit(2)
 
-    # Override check: If active, skip remaining checks
-    # blocked_patterns + force_push above remain as safety net
-    override = load_override()
-    if override:
-        level = override.get("override_level", 1)
-        label = override.get("label", "LEGACY")
-        source = override.get("_source_file", "?")
+    # 2b. Git-safety checks — ALWAYS blocked, even with an override
+    git_violation = check_git_safety(command, rules.get("blocked_git_ops", []))
+    if git_violation:
+        _audit(input_data, "Bash", command, "block", f"git_safety:{git_violation}", "hard")
         print(
-            f"OVERRIDE ACTIVE: Level {level} ({label}) — "
-            f"Task \"{override.get('task', '?')}\" [{source}] — "
-            f"Checks 3-6 skipped for: {command[:100]}",
+            f"BLOCKED: git-safety violation — pattern: {git_violation}.",
             file=sys.stderr,
         )
-        sys.exit(0)
+        sys.exit(2)
 
-    # 3. Protected paths
+    # 2c. Self-protection of the security system — ALWAYS blocked, no override.
+    #     Closes the Bash gap 'echo x > ~/.claude/hooks/command-guard.py'.
+    self_protect_hit = command_hits_self_protect(command)
+    if self_protect_hit:
+        _audit(input_data, "Bash", command, "block", f"self_protect:{self_protect_hit}", "hard")
+        print(
+            f"BLOCKED: self-protection — write access to '{self_protect_hit}' "
+            f"(security system). No override possible, only the owner via !.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Load the override for the calling context (main session vs. subagent).
+    # blocked_patterns + force_push + git above stay ALWAYS as a safety net —
+    # even at level 3. The level controls ONLY checks 3 and 4.
+    agent_id = input_data.get("agent_id")
+    override = load_override(agent_id)
+    level = override.get("override_level", 0) if override else 0
+    grants = override.get("grants", {}) if override else {}
+    additional_sudo = grants.get("additional_sudo", [])
+    who = f"Agent {agent_id}" if agent_id else "main session"
+
+    if override:
+        print(
+            f"OVERRIDE ACTIVE: level {level} ({override.get('label', '?')}) — "
+            f"{who} — task \"{override.get('task', '?')}\" "
+            f"[{override.get('_source_file', '?')}]",
+            file=sys.stderr,
+        )
+
+    # 3. Protected paths — level-dependent.
+    #    Level 0: no protected path. Level 1: only explicitly granted ones
+    #    (allowed_paths). Level 2+: all protected paths (single ops;
+    #    recursive-system stays hard-blocked via blocked_patterns).
     blocked_path = check_blocked_paths(command, rules.get("blocked_paths_write", []))
     if blocked_path:
-        print(f"BLOCKED: Write access to protected path: {blocked_path}", file=sys.stderr)
-        sys.exit(2)
+        allowed, need = path_decision(blocked_path, level, grants)
+        if not allowed:
+            _audit(input_data, "Bash", command, "block", f"protected_path:{blocked_path}", level)
+            extra = (f"{who} has no valid override (level 0). " if not override
+                     else f"Current override: level {level}. ")
+            print(
+                f"BLOCKED: write access to protected path '{blocked_path}'. "
+                f"{extra}Needed: {need}. "
+                f"ESCALATION: agent asks the coordinator → coordinator decides with the owner "
+                f"about adjusting the override file.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
-    # 4. Sudo check
-    bad_sudo = check_sudo(command, rules.get("allowed_sudo", []))
-    if bad_sudo:
-        print(f"BLOCKED: sudo with disallowed command: {bad_sudo}", file=sys.stderr)
-        sys.exit(2)
+    # 4. Sudo — level-dependent.
+    #    Level 2+ or additional_sudo=="all": all sudo. Otherwise: base allowlist
+    #    plus the commands granted in additional_sudo.
+    if not (additional_sudo == "all" or level >= 2):
+        merged = rules.get("allowed_sudo", []) + (
+            additional_sudo if isinstance(additional_sudo, list) else []
+        )
+        bad_sudo = check_sudo(command, merged)
+        if bad_sudo:
+            _audit(input_data, "Bash", command, "block", f"sudo_not_allowed:{bad_sudo}", level)
+            extra = (f"{who} has no valid override (level 0). " if not override
+                     else f"Current override: level {level}. ")
+            print(
+                f"BLOCKED: sudo with a disallowed command: '{bad_sudo}'. "
+                f"{extra}Needed: level 2 OR an additional_sudo grant for '{bad_sudo}'. "
+                f"ESCALATION: agent asks the coordinator → coordinator decides with the owner "
+                f"about adjusting the override file.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     # 5. Confirmation-required commands — desktop notification
     if check_confirmation(command, rules.get("require_confirmation", [])):
@@ -331,15 +817,16 @@ def main():
         except FileNotFoundError:
             pass  # notify-send not installed — no problem
 
-    # 6. Prompt injection warning (no block, just warning)
+    # 6. Prompt injection warning (no block, just a warning)
     injections = check_injection(command, rules.get("prompt_injection_keywords", []))
     if injections:
         print(
-            f"WARNING: Possible prompt injection detected: {', '.join(injections)}",
+            f"WARNING: possible prompt injection detected: {', '.join(injections)}",
             file=sys.stderr,
         )
 
-    # All checks passed — allow through
+    # All good — allow through
+    _audit(input_data, "Bash", command, "allow", "ok", level)
     sys.exit(0)
 
 

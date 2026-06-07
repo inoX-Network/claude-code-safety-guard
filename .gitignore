@@ -1,4 +1,25 @@
+# Python
 __pycache__/
 *.pyc
-.sudo-overrides/
+
+# Live security rules — only security-rules.example.json belongs in the repo.
+# Your real, machine-specific rules file must never be committed.
 security-rules.json
+
+# Runtime / session artifacts produced by the guard at work — NEVER commit these.
+# They can contain machine-specific paths, task descriptions, agent ids and timestamps.
+.sudo-overrides/
+.sudo-overrides-pending/
+.sudo-overrides-archiv/
+.hook-dev-mode
+.agent-audit/
+actions.jsonl
+
+# Editor / OS / backup noise
+*.bak
+*.bak-*
+*.orig
+.DS_Store
+
+# Local Claude Code session state (if a clone ever lives under ~/.claude)
+session-state.json

@@ -1,29 +1,42 @@
 {
-  "_comment_blocked_patterns": "These patterns are ALWAYS blocked, even with an active override. They represent catastrophic operations that should never be executed by an AI agent.",
+  "_comment_blocked_patterns": "Regex patterns. The pipe | must be escaped (otherwise it acts as an OR and matches false positives). The rm patterns use word boundaries so that /home/... does not match.",
   "blocked_patterns": [
-    "rm -rf /",
-    "rm -rf ~",
-    "rm -rf /*",
-    "rm -rf .",
-    "rm -rf $HOME",
-    "chmod 777",
-    "chmod -R 777",
-    "mkfs",
-    "dd if=.* of=/dev/",
+    "rm\\s+-rf?\\s+/(\\s|$)",
+    "rm\\s+-rf?\\s+~(\\s|$|/\\*)",
+    "rm\\s+-rf?\\s+/\\*",
+    "rm\\s+-rf?\\s+\\.(\\s|$)",
+    "rm\\s+-rf?\\s+\\$HOME(\\s|$|/\\*)",
+    "chmod\\s+777",
+    "chmod\\s+-R\\s+777",
+    "\\bmkfs\\b",
+    "\\bdd\\s+if=.*\\s+of=/dev/(sd|nvme|hd)",
     "> /dev/sd",
-    ":(){ :|:& };:",
-    "curl .* | sh",
-    "curl .* | bash",
-    "wget .* | sh",
-    "wget .* | bash",
+    ":\\(\\)\\{ :\\|:& \\};:",
+    "curl\\s+[^|]*\\|\\s*sh",
+    "curl\\s+[^|]*\\|\\s*bash",
+    "wget\\s+[^|]*\\|\\s*sh",
+    "wget\\s+[^|]*\\|\\s*bash",
     "eval.*base64",
     "python.*-c.*import.*os.*system",
     "chown -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
     "chmod -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
     "chgrp -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)"
   ],
-
-  "_comment_blocked_paths_write": "Write operations to these paths are blocked unless an override is active. Customize for your system.",
+  "_comment_owner_only_commands": "Commands that ONLY the owner may run via ! (which bypasses the guard). AI bash calls are hard-blocked here -- otherwise the AI could grant itself overrides (grant-override) or lift the hook self-protection (hook-dev-mode). Matched as a whole word.",
+  "owner_only_commands": [
+    "grant-override",
+    "hook-dev-mode"
+  ],
+  "_comment_blocked_git_ops": "Git safety checks: never to be bypassed by an override.",
+  "blocked_git_ops": [
+    "git\\s+reset\\s+--hard",
+    "git\\s+push\\s+(-f|--force(-with-lease)?)(\\s|$)",
+    "git\\s+commit.*--no-verify",
+    "git\\s+commit\\s+.*--amend",
+    "git\\s+add\\s+(-A|--all)(\\s|$)",
+    "git\\s+add\\s+\\.(\\s|$)",
+    "git\\s+config\\s+(?!(--get|--list|-l)\\b)"
+  ],
   "blocked_paths_write": [
     "~/.ssh",
     "~/.gnupg",
@@ -38,8 +51,6 @@
     "/sbin",
     "/bin"
   ],
-
-  "_comment_allowed_sudo": "Only these commands are allowed after 'sudo'. Adjust to your workflow. Everything else is blocked unless an override grants it.",
   "allowed_sudo": [
     "apt",
     "apt-get",
@@ -54,8 +65,6 @@
     "tee",
     "cat"
   ],
-
-  "_comment_require_confirmation": "Commands matching these patterns trigger a desktop notification (via notify-send) so you know what's being installed.",
   "require_confirmation": [
     "pip install",
     "pnpm add",
@@ -65,8 +74,6 @@
     "cargo install",
     "go install"
   ],
-
-  "_comment_protected_reads": "Controls which files the Read tool can access. Three tiers: always_allowed (no restriction), require_override_1 (needs Level 1+ override), always_blocked_reads (no override can unlock).",
   "protected_reads": {
     "always_allowed": [
       "~/.ssh/config",
@@ -85,17 +92,20 @@
     "always_blocked_reads": [
       "/etc/shadow",
       "/etc/gshadow"
+    ],
+    "_comment_env_files": ".env files are never accessible via the Read tool. Reading requires an override level 1+.",
+    "env_files_require_override_1": [
+      ".env",
+      ".env.local",
+      ".env.development",
+      ".env.production"
     ]
   },
-
-  "_comment_blocked_bash_patterns_force_push": "Force-push to main/master is ALWAYS blocked, even with an active override. This prevents accidental history rewrites on primary branches.",
   "blocked_bash_patterns_force_push": [
     "git push.*--force.*\\b(main|master)\\b",
     "git push.*-f .*\\b(main|master)\\b",
     "git push --force-with-lease.*\\b(main|master)\\b"
   ],
-
-  "_comment_prompt_injection_keywords": "Commands containing these keywords trigger a warning (not a block). Helps detect prompt injection attempts embedded in file contents or command arguments.",
   "prompt_injection_keywords": [
     "ignore previous",
     "ignore all",

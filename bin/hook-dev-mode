@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""hook-dev-mode -- owner-exclusive switch for the hook development mode.
+
+Part of the Safety Pyramid v2 (option B). Temporarily lifts the command-guard
+self-protection, and ONLY for the hook source files
+(DEV_UNLOCKABLE_PATHS: ~/.claude/hooks, security-rules.json), so the owner can
+allow hook changes by the AI under supervision.
+
+NOT released (still hard-protected even in dev mode): the active override dir,
+settings.json, ~/.claude/bin, CLAUDE.md, rules/.
+
+The AI cannot operate this switch:
+- 'hook-dev-mode' is hard-blocked in security-rules.json as an
+  owner_only_command (AI bash -> exit 2).
+- The flag file ~/.claude/.hook-dev-mode is in SELF_PROTECT.
+Only the owner's ! invocation reaches the script.
+
+Usage:
+    hook-dev-mode on [minutes]   Activate dev mode (default 30 min)
+    hook-dev-mode off            End dev mode
+    hook-dev-mode status         Show current state
+
+Exit: 0 = ok, 1 = error.
+"""
+
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Flag/audit path overridable via env (ONLY for tests -- consistent with
+# command-guard.py, which also reads CLAUDE_HOOK_DEV_FLAG). Without env: real paths.
+FLAG = Path(os.environ.get("CLAUDE_HOOK_DEV_FLAG")
+            or (Path.home() / ".claude" / ".hook-dev-mode"))
+AUDIT_DIR = Path(os.environ.get("CLAUDE_AUDIT_DIR")
+                 or (Path.home() / ".claude" / ".agent-audit"))
+DEFAULT_MINUTES = 30
+MAX_MINUTES = 240
+
+
+def _audit(decision: str, reason: str) -> None:
+    try:
+        AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "actor": "owner-via-!",
+            "tool": "hook-dev-mode",
+            "target": str(FLAG),
+            "decision": decision,
+            "reason": reason,
+            "level": "hard",
+        }
+        with open(AUDIT_DIR / "actions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _status() -> int:
+    if not FLAG.exists():
+        print("Hook dev mode: OFF (no flag file).")
+        return 0
+    try:
+        data = json.loads(FLAG.read_text(encoding="utf-8"))
+        exp = data.get("expires_at")
+        dt = datetime.fromisoformat(exp) if exp else None
+        if dt and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt and dt > datetime.now(timezone.utc):
+            print(f"Hook dev mode: ON until {exp} (reason: {data.get('reason', '-')}).")
+        else:
+            print(f"Hook dev mode: EXPIRED/invalid (expires_at={exp}). Acts as OFF.")
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        print(f"Hook dev mode: flag unreadable ({exc}). Acts as OFF.")
+    return 0
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] not in ("on", "off", "status"):
+        print("Usage: hook-dev-mode on [minutes] | off | status", file=sys.stderr)
+        return 1
+
+    cmd = args[0]
+
+    if cmd == "status":
+        return _status()
+
+    if cmd == "off":
+        if FLAG.exists():
+            try:
+                FLAG.unlink()
+            except OSError as exc:
+                print(f"ERROR: flag could not be removed: {exc}", file=sys.stderr)
+                return 1
+        _audit("dev_mode_off", "ended manually")
+        print("Hook dev mode: OFF.")
+        return 0
+
+    # cmd == "on"
+    minutes = DEFAULT_MINUTES
+    if len(args) >= 2:
+        try:
+            minutes = int(args[1])
+        except ValueError:
+            print(f"ERROR: '{args[1]}' is not a minute count.", file=sys.stderr)
+            return 1
+    if minutes <= 0 or minutes > MAX_MINUTES:
+        print(f"ERROR: minutes must be between 1 and {MAX_MINUTES}.", file=sys.stderr)
+        return 1
+
+    # A second-accurate expires_at via timedelta-free addition would be
+    # imprecise -- so compute directly via timestamp.
+    now = datetime.now(timezone.utc)
+    expires = datetime.fromtimestamp(now.timestamp() + minutes * 60, tz=timezone.utc)
+    data = {
+        "expires_at": expires.isoformat(),
+        "reason": "Hook development by the AI under supervision",
+        "activated_at": now.isoformat(),
+    }
+    try:
+        FLAG.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"ERROR: flag could not be written: {exc}", file=sys.stderr)
+        return 1
+
+    _audit("dev_mode_on", f"minutes={minutes}")
+    print(
+        f"Hook dev mode: ON for {minutes} min (until {expires.isoformat()}).\n"
+        f"Released ONLY: ~/.claude/hooks, security-rules.json.\n"
+        f"Not released (still hard): override dir, settings.json, bin, CLAUDE.md, rules.\n"
+        f"End with: hook-dev-mode off"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

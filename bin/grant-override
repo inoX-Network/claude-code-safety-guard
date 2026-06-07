@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""grant-override -- owner-exclusive approval script for agent overrides.
+
+Part of the Safety Pyramid v2 (approval channel). The AI proposes an override
+as a pending file (~/.claude/.sudo-overrides-pending/); ONLY the owner can
+activate it -- by invoking this script via ! (which bypasses the command-guard).
+
+The AI cannot trigger this script:
+- 'grant-override' is hard-blocked in security-rules.json as an
+  owner_only_command (AI bash -> exit 2).
+- ~/.claude/bin is in SELF_PROTECT (the AI cannot modify the script).
+Only the owner's ! invocation reaches the script at all.
+
+Usage:
+    grant-override <id> [--minutes N] [--confirm LABEL] [--snapshot ID]
+
+  <id>          Filename or agent-id of the pending file (with/without .json,
+                with/without the 'agent-' prefix).
+  --minutes N   Validity duration from now (default 120). Set as expires_at.
+  --confirm     Required from level 2 on: the label of the level ("FULL" or
+                "CRITICAL"). Deliberate friction -- the owner confirms the
+                level explicitly.
+  --snapshot    Required from level 3 on: the snapshot ID (briefing duty).
+
+Exit: 0 = activated, 1 = error/aborted.
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+# Paths are overridable via env (ONLY for tests/self-test -- consistent with
+# command-guard.py). Without env set, the real production paths apply. The AI
+# cannot set this env (it does not call the script anyway, owner_only).
+PENDING_DIR = Path(os.environ.get("CLAUDE_SUDO_PENDING_DIR")
+                   or (Path.home() / ".claude" / ".sudo-overrides-pending"))
+ACTIVE_DIR = Path(os.environ.get("CLAUDE_SUDO_OVERRIDES_DIR")
+                  or (Path.home() / ".claude" / ".sudo-overrides"))
+AUDIT_DIR = Path(os.environ.get("CLAUDE_AUDIT_DIR")
+                 or (Path.home() / ".claude" / ".agent-audit"))
+
+LABELS = {1: "EXTENDED", 2: "FULL", 3: "CRITICAL"}
+
+
+def _audit(actor: str, target: str, decision: str, reason: str, level) -> None:
+    """Writes an audit line -- approvals are traceable (who/when/what)."""
+    try:
+        AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "actor": actor,
+            "tool": "grant-override",
+            "target": target,
+            "decision": decision,
+            "reason": reason,
+            "level": level,
+        }
+        with open(AUDIT_DIR / "actions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _resolve_pending(arg: str) -> Path | None:
+    """Finds the pending file from the argument (tolerant of spellings)."""
+    candidates = [arg, f"{arg}.json", f"agent-{arg}.json"]
+    if arg.startswith("agent-"):
+        candidates.append(f"{arg}.json")
+    for name in candidates:
+        p = PENDING_DIR / name
+        if p.is_file():
+            return p
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="grant-override")
+    parser.add_argument("id", help="pending file (name or agent-id)")
+    parser.add_argument("--minutes", type=int, default=120)
+    parser.add_argument("--confirm", default=None)
+    parser.add_argument("--snapshot", default=None)
+    args = parser.parse_args()
+
+    if args.minutes <= 0 or args.minutes > 24 * 60:
+        print("ERROR: --minutes must be between 1 and 1440.", file=sys.stderr)
+        return 1
+
+    pending = _resolve_pending(args.id)
+    if pending is None:
+        print(f"ERROR: No pending file for '{args.id}' in {PENDING_DIR}.", file=sys.stderr)
+        return 1
+
+    try:
+        data = json.loads(pending.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"ERROR: pending file not readable: {exc}", file=sys.stderr)
+        return 1
+
+    if not isinstance(data, dict):
+        print("ERROR: pending file is not a JSON object.", file=sys.stderr)
+        return 1
+
+    level = data.get("override_level")
+    if not (isinstance(level, int) and not isinstance(level, bool) and level in (1, 2, 3)):
+        print(f"ERROR: invalid override_level: {level!r} (allowed: 1, 2, 3).", file=sys.stderr)
+        return 1
+
+    task = data.get("task")
+    if not task or not isinstance(task, str):
+        print("ERROR: pending file has no 'task' field.", file=sys.stderr)
+        return 1
+
+    # Tiered friction: levels 2/3 require an explicit confirmation.
+    expected_label = LABELS[level]
+    if level >= 2:
+        if args.confirm != expected_label:
+            print(
+                f"BRIEFING -- level {level} ({expected_label}): task \"{task}\".\n"
+                f"Grants: {json.dumps(data.get('grants', {}), ensure_ascii=False)}\n"
+                f"To activate: --confirm {expected_label}"
+                + (" --snapshot <SNAPSHOT-ID>" if level >= 3 else ""),
+                file=sys.stderr,
+            )
+            return 1
+    if level >= 3 and not args.snapshot:
+        print("ERROR: level 3 requires --snapshot <SNAPSHOT-ID> (snapshot duty).", file=sys.stderr)
+        return 1
+
+    # Activate: set confirmed + expires_at, write into the active directory.
+    now = datetime.now(timezone.utc)
+    data["confirmed"] = True
+    data["label"] = expected_label
+    data["expires_at"] = (now + timedelta(minutes=args.minutes)).isoformat()
+    data["granted_at"] = now.isoformat()
+    data["granted_by"] = "owner-via-!"
+    if args.snapshot:
+        data["snapshot_id"] = args.snapshot
+
+    ACTIVE_DIR.mkdir(parents=True, exist_ok=True)
+    target = ACTIVE_DIR / pending.name
+    try:
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        pending.unlink()
+    except OSError as exc:
+        print(f"ERROR while activating: {exc}", file=sys.stderr)
+        _audit("owner-via-!", str(target), "error", str(exc), level)
+        return 1
+
+    _audit("owner-via-!", str(target), "activated", f"task={task}; minutes={args.minutes}", level)
+    print(
+        f"OK: override level {level} ({expected_label}) activated for \"{task}\".\n"
+        f"Valid until {data['expires_at']} ({args.minutes} min). File: {target}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
