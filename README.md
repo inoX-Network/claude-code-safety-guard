@@ -302,7 +302,7 @@ A: When its `expires_at` passes, or when the owner removes the file via `! rm`. 
 A: Rewriting history on a primary branch is almost always a mistake when done by an AI agent. Do it manually outside Claude Code if you truly need to.
 
 **Q: Can the AI read my private SSH key or `.env`?**
-A: Not without an explicit level-1+ override. Public keys (`*.pub`) and `~/.ssh/config` are always allowed.
+A: Not without an explicit level-1+ override. Public keys (`*.pub`) and `~/.ssh/config` are always allowed. This now also covers the Bash path — `cat`/`base64`/`cp`-source/`dd if=`/`xxd`/`head` on a protected path are blocked, not just the Read tool. The Bash check resolves **direct** path references; variable indirection (`X=key; cat $X`) and interpreter string literals (`python -c "open(...)"`) stay outside its scope — the same inherent limit as `blocked_patterns`. It's defense-in-depth covering the realistic attack path, not a watertight guarantee.
 
 **Q: Does prompt-injection detection block anything?**
 A: No — it only writes a warning to stderr. It's a heads-up, not a hard block.

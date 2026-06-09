@@ -404,7 +404,7 @@ def check_injection(command: str, keywords: list[str]) -> list[str]:
     return found
 
 
-def check_read_protection(file_path: str, rules: dict) -> tuple[bool, str]:
+def check_read_protection(file_path: str, rules: dict, agent_id: str | None = None) -> tuple[bool, str]:
     """Check whether a Read access to protected files is allowed.
 
     Returns: (blocked, reason)
@@ -437,7 +437,7 @@ def check_read_protection(file_path: str, rules: dict) -> tuple[bool, str]:
     for pattern in protected.get("require_override_1", []):
         pat_expanded = expand_path(pattern)
         if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
-            override = load_override()
+            override = load_override(agent_id)
             if override and override.get("override_level", 0) >= 1:
                 level = override.get("override_level", 1)
                 print(
@@ -565,6 +565,52 @@ def _audit(input_data: dict, tool: str, target: str, decision: str,
         pass  # audit must never break the guard
 
 
+def command_hits_protected_read(command: str, rules: dict,
+                                agent_id: str | None) -> tuple[bool, str]:
+    """Scan a Bash command token-wise for reads of protected files.
+
+    Closes the gap that credential-/.env-read protection only covered the Read
+    tool. A protected-read path is dangerous regardless of the command touching
+    it (cat, base64, cp-source, dd if=, xxd, head, ...). Reuses
+    check_read_protection and check_env_file_read so the tier logic lives in ONE
+    place (no second source of truth, no reader-tool enumeration arms race).
+
+    fail-closed: with no protected_reads in the rules it cleanly returns
+    (False, ""). always_blocked stays hard via check_read_protection anyway.
+    """
+    protected = rules.get("protected_reads", {})
+    if not protected:
+        return False, ""
+
+    env_patterns = protected.get("env_files_require_override_1", [])
+
+    # Strip standard redirects (analogous to check_blocked_paths).
+    cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
+    cleaned = re.sub(r'\d*>&\d+', '', cleaned)
+
+    for raw in cleaned.split():
+        tok = raw.strip("'\"").lstrip("<>|&;()")
+        tok = re.sub(r'^[a-zA-Z_]+=', '', tok)   # strip if=/of=/VAR=
+        if not tok or tok.startswith("-"):
+            continue
+
+        # 1. .env protection: basename-based, also catches a bare ".env".
+        if env_patterns and check_env_file_read(tok, env_patterns):
+            override = load_override(agent_id)
+            if not override or override.get("override_level", 0) < 1:
+                return True, f"reading the .env file {tok} requires override level 1+"
+            continue
+
+        # 2. Credential protection: only for path-like tokens.
+        if "/" not in tok and not tok.startswith("~"):
+            continue
+        blocked, reason = check_read_protection(tok, rules, agent_id)
+        if blocked:
+            return True, reason
+
+    return False, ""
+
+
 def main():
     """Main function — reads tool input from stdin, checks against rules."""
     try:
@@ -580,6 +626,7 @@ def main():
         tool_input = input_data.get("tool_input", {})
         file_path = tool_input.get("file_path", "")
         if file_path:
+            agent_id = input_data.get("agent_id")
             rules = load_rules()
             if rules:
                 # 1. .env protection: override level 1+ required
@@ -587,7 +634,7 @@ def main():
                     "env_files_require_override_1", []
                 )
                 if env_patterns and check_env_file_read(file_path, env_patterns):
-                    override = load_override()
+                    override = load_override(agent_id)
                     if not override or override.get("override_level", 0) < 1:
                         _audit(input_data, "Read", file_path, "block", "env_protected", 0)
                         print(
@@ -597,7 +644,7 @@ def main():
                         )
                         sys.exit(2)
                 # 2. Further credential checks
-                blocked, reason = check_read_protection(file_path, rules)
+                blocked, reason = check_read_protection(file_path, rules, agent_id)
                 if blocked:
                     _audit(input_data, "Read", file_path, "block", "read_protected", 0)
                     print(reason, file=sys.stderr)
@@ -745,10 +792,22 @@ def main():
         )
         sys.exit(2)
 
+    # 2d. Credential-/.env-read protection on the Bash side (closes the Read-tool gap).
+    #     Runs BEFORE the override-dependent path/sudo logic: check_read_protection
+    #     regulates its own override level (always_blocked is hard, require_override_1
+    #     respects level 1+), so the Bash path mirrors the Read tool — a protected
+    #     file is dangerous no matter which command (cat/base64/cp-source/dd if=/...)
+    #     touches it.
+    agent_id = input_data.get("agent_id")
+    read_blocked, read_reason = command_hits_protected_read(command, rules, agent_id)
+    if read_blocked:
+        _audit(input_data, "Bash", command, "block", "protected_read", "hard")
+        print(f"BLOCKED: {read_reason} (Bash read path).", file=sys.stderr)
+        sys.exit(2)
+
     # Load the override for the calling context (main session vs. subagent).
     # blocked_patterns + force_push + git above stay ALWAYS as a safety net —
     # even at level 3. The level controls ONLY checks 3 and 4.
-    agent_id = input_data.get("agent_id")
     override = load_override(agent_id)
     level = override.get("override_level", 0) if override else 0
     grants = override.get("grants", {}) if override else {}
