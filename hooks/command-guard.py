@@ -67,6 +67,19 @@ WRITE_INDICATORS = [
     "sed -i", "truncate ", "dd ", "install ",
 ]
 
+# Commands that read a DIRECTORY's contents recursively. Handing one of these a
+# directory that CONTAINS protected key files (e.g. `tar ~/.ssh`) exfiltrates
+# the keys even though no individual key path is named — check_read_protection
+# only matches the key FILES, not their parent dir. Metadata-only commands
+# (ls, stat, find, du, file, tree) are DELIBERATELY absent: listing a protected
+# directory stays allowed, only reading its contents out is gated. Compared by
+# basename, so /usr/bin/tar matches too.
+RECURSIVE_READ_CMDS = {
+    "tar", "zip", "7z", "7za", "rsync", "scp", "sftp",
+    "gpg", "gzip", "bzip2", "xz", "cpio", "pax", "cp",
+    "grep", "egrep", "fgrep", "rg", "ag",
+}
+
 # Path boundary for the Bash self-protection detection: the protected path must
 # be followed by a separator (/, whitespace, quote, redirect, paren) or the end
 # of the string. This prevents '~/.claude/.sudo-overrides' from wrongly matching
@@ -84,8 +97,16 @@ def load_rules() -> dict:
 
 
 def expand_path(path: str) -> str:
-    """Expand ~ to $HOME."""
-    return path.replace("~", str(Path.home()))
+    """Expand ~ and $HOME/${HOME} to the home directory.
+
+    $HOME/${HOME} are resolved too so a directory/read vector like
+    `tar "$HOME/.ssh"` is caught the same as `tar ~/.ssh` — the shell would
+    expand it before execution, but the hook sees the literal string first.
+    User-defined variables (`D=~/.ssh; ... $D`) stay out of scope (the hook
+    does not run a shell), same inherent limit as blocked_patterns.
+    """
+    home = str(Path.home())
+    return path.replace("~", home).replace("${HOME}", home).replace("$HOME", home)
 
 
 _REGEX_METACHARS = re.compile(r"[.*+?^${}()|\[\]\\]")
@@ -128,7 +149,7 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
         return None
 
     # Check both variants: original (~) and expanded (/home/user)
-    cleaned_expanded = cleaned.replace("~", str(Path.home()))
+    cleaned_expanded = expand_path(cleaned)
     for path in paths:
         expanded = expand_path(path)
         if path in cleaned or expanded in cleaned or expanded in cleaned_expanded:
@@ -357,7 +378,7 @@ def command_hits_self_protect(command: str) -> str | None:
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
     if not any(indicator in cleaned for indicator in WRITE_INDICATORS):
         return None
-    cleaned_expanded = cleaned.replace("~", str(Path.home()))
+    cleaned_expanded = expand_path(cleaned)
     for prot in SELF_PROTECT_PATHS:
         p = re.escape(expand_path(prot).rstrip("/"))
         if re.search(p + _PATH_BOUNDARY, cleaned_expanded) and not _dev_unlocked(prot):
@@ -412,7 +433,7 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
     - (True, reason) = block with error message
     """
     protected = rules.get("protected_reads", {})
-    expanded = file_path.replace("~", str(Path.home()))
+    expanded = expand_path(file_path)
 
     # 1. Always blocked (no override helps)
     for pattern in protected.get("always_blocked_reads", []):
@@ -566,7 +587,7 @@ def _audit(input_data: dict, tool: str, target: str, decision: str,
 
 
 def command_hits_protected_read(command: str, rules: dict,
-                                agent_id: str | None) -> tuple[bool, str]:
+                                agent_id: str | None) -> tuple[bool, str, bool]:
     """Scan a Bash command token-wise for reads of protected files.
 
     Closes the gap that credential-/.env-read protection only covered the Read
@@ -575,12 +596,16 @@ def command_hits_protected_read(command: str, rules: dict,
     check_read_protection and check_env_file_read so the tier logic lives in ONE
     place (no second source of truth, no reader-tool enumeration arms race).
 
-    fail-closed: with no protected_reads in the rules it cleanly returns
-    (False, ""). always_blocked stays hard via check_read_protection anyway.
+    Returns (blocked, reason, overridable). 'overridable' is True when an
+    override level 1+ would lift the block (credentials/.env/key dirs) and False
+    for always_blocked system files (/etc/shadow) — the caller uses it to decide
+    whether to print the escalation hint (which would be misleading for hard
+    blocks). fail-closed: with no protected_reads in the rules it cleanly
+    returns (False, "", False).
     """
     protected = rules.get("protected_reads", {})
     if not protected:
-        return False, ""
+        return False, "", False
 
     env_patterns = protected.get("env_files_require_override_1", [])
 
@@ -588,27 +613,59 @@ def command_hits_protected_read(command: str, rules: dict,
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
 
+    # Normalise tokens once (quotes, leading shell metachars, VAR=/if= prefixes).
+    tokens = []
     for raw in cleaned.split():
         tok = raw.strip("'\"").lstrip("<>|&;()")
         tok = re.sub(r'^[a-zA-Z_]+=', '', tok)   # strip if=/of=/VAR=
-        if not tok or tok.startswith("-"):
+        if tok:
+            tokens.append(tok)
+
+    # Directory-exfiltration vector (tar/zip/rsync ~/.ssh): only relevant when a
+    # recursive-read command is present. Pre-compute the protected key dirs so a
+    # plain `ls ~/.ssh` (metadata only, no such command) stays allowed.
+    req1_dirs = []
+    if any(os.path.basename(t) in RECURSIVE_READ_CMDS for t in tokens):
+        req1_dirs = [expand_path(p).rstrip("/") for p in protected.get("require_override_1", [])]
+
+    for tok in tokens:
+        if tok.startswith("-"):
             continue
 
         # 1. .env protection: basename-based, also catches a bare ".env".
         if env_patterns and check_env_file_read(tok, env_patterns):
             override = load_override(agent_id)
             if not override or override.get("override_level", 0) < 1:
-                return True, f"reading the .env file {tok} requires override level 1+"
+                return True, f"reading the .env file {tok} requires override level 1+", True
             continue
 
         # 2. Credential protection: only for path-like tokens.
         if "/" not in tok and not tok.startswith("~"):
             continue
+
+        # 2a. Recursive read of a DIRECTORY that contains protected keys
+        #     (e.g. `tar ~/.ssh` grabs ~/.ssh/id_*). The token is an ancestor of
+        #     (or equal to) a require_override_1 path — same override gate as
+        #     reading the key file directly.
+        if req1_dirs:
+            tok_exp = expand_path(tok).rstrip("/")
+            if any(d == tok_exp or d.startswith(tok_exp + "/") for d in req1_dirs):
+                override = load_override(agent_id)
+                if not override or override.get("override_level", 0) < 1:
+                    return True, (
+                        f"recursively reading {tok} (contains protected "
+                        f"credentials) requires override level 1+"
+                    ), True
+                continue
+
         blocked, reason = check_read_protection(tok, rules, agent_id)
         if blocked:
-            return True, reason
+            # always_blocked system files start with "ALWAYS BLOCKED" and no
+            # override lifts them -> not overridable (no escalation hint).
+            overridable = not reason.startswith("ALWAYS BLOCKED")
+            return True, reason, overridable
 
-    return False, ""
+    return False, "", False
 
 
 def main():
@@ -799,10 +856,30 @@ def main():
     #     file is dangerous no matter which command (cat/base64/cp-source/dd if=/...)
     #     touches it.
     agent_id = input_data.get("agent_id")
-    read_blocked, read_reason = command_hits_protected_read(command, rules, agent_id)
+    read_blocked, read_reason, read_overridable = command_hits_protected_read(
+        command, rules, agent_id
+    )
     if read_blocked:
-        _audit(input_data, "Bash", command, "block", "protected_read", "hard")
-        print(f"BLOCKED: {read_reason} (Bash read path).", file=sys.stderr)
+        # Some reasons already carry a "BLOCKED: " prefix (check_read_protection);
+        # strip it so the single prefix below does not double up.
+        reason_text = read_reason[9:] if read_reason.startswith("BLOCKED: ") else read_reason
+        if read_overridable:
+            # Mirror the path/sudo blocks: state who/level and the escalation path.
+            override = load_override(agent_id)
+            level = override.get("override_level", 0) if override else 0
+            who = f"Agent {agent_id}" if agent_id else "main session"
+            extra = (f"{who} has no valid override (level 0). " if not override
+                     else f"Current override: level {level}. ")
+            _audit(input_data, "Bash", command, "block", "protected_read", level)
+            print(
+                f"BLOCKED: {reason_text} (Bash read path). {extra}"
+                f"ESCALATION: agent asks the coordinator → coordinator decides with the owner "
+                f"about adjusting the override file.",
+                file=sys.stderr,
+            )
+        else:
+            _audit(input_data, "Bash", command, "block", "protected_read", "hard")
+            print(f"BLOCKED: {reason_text} (Bash read path).", file=sys.stderr)
         sys.exit(2)
 
     # Load the override for the calling context (main session vs. subagent).
