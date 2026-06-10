@@ -67,6 +67,19 @@ WRITE_INDICATORS = [
     "sed -i", "truncate ", "dd ", "install ",
 ]
 
+# Commands that read a DIRECTORY's contents recursively. Handing one of these a
+# directory that CONTAINS protected key files (e.g. `tar ~/.ssh`) exfiltrates
+# the keys even though no individual key path is named — check_read_protection
+# only matches the key FILES, not their parent dir. Metadata-only commands
+# (ls, stat, find, du, file, tree) are DELIBERATELY absent: listing a protected
+# directory stays allowed, only reading its contents out is gated. Compared by
+# basename, so /usr/bin/tar matches too.
+RECURSIVE_READ_CMDS = {
+    "tar", "zip", "7z", "7za", "rsync", "scp", "sftp",
+    "gpg", "gzip", "bzip2", "xz", "cpio", "pax", "cp",
+    "grep", "egrep", "fgrep", "rg", "ag",
+}
+
 # Path boundary for the Bash self-protection detection: the protected path must
 # be followed by a separator (/, whitespace, quote, redirect, paren) or the end
 # of the string. This prevents '~/.claude/.sudo-overrides' from wrongly matching
@@ -588,10 +601,23 @@ def command_hits_protected_read(command: str, rules: dict,
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
 
+    # Normalise tokens once (quotes, leading shell metachars, VAR=/if= prefixes).
+    tokens = []
     for raw in cleaned.split():
         tok = raw.strip("'\"").lstrip("<>|&;()")
         tok = re.sub(r'^[a-zA-Z_]+=', '', tok)   # strip if=/of=/VAR=
-        if not tok or tok.startswith("-"):
+        if tok:
+            tokens.append(tok)
+
+    # Directory-exfiltration vector (tar/zip/rsync ~/.ssh): only relevant when a
+    # recursive-read command is present. Pre-compute the protected key dirs so a
+    # plain `ls ~/.ssh` (metadata only, no such command) stays allowed.
+    req1_dirs = []
+    if any(os.path.basename(t) in RECURSIVE_READ_CMDS for t in tokens):
+        req1_dirs = [expand_path(p).rstrip("/") for p in protected.get("require_override_1", [])]
+
+    for tok in tokens:
+        if tok.startswith("-"):
             continue
 
         # 1. .env protection: basename-based, also catches a bare ".env".
@@ -604,6 +630,22 @@ def command_hits_protected_read(command: str, rules: dict,
         # 2. Credential protection: only for path-like tokens.
         if "/" not in tok and not tok.startswith("~"):
             continue
+
+        # 2a. Recursive read of a DIRECTORY that contains protected keys
+        #     (e.g. `tar ~/.ssh` grabs ~/.ssh/id_*). The token is an ancestor of
+        #     (or equal to) a require_override_1 path — same override gate as
+        #     reading the key file directly.
+        if req1_dirs:
+            tok_exp = expand_path(tok).rstrip("/")
+            if any(d == tok_exp or d.startswith(tok_exp + "/") for d in req1_dirs):
+                override = load_override(agent_id)
+                if not override or override.get("override_level", 0) < 1:
+                    return True, (
+                        f"recursively reading {tok} (contains protected "
+                        f"credentials) requires override level 1+"
+                    )
+                continue
+
         blocked, reason = check_read_protection(tok, rules, agent_id)
         if blocked:
             return True, reason
