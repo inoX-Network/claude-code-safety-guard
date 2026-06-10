@@ -579,7 +579,7 @@ def _audit(input_data: dict, tool: str, target: str, decision: str,
 
 
 def command_hits_protected_read(command: str, rules: dict,
-                                agent_id: str | None) -> tuple[bool, str]:
+                                agent_id: str | None) -> tuple[bool, str, bool]:
     """Scan a Bash command token-wise for reads of protected files.
 
     Closes the gap that credential-/.env-read protection only covered the Read
@@ -588,12 +588,16 @@ def command_hits_protected_read(command: str, rules: dict,
     check_read_protection and check_env_file_read so the tier logic lives in ONE
     place (no second source of truth, no reader-tool enumeration arms race).
 
-    fail-closed: with no protected_reads in the rules it cleanly returns
-    (False, ""). always_blocked stays hard via check_read_protection anyway.
+    Returns (blocked, reason, overridable). 'overridable' is True when an
+    override level 1+ would lift the block (credentials/.env/key dirs) and False
+    for always_blocked system files (/etc/shadow) — the caller uses it to decide
+    whether to print the escalation hint (which would be misleading for hard
+    blocks). fail-closed: with no protected_reads in the rules it cleanly
+    returns (False, "", False).
     """
     protected = rules.get("protected_reads", {})
     if not protected:
-        return False, ""
+        return False, "", False
 
     env_patterns = protected.get("env_files_require_override_1", [])
 
@@ -624,7 +628,7 @@ def command_hits_protected_read(command: str, rules: dict,
         if env_patterns and check_env_file_read(tok, env_patterns):
             override = load_override(agent_id)
             if not override or override.get("override_level", 0) < 1:
-                return True, f"reading the .env file {tok} requires override level 1+"
+                return True, f"reading the .env file {tok} requires override level 1+", True
             continue
 
         # 2. Credential protection: only for path-like tokens.
@@ -643,14 +647,17 @@ def command_hits_protected_read(command: str, rules: dict,
                     return True, (
                         f"recursively reading {tok} (contains protected "
                         f"credentials) requires override level 1+"
-                    )
+                    ), True
                 continue
 
         blocked, reason = check_read_protection(tok, rules, agent_id)
         if blocked:
-            return True, reason
+            # always_blocked system files start with "ALWAYS BLOCKED" and no
+            # override lifts them -> not overridable (no escalation hint).
+            overridable = not reason.startswith("ALWAYS BLOCKED")
+            return True, reason, overridable
 
-    return False, ""
+    return False, "", False
 
 
 def main():
@@ -841,10 +848,30 @@ def main():
     #     file is dangerous no matter which command (cat/base64/cp-source/dd if=/...)
     #     touches it.
     agent_id = input_data.get("agent_id")
-    read_blocked, read_reason = command_hits_protected_read(command, rules, agent_id)
+    read_blocked, read_reason, read_overridable = command_hits_protected_read(
+        command, rules, agent_id
+    )
     if read_blocked:
-        _audit(input_data, "Bash", command, "block", "protected_read", "hard")
-        print(f"BLOCKED: {read_reason} (Bash read path).", file=sys.stderr)
+        # Some reasons already carry a "BLOCKED: " prefix (check_read_protection);
+        # strip it so the single prefix below does not double up.
+        reason_text = read_reason[9:] if read_reason.startswith("BLOCKED: ") else read_reason
+        if read_overridable:
+            # Mirror the path/sudo blocks: state who/level and the escalation path.
+            override = load_override(agent_id)
+            level = override.get("override_level", 0) if override else 0
+            who = f"Agent {agent_id}" if agent_id else "main session"
+            extra = (f"{who} has no valid override (level 0). " if not override
+                     else f"Current override: level {level}. ")
+            _audit(input_data, "Bash", command, "block", "protected_read", level)
+            print(
+                f"BLOCKED: {reason_text} (Bash read path). {extra}"
+                f"ESCALATION: agent asks the coordinator → coordinator decides with the owner "
+                f"about adjusting the override file.",
+                file=sys.stderr,
+            )
+        else:
+            _audit(input_data, "Bash", command, "block", "protected_read", "hard")
+            print(f"BLOCKED: {reason_text} (Bash read path).", file=sys.stderr)
         sys.exit(2)
 
     # Load the override for the calling context (main session vs. subagent).
