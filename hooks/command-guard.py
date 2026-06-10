@@ -97,8 +97,16 @@ def load_rules() -> dict:
 
 
 def expand_path(path: str) -> str:
-    """Expand ~ to $HOME."""
-    return path.replace("~", str(Path.home()))
+    """Expand ~ and $HOME/${HOME} to the home directory.
+
+    $HOME/${HOME} are resolved too so a directory/read vector like
+    `tar "$HOME/.ssh"` is caught the same as `tar ~/.ssh` — the shell would
+    expand it before execution, but the hook sees the literal string first.
+    User-defined variables (`D=~/.ssh; ... $D`) stay out of scope (the hook
+    does not run a shell), same inherent limit as blocked_patterns.
+    """
+    home = str(Path.home())
+    return path.replace("~", home).replace("${HOME}", home).replace("$HOME", home)
 
 
 _REGEX_METACHARS = re.compile(r"[.*+?^${}()|\[\]\\]")
@@ -141,7 +149,7 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
         return None
 
     # Check both variants: original (~) and expanded (/home/user)
-    cleaned_expanded = cleaned.replace("~", str(Path.home()))
+    cleaned_expanded = expand_path(cleaned)
     for path in paths:
         expanded = expand_path(path)
         if path in cleaned or expanded in cleaned or expanded in cleaned_expanded:
@@ -370,7 +378,7 @@ def command_hits_self_protect(command: str) -> str | None:
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
     if not any(indicator in cleaned for indicator in WRITE_INDICATORS):
         return None
-    cleaned_expanded = cleaned.replace("~", str(Path.home()))
+    cleaned_expanded = expand_path(cleaned)
     for prot in SELF_PROTECT_PATHS:
         p = re.escape(expand_path(prot).rstrip("/"))
         if re.search(p + _PATH_BOUNDARY, cleaned_expanded) and not _dev_unlocked(prot):
@@ -425,7 +433,7 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
     - (True, reason) = block with error message
     """
     protected = rules.get("protected_reads", {})
-    expanded = file_path.replace("~", str(Path.home()))
+    expanded = expand_path(file_path)
 
     # 1. Always blocked (no override helps)
     for pattern in protected.get("always_blocked_reads", []):

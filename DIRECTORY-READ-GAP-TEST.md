@@ -134,11 +134,13 @@ in `tests/test_command_guard.py`.
 
 ---
 
-## 9. Known limits (unchanged, honestly documented)
+## 9. Known limits (honestly documented)
 
-Out of scope — as already the case for `blocked_patterns` and the single-file
-reader — remain **variable indirection** (`D=~/.ssh; tar czf x $D`, unless the
-token itself contains the path string) and **interpreter string literals**
-(`python -c "import tarfile; ..."`). This is defense-in-depth against the
-realistic attack path, not a watertight guarantee. `ls`/`find`/`stat` on a
-protected directory deliberately stay allowed (metadata only).
+`$HOME` and `${HOME}` ARE resolved (the hook expands them like `~`), so
+`tar "$HOME/.ssh"` is blocked too. Out of scope — as already the case for
+`blocked_patterns` and the single-file reader — remain **user-defined variable
+indirection** (`D=~/.ssh; tar czf x $D`, unless the token itself contains the
+path string) and **interpreter string literals** (`python -c "import tarfile;
+..."`). This is defense-in-depth against the realistic attack path, not a
+watertight guarantee. `ls`/`find`/`stat` on a protected directory deliberately
+stay allowed (metadata only).

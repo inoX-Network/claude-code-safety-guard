@@ -372,6 +372,16 @@ CASES = [
     ("READ/Bash: subagent no-inheritance, tar ~/.ssh, coordinator level1 -> blocked",
      lambda d: write_override(d, "system-test.json", coordinator_override(1)),
      "tar czf /tmp/k.tgz ~/.ssh", AID, 2),
+
+    # === $HOME/${HOME} expansion (the shell would expand these before run) ===
+    ("READ/Bash Level0: cat $HOME/.ssh key -> blocked",
+     lambda d: None, "cat $HOME/.ssh/id_ed25519", None, 2),
+    ("READ/Bash Level0: tar $HOME/.ssh -> blocked (dir via $HOME)",
+     lambda d: None, "tar czf /tmp/k.tgz $HOME/.ssh", None, 2),
+    ("READ/Bash Level0: tar ${HOME}/.ssh -> blocked (dir via braces)",
+     lambda d: None, "tar czf /tmp/k.tgz ${HOME}/.ssh", None, 2),
+    ("READ/Bash: tar $HOME/projects harmless -> allowed",
+     lambda d: None, "tar czf /tmp/p.tgz $HOME/projects/foo", None, 0),
 ]
 
 
