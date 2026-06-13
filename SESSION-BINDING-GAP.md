@@ -100,19 +100,21 @@ call "S2 (other)"  '{"tool_name":"Bash","tool_input":{"command":"sudo htop"},"se
 ## 5. Automated suite
 
 ```bash
-python3 tests/test_command_guard.py   # expected: 112 passed, 0 failed
+python3 tests/test_command_guard.py   # expected: 129 passed, 0 failed
 ```
 
-The new cases live in the `SESSION_CASES` list in `tests/test_command_guard.py`.
+The new cases live in the `SESSION_CASES` and `MCP_SESSION_CASES` lists in
+`tests/test_command_guard.py`.
 
 ---
 
-## 6. Note on the MCP-policy PR
+## 6. Integration with the MCP-policy change
 
-If the MCP-tool-policy change (separate PR) is merged as well, its
-`check_mcp_policy` also calls `load_override` and must thread `session_id` through
-too. That is a one-line follow-up after both are merged — tracked so it does not
-slip through.
+The MCP-tool-policy change (PR #3) is already in `main`. This branch merges `main`
+and threads `session_id` through `check_mcp_policy` as well, so MCP write tools are
+session-bound too (covered by `MCP_SESSION_CASES`). The test harness was hardened
+in the same step: `run_hook` no longer inherits the real `~/.claude/.hook-dev-mode`,
+which previously turned self-protect tests falsely red under an active dev mode.
 
 ## 7. Known limits
 

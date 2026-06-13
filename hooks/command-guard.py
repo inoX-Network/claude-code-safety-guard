@@ -685,6 +685,49 @@ def command_hits_protected_read(command: str, rules: dict,
     return False, "", False
 
 
+def check_mcp_policy(tool_name: str, policy: dict,
+                     agent_id: str | None, session_id: str | None = None) -> tuple[bool, str]:
+    """Decide on an MCP tool call (tool_name form: mcp__<server>__<tool>).
+
+    Default-deny for writes:
+    1. server in gate_servers          -> requires override level 1+ (e.g. postgres: 'query' is ambiguous).
+    2. server in safe_servers          -> allowed (local/harmless, regardless of tool).
+    3. tool verb starts with read verb -> allowed (read-only).
+    4. otherwise (write/unknown)       -> requires override level 1+.
+
+    Override level 1+ lifts cases 1 and 4 (same gate as allowed_paths / .env write protection).
+    Returns: (blocked, reason).
+    """
+    parts = tool_name.split("__", 2)
+    server = parts[1] if len(parts) > 1 else ""
+    tool = parts[2] if len(parts) > 2 else ""
+    gate_servers = policy.get("gate_servers", [])
+    safe_servers = policy.get("safe_servers", [])
+    read_prefixes = policy.get("read_verb_prefixes", [])
+
+    def _gated(why: str) -> tuple[bool, str]:
+        override = load_override(agent_id, session_id)
+        level = override.get("override_level", 0) if override else 0
+        if level >= 1:
+            return False, ""
+        who = f"Agent {agent_id}" if agent_id else "main session"
+        return True, (
+            f"MCP tool '{tool_name}' ({why}) requires override level 1+. "
+            f"{who} has no valid override (level 0). "
+            f"ESCALATION: the agent asks the coordinator -> the coordinator "
+            f"decides with the owner about adjusting the override file."
+        )
+
+    if server in gate_servers:
+        return _gated(f"server '{server}' is classified as sensitive")
+    if server in safe_servers:
+        return False, ""
+    tool_l = tool.lower()
+    if any(tool_l.startswith(p) for p in read_prefixes):
+        return False, ""
+    return _gated("writing or not classified as read-only")
+
+
 def main():
     """Main function — reads tool input from stdin, checks against rules."""
     try:
@@ -800,6 +843,26 @@ def main():
                     sys.exit(2)
 
         _audit(input_data, tool_name, file_path, "allow", "ok")
+        sys.exit(0)
+
+    # MCP tools: protect against unfiltered access (e.g. github writes, postgres).
+    # MCP calls previously bypassed the guard entirely (only Bash/Read/Write/Edit
+    # were hooked). Closes the gap: writing/sensitive MCP tools -> override 1+.
+    if tool_name.startswith("mcp__"):
+        rules = load_rules()
+        policy = rules.get("mcp_policy", {}) if rules else {}
+        # If the policy is entirely absent (older rules.json), no MCP protection ->
+        # pass through, so existing workflows are not unexpectedly broken.
+        if not policy:
+            sys.exit(0)
+        agent_id = input_data.get("agent_id")
+        session_id = input_data.get("session_id")
+        mcp_blocked, mcp_reason = check_mcp_policy(tool_name, policy, agent_id, session_id)
+        if mcp_blocked:
+            _audit(input_data, tool_name, tool_name, "block", "mcp_policy", 0)
+            print(f"BLOCKED: {mcp_reason}", file=sys.stderr)
+            sys.exit(2)
+        _audit(input_data, tool_name, tool_name, "allow", "mcp_ok")
         sys.exit(0)
 
     if tool_name != "Bash":

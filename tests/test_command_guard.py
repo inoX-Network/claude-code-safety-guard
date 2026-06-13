@@ -60,6 +60,9 @@ def run_hook(command: str, agent_id: str | None, overrides_dir: Path,
         else:  # NotebookEdit
             tin["new_source"] = "x"
         tool_input = tin
+    elif tool_name.startswith("mcp__"):
+        # MCP: the guard only inspects the tool_name, tool_input stays empty.
+        tool_input = {}
     else:
         tool_input = {"command": command}
 
@@ -87,6 +90,11 @@ def run_hook(command: str, agent_id: str | None, overrides_dir: Path,
         content = json.dumps(dev_flag) if isinstance(dev_flag, dict) else dev_flag
         flag_path.write_text(content, encoding="utf-8")
         env["CLAUDE_HOOK_DEV_FLAG"] = str(flag_path)
+    else:
+        # Test isolation: do NOT inherit the real ~/.claude/.hook-dev-mode. A
+        # non-existent path makes dev_mode_active() fail closed (False); otherwise
+        # self-protect tests would falsely turn red when dev mode is active.
+        env["CLAUDE_HOOK_DEV_FLAG"] = str(overrides_dir / "_no_dev_flag")
 
     proc = subprocess.run(
         ["python3", str(HOOK)],
@@ -424,6 +432,18 @@ SESSION_CASES = [
 ]
 
 
+# --- MCP x session binding: (name, setup, mcp_tool, agent_id, call_session_id, expected) ---
+# Covers that check_mcp_policy honours the session_id binding too.
+MCP_SESSION_CASES = [
+    ("Session+MCP: L1 bound to S1, github create from S1 -> allowed",
+     lambda d: write_override(d, "system-test.json", coordinator_override(1, session_id="S1")),
+     "mcp__github__create_or_update_file", None, "S1", 0),
+    ("Session+MCP: L1 bound to S1, github create from S2 -> blocked (wrong session)",
+     lambda d: write_override(d, "system-test.json", coordinator_override(1, session_id="S1")),
+     "mcp__github__create_or_update_file", None, "S2", 2),
+]
+
+
 # --- Dev-mode cases: format (name, dev_flag, tool_name, target, agent_id, expected) ---
 # target = command (Bash) resp. file_path (Write/Edit).
 _VALID_DEV = {"expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(), "reason": "test"}
@@ -517,6 +537,59 @@ WRITE_CASES = [
 ]
 
 
+# --- MCP tool cases: format (name, setup, tool_name, agent_id, expected) ---
+# The guard inspects only the MCP tool_name (mcp__<server>__<tool>).
+MCP_CASES = [
+    # Read-only verbs on an unclassified server -> allowed
+    ("MCP github get -> allowed",
+     lambda d: None, "mcp__github__get_file_contents", None, 0),
+    ("MCP github list -> allowed",
+     lambda d: None, "mcp__github__list_commits", None, 0),
+    ("MCP github search -> allowed",
+     lambda d: None, "mcp__github__search_repositories", None, 0),
+
+    # Write verbs (default-deny) at level 0 -> blocked
+    ("MCP github create (write) L0 -> blocked",
+     lambda d: None, "mcp__github__create_or_update_file", None, 2),
+    ("MCP github push (write) L0 -> blocked",
+     lambda d: None, "mcp__github__push_files", None, 2),
+    ("MCP github merge (write) L0 -> blocked",
+     lambda d: None, "mcp__github__merge_pull_request", None, 2),
+
+    # Override level 1 lifts the write gate (main session)
+    ("MCP github create WITH coord-override L1 -> allowed",
+     lambda d: write_override(d, "system-test.json", coordinator_override(1)),
+     "mcp__github__create_or_update_file", None, 0),
+
+    # gate_servers (postgres): always gated, even read-looking verbs
+    ("MCP postgres query (gate_server) L0 -> blocked",
+     lambda d: None, "mcp__postgres__query", None, 2),
+    ("MCP postgres read-looking still gated L0 -> blocked",
+     lambda d: None, "mcp__postgres__list_schemas", None, 2),
+    ("MCP postgres WITH coord-override L1 -> allowed",
+     lambda d: write_override(d, "system-test.json", coordinator_override(1)),
+     "mcp__postgres__query", None, 0),
+
+    # safe_servers: allowed regardless of tool
+    ("MCP safe server context7 -> allowed",
+     lambda d: None, "mcp__context7__query-docs", None, 0),
+
+    # Unknown server: default-deny for writes, read verbs allowed
+    ("MCP unknown server write-verb L0 -> blocked (default-deny)",
+     lambda d: None, "mcp__deploy__push_release", None, 2),
+    ("MCP unknown server read-verb -> allowed",
+     lambda d: None, "mcp__deploy__get_status", None, 0),
+
+    # CORE: no inheritance — a system override does NOT cover a subagent
+    ("MCP CORE: subagent no agent-json, system-L1 present -> github write BLOCKED (no inheritance)",
+     lambda d: write_override(d, "system-test.json", coordinator_override(1)),
+     "mcp__github__create_or_update_file", AID, 2),
+    ("MCP CORE: agent-json L1 for A -> github write allowed for A",
+     lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 1)),
+     "mcp__github__create_or_update_file", AID, 0),
+]
+
+
 def main() -> int:
     passed = failed = 0
     fails = []
@@ -539,6 +612,20 @@ def main() -> int:
             d = Path(tmp)
             setup(d)
             actual = run_hook(command, agent_id, d, session_id=call_session_id)
+            ok = actual == expected
+            if ok:
+                passed += 1
+                print(f"{_G}PASS{_X}  {name}")
+            else:
+                failed += 1
+                fails.append(name)
+                print(f"{_R}FAIL{_X}  {name}  (expected exit {expected}, was {actual})")
+
+    for name, setup, mcp_tool, agent_id, call_session_id, expected in MCP_SESSION_CASES:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            setup(d)
+            actual = run_hook("", agent_id, d, tool_name=mcp_tool, session_id=call_session_id)
             ok = actual == expected
             if ok:
                 passed += 1
@@ -579,7 +666,22 @@ def main() -> int:
                 fails.append(name)
                 print(f"{_R}FAIL{_X}  {name}  (expected exit {expected}, was {actual})")
 
-    total = len(CASES) + len(SESSION_CASES) + len(WRITE_CASES) + len(DEV_CASES)
+    for name, setup, tool_name, agent_id, expected in MCP_CASES:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            setup(d)
+            actual = run_hook("", agent_id, d, tool_name=tool_name)
+            ok = actual == expected
+            if ok:
+                passed += 1
+                print(f"{_G}PASS{_X}  {name}")
+            else:
+                failed += 1
+                fails.append(name)
+                print(f"{_R}FAIL{_X}  {name}  (expected exit {expected}, was {actual})")
+
+    total = (len(CASES) + len(SESSION_CASES) + len(MCP_SESSION_CASES)
+             + len(WRITE_CASES) + len(DEV_CASES) + len(MCP_CASES))
     print(f"\n{'='*60}\n{passed} passed, {failed} failed (of {total})")
     if fails:
         print("FAILED:")
