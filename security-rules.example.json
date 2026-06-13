@@ -118,5 +118,11 @@
     "jailbreak",
     "DAN",
     "do anything now"
-  ]
+  ],
+  "_comment_mcp_policy": "MCP tool protection (tool_name = mcp__<server>__<tool>). gate_servers: always require override 1+. safe_servers: allowed. Otherwise: tool verb starting with a read_verb_prefix = allowed (read-only), everything else requires override 1+ (default-deny for writes). Override level 1+ lifts the gate.",
+  "mcp_policy": {
+    "gate_servers": ["postgres"],
+    "safe_servers": ["context7", "sequential-thinking"],
+    "read_verb_prefixes": ["get", "list", "search", "read", "view", "status", "preview", "describe", "fetch"]
+  }
 }
