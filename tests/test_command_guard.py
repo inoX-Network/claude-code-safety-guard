@@ -33,7 +33,8 @@ _X = "\033[0m" if sys.stdout.isatty() else ""
 
 def run_hook(command: str, agent_id: str | None, overrides_dir: Path,
              tool_name: str = "Bash", file_path: str | None = None,
-             dev_flag: dict | str | None = None) -> int:
+             dev_flag: dict | str | None = None,
+             session_id: str = "test-session-xyz") -> int:
     """Calls the hook with a constructed stdin, returns the exit code.
 
     Bash: `command` is set as tool_input.command.
@@ -41,6 +42,8 @@ def run_hook(command: str, agent_id: str | None, overrides_dir: Path,
     notebook_path depending on the tool; `command` is ignored.
     dev_flag: if set, a dev-mode flag file is created in the temp dir and
     injected via CLAUDE_HOOK_DEV_FLAG (dict -> JSON, str -> raw).
+    session_id: written into the payload's 'session_id' field; defaults to the
+    previous fixed value so all existing cases stay unchanged.
     """
     if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         tin: dict = {}
@@ -64,7 +67,7 @@ def run_hook(command: str, agent_id: str | None, overrides_dir: Path,
         tool_input = {"command": command}
 
     payload = {
-        "session_id": "test-session-xyz",
+        "session_id": session_id,
         "transcript_path": "/tmp/test.jsonl",
         "cwd": str(Path.home()),
         "permission_mode": "default",
@@ -87,6 +90,11 @@ def run_hook(command: str, agent_id: str | None, overrides_dir: Path,
         content = json.dumps(dev_flag) if isinstance(dev_flag, dict) else dev_flag
         flag_path.write_text(content, encoding="utf-8")
         env["CLAUDE_HOOK_DEV_FLAG"] = str(flag_path)
+    else:
+        # Test isolation: do NOT inherit the real ~/.claude/.hook-dev-mode. A
+        # non-existent path makes dev_mode_active() fail closed (False); otherwise
+        # self-protect tests would falsely turn red when dev mode is active.
+        env["CLAUDE_HOOK_DEV_FLAG"] = str(overrides_dir / "_no_dev_flag")
 
     proc = subprocess.run(
         ["python3", str(HOOK)],
@@ -106,8 +114,13 @@ def write_override(overrides_dir: Path, filename: str, data: dict) -> None:
 
 # Reusable override building blocks
 def coordinator_override(level: int, additional_sudo=None, allowed_paths=None,
-                         system_paths=None) -> dict:
-    """System override (main session, NO agent_id)."""
+                         system_paths=None, session_id=None) -> dict:
+    """System override (main session, NO agent_id).
+
+    session_id: if set, written into the override as a 'session_id' field, so
+    the override only applies to that exact session. Omitted by default ->
+    applies across sessions (backward-compatible).
+    """
     o = {
         "override_level": level,
         "label": {1: "EXTENDED", 2: "FULL", 3: "CRITICAL"}.get(level, "X"),
@@ -123,13 +136,17 @@ def coordinator_override(level: int, additional_sudo=None, allowed_paths=None,
             "system_paths": (level >= 2) if system_paths is None else system_paths,
         },
     }
+    if session_id is not None:
+        o["session_id"] = session_id
     return o
 
 
 def agent_override(agent_id: str, level: int, additional_sudo=None,
-                   allowed_paths=None, expires_at=None, system_paths=None) -> dict:
+                   allowed_paths=None, expires_at=None, system_paths=None,
+                   session_id=None) -> dict:
     """Agent-bound override (WITH agent_id)."""
-    o = coordinator_override(level, additional_sudo, allowed_paths, system_paths)
+    o = coordinator_override(level, additional_sudo, allowed_paths, system_paths,
+                             session_id=session_id)
     o["agent_id"] = agent_id
     o["task"] = f"Test agent task for {agent_id}"
     if expires_at is not None:
@@ -388,6 +405,45 @@ CASES = [
 ]
 
 
+# --- Session-binding cases: format (name, setup, command, agent_id, call_session_id, expected) ---
+# An override carrying a session_id only applies to that exact session; an
+# override WITHOUT a session_id field still applies across sessions (compat).
+SESSION_CASES = [
+    ("Session: L1 grant htop bound to S1, call from S1 -> sudo htop allowed",
+     lambda d: write_override(d, "system-test.json",
+                              coordinator_override(1, additional_sudo=["htop"], session_id="S1")),
+     "sudo htop", None, "S1", 0),
+    ("Session: L1 grant htop bound to S1, call from S2 -> sudo htop blocked (wrong session)",
+     lambda d: write_override(d, "system-test.json",
+                              coordinator_override(1, additional_sudo=["htop"], session_id="S1")),
+     "sudo htop", None, "S2", 2),
+    ("Session: L1 grant htop, NO session_id, call any session -> sudo htop allowed (compat)",
+     lambda d: write_override(d, "system-test.json",
+                              coordinator_override(1, additional_sudo=["htop"])),
+     "sudo htop", None, "any-session", 0),
+    ("Session: L1 allowed_paths /etc/fstab bound to S1, call from S1 -> write allowed",
+     lambda d: write_override(d, "system-test.json",
+                              coordinator_override(1, allowed_paths=["/etc/fstab"], session_id="S1")),
+     "echo x > /etc/fstab", None, "S1", 0),
+    ("Session: L1 allowed_paths /etc/fstab bound to S1, call from S2 -> write blocked",
+     lambda d: write_override(d, "system-test.json",
+                              coordinator_override(1, allowed_paths=["/etc/fstab"], session_id="S1")),
+     "echo x > /etc/fstab", None, "S2", 2),
+]
+
+
+# --- MCP x session binding: (name, setup, mcp_tool, agent_id, call_session_id, expected) ---
+# Covers that check_mcp_policy honours the session_id binding too.
+MCP_SESSION_CASES = [
+    ("Session+MCP: L1 bound to S1, github create from S1 -> allowed",
+     lambda d: write_override(d, "system-test.json", coordinator_override(1, session_id="S1")),
+     "mcp__github__create_or_update_file", None, "S1", 0),
+    ("Session+MCP: L1 bound to S1, github create from S2 -> blocked (wrong session)",
+     lambda d: write_override(d, "system-test.json", coordinator_override(1, session_id="S1")),
+     "mcp__github__create_or_update_file", None, "S2", 2),
+]
+
+
 # --- Dev-mode cases: format (name, dev_flag, tool_name, target, agent_id, expected) ---
 # target = command (Bash) resp. file_path (Write/Edit).
 _VALID_DEV = {"expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(), "reason": "test"}
@@ -551,6 +607,34 @@ def main() -> int:
                 fails.append(name)
                 print(f"{_R}FAIL{_X}  {name}  (expected exit {expected}, was {actual})")
 
+    for name, setup, command, agent_id, call_session_id, expected in SESSION_CASES:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            setup(d)
+            actual = run_hook(command, agent_id, d, session_id=call_session_id)
+            ok = actual == expected
+            if ok:
+                passed += 1
+                print(f"{_G}PASS{_X}  {name}")
+            else:
+                failed += 1
+                fails.append(name)
+                print(f"{_R}FAIL{_X}  {name}  (expected exit {expected}, was {actual})")
+
+    for name, setup, mcp_tool, agent_id, call_session_id, expected in MCP_SESSION_CASES:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            setup(d)
+            actual = run_hook("", agent_id, d, tool_name=mcp_tool, session_id=call_session_id)
+            ok = actual == expected
+            if ok:
+                passed += 1
+                print(f"{_G}PASS{_X}  {name}")
+            else:
+                failed += 1
+                fails.append(name)
+                print(f"{_R}FAIL{_X}  {name}  (expected exit {expected}, was {actual})")
+
     for name, setup, tool_name, file_path, agent_id, expected in WRITE_CASES:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
@@ -596,7 +680,8 @@ def main() -> int:
                 fails.append(name)
                 print(f"{_R}FAIL{_X}  {name}  (expected exit {expected}, was {actual})")
 
-    total = len(CASES) + len(WRITE_CASES) + len(DEV_CASES) + len(MCP_CASES)
+    total = (len(CASES) + len(SESSION_CASES) + len(MCP_SESSION_CASES)
+             + len(WRITE_CASES) + len(DEV_CASES) + len(MCP_CASES))
     print(f"\n{'='*60}\n{passed} passed, {failed} failed (of {total})")
     if fails:
         print("FAILED:")

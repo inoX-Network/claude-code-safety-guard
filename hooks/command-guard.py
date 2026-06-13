@@ -185,7 +185,7 @@ def _expiry_ok(data: dict, require_expiry: bool) -> bool:
     return dt > datetime.now(timezone.utc)
 
 
-def load_override(agent_id: str | None = None) -> dict | None:
+def load_override(agent_id: str | None = None, session_id: str | None = None) -> dict | None:
     """Load the matching active override for the calling context.
 
     Directory: $CLAUDE_SUDO_OVERRIDES_DIR (for tests) or
@@ -200,6 +200,12 @@ def load_override(agent_id: str | None = None) -> dict | None:
     sees files WITHOUT agent_id. That was the gap: an agent inherited the
     coordinator's privileges.
 
+    OPTIONAL session_id binding: an override MAY carry a 'session_id' field. If
+    it does, it only applies to the exact session it was issued for — this lets
+    several parallel main sessions (all agent_id=None) hold distinct overrides
+    instead of sharing one. An override WITHOUT a 'session_id' field still
+    applies across sessions (backward-compatible).
+
     Expired overrides (expires_at < now) are ignored.
     With multiple matches, the highest override_level wins.
     blocked_patterns stay ALWAYS active — even at level 3.
@@ -211,8 +217,17 @@ def load_override(agent_id: str | None = None) -> dict | None:
     def _matches_context(data: dict) -> bool:
         file_agent = data.get("agent_id")
         if agent_id is None:
-            return file_agent is None      # main session: only agent-free overrides
-        return file_agent == agent_id      # subagent: only exactly bound ones
+            if file_agent is not None:
+                return False
+        else:
+            if file_agent != agent_id:
+                return False
+        # Optional session_id binding: only when the override carries a session_id.
+        # Without a session_id field -> applies across sessions (backward-compatible).
+        file_session = data.get("session_id")
+        if file_session is not None and file_session != session_id:
+            return False
+        return True
 
     def _valid_level(data: dict) -> bool:
         # override_level MUST be an int in {0,1,2,3}. bool counts as int in
@@ -425,7 +440,8 @@ def check_injection(command: str, keywords: list[str]) -> list[str]:
     return found
 
 
-def check_read_protection(file_path: str, rules: dict, agent_id: str | None = None) -> tuple[bool, str]:
+def check_read_protection(file_path: str, rules: dict, agent_id: str | None = None,
+                          session_id: str | None = None) -> tuple[bool, str]:
     """Check whether a Read access to protected files is allowed.
 
     Returns: (blocked, reason)
@@ -458,7 +474,7 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
     for pattern in protected.get("require_override_1", []):
         pat_expanded = expand_path(pattern)
         if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
-            override = load_override(agent_id)
+            override = load_override(agent_id, session_id)
             if override and override.get("override_level", 0) >= 1:
                 level = override.get("override_level", 1)
                 print(
@@ -587,7 +603,8 @@ def _audit(input_data: dict, tool: str, target: str, decision: str,
 
 
 def command_hits_protected_read(command: str, rules: dict,
-                                agent_id: str | None) -> tuple[bool, str, bool]:
+                                agent_id: str | None,
+                                session_id: str | None = None) -> tuple[bool, str, bool]:
     """Scan a Bash command token-wise for reads of protected files.
 
     Closes the gap that credential-/.env-read protection only covered the Read
@@ -634,7 +651,7 @@ def command_hits_protected_read(command: str, rules: dict,
 
         # 1. .env protection: basename-based, also catches a bare ".env".
         if env_patterns and check_env_file_read(tok, env_patterns):
-            override = load_override(agent_id)
+            override = load_override(agent_id, session_id)
             if not override or override.get("override_level", 0) < 1:
                 return True, f"reading the .env file {tok} requires override level 1+", True
             continue
@@ -650,7 +667,7 @@ def command_hits_protected_read(command: str, rules: dict,
         if req1_dirs:
             tok_exp = expand_path(tok).rstrip("/")
             if any(d == tok_exp or d.startswith(tok_exp + "/") for d in req1_dirs):
-                override = load_override(agent_id)
+                override = load_override(agent_id, session_id)
                 if not override or override.get("override_level", 0) < 1:
                     return True, (
                         f"recursively reading {tok} (contains protected "
@@ -658,7 +675,7 @@ def command_hits_protected_read(command: str, rules: dict,
                     ), True
                 continue
 
-        blocked, reason = check_read_protection(tok, rules, agent_id)
+        blocked, reason = check_read_protection(tok, rules, agent_id, session_id)
         if blocked:
             # always_blocked system files start with "ALWAYS BLOCKED" and no
             # override lifts them -> not overridable (no escalation hint).
@@ -669,7 +686,7 @@ def command_hits_protected_read(command: str, rules: dict,
 
 
 def check_mcp_policy(tool_name: str, policy: dict,
-                     agent_id: str | None) -> tuple[bool, str]:
+                     agent_id: str | None, session_id: str | None = None) -> tuple[bool, str]:
     """Decide on an MCP tool call (tool_name form: mcp__<server>__<tool>).
 
     Default-deny for writes:
@@ -689,7 +706,7 @@ def check_mcp_policy(tool_name: str, policy: dict,
     read_prefixes = policy.get("read_verb_prefixes", [])
 
     def _gated(why: str) -> tuple[bool, str]:
-        override = load_override(agent_id)
+        override = load_override(agent_id, session_id)
         level = override.get("override_level", 0) if override else 0
         if level >= 1:
             return False, ""
@@ -720,6 +737,9 @@ def main():
         sys.exit(0)
 
     tool_name = input_data.get("tool_name", "")
+    # Read the session_id once up front and thread it through every override
+    # lookup, so an override bound to a session_id only applies to that session.
+    session_id = input_data.get("session_id")
 
     # Read tool: credential protection
     if tool_name == "Read":
@@ -734,7 +754,7 @@ def main():
                     "env_files_require_override_1", []
                 )
                 if env_patterns and check_env_file_read(file_path, env_patterns):
-                    override = load_override(agent_id)
+                    override = load_override(agent_id, session_id)
                     if not override or override.get("override_level", 0) < 1:
                         _audit(input_data, "Read", file_path, "block", "env_protected", 0)
                         print(
@@ -744,7 +764,7 @@ def main():
                         )
                         sys.exit(2)
                 # 2. Further credential checks
-                blocked, reason = check_read_protection(file_path, rules, agent_id)
+                blocked, reason = check_read_protection(file_path, rules, agent_id, session_id)
                 if blocked:
                     _audit(input_data, "Read", file_path, "block", "read_protected", 0)
                     print(reason, file=sys.stderr)
@@ -782,7 +802,7 @@ def main():
                 "env_files_require_override_1", []
             )
             if env_patterns and check_env_file_read(file_path, env_patterns):
-                override = load_override(agent_id)
+                override = load_override(agent_id, session_id)
                 if not override or override.get("override_level", 0) < 1:
                     _audit(input_data, tool_name, file_path, "block", "env_write_protected", 0)
                     print(
@@ -803,7 +823,7 @@ def main():
                     blocked_path = p
                     break
             if blocked_path:
-                override = load_override(agent_id)
+                override = load_override(agent_id, session_id)
                 level = override.get("override_level", 0) if override else 0
                 grants = override.get("grants", {}) if override else {}
                 allowed, need = path_decision(blocked_path, level, grants)
@@ -836,7 +856,8 @@ def main():
         if not policy:
             sys.exit(0)
         agent_id = input_data.get("agent_id")
-        mcp_blocked, mcp_reason = check_mcp_policy(tool_name, policy, agent_id)
+        session_id = input_data.get("session_id")
+        mcp_blocked, mcp_reason = check_mcp_policy(tool_name, policy, agent_id, session_id)
         if mcp_blocked:
             _audit(input_data, tool_name, tool_name, "block", "mcp_policy", 0)
             print(f"BLOCKED: {mcp_reason}", file=sys.stderr)
@@ -919,7 +940,7 @@ def main():
     #     touches it.
     agent_id = input_data.get("agent_id")
     read_blocked, read_reason, read_overridable = command_hits_protected_read(
-        command, rules, agent_id
+        command, rules, agent_id, session_id
     )
     if read_blocked:
         # Some reasons already carry a "BLOCKED: " prefix (check_read_protection);
@@ -927,7 +948,7 @@ def main():
         reason_text = read_reason[9:] if read_reason.startswith("BLOCKED: ") else read_reason
         if read_overridable:
             # Mirror the path/sudo blocks: state who/level and the escalation path.
-            override = load_override(agent_id)
+            override = load_override(agent_id, session_id)
             level = override.get("override_level", 0) if override else 0
             who = f"Agent {agent_id}" if agent_id else "main session"
             extra = (f"{who} has no valid override (level 0). " if not override
@@ -947,7 +968,7 @@ def main():
     # Load the override for the calling context (main session vs. subagent).
     # blocked_patterns + force_push + git above stay ALWAYS as a safety net —
     # even at level 3. The level controls ONLY checks 3 and 4.
-    override = load_override(agent_id)
+    override = load_override(agent_id, session_id)
     level = override.get("override_level", 0) if override else 0
     grants = override.get("grants", {}) if override else {}
     additional_sudo = grants.get("additional_sudo", [])
