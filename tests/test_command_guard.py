@@ -405,6 +405,56 @@ CASES = [
 ]
 
 
+# ============================================================================
+# NEW CASES — interpreter / IFS / fail-closed bypass coverage (Audit 2026-06-13)
+# They map 1:1 to the audit findings A/D and their false-positive controls.
+# Finding B (fail-closed) is covered by tests/test_fail_closed.py (it needs a
+# missing rules file, which the CASES runner cannot express).
+# ============================================================================
+NEW_CASES = [
+    # --- A.1: credential read via interpreter inline code (path inside open()) ---
+    ("A1: python3 -c open(id_rsa).read() -> blocked (interpreter read)",
+     lambda d: None,
+     """python3 -c 'print(open("~/.ssh/id_rsa").read())'""", None, 2),
+    ("A1: node -e readFileSync(id_rsa) -> blocked (interpreter read)",
+     lambda d: None,
+     """node -e 'console.log(require("fs").readFileSync("~/.ssh/id_rsa","utf8"))'""", None, 2),
+    ("A1: level1 override lifts interpreter credential read -> allowed",
+     lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 1)),
+     """python3 -c 'print(open("~/.ssh/id_rsa").read())'""", AID, 0),
+
+    # --- A.2: self-protection write via interpreter (no shell write indicator) ---
+    ("A2: python3 -c open(hook,'w') -> blocked (self-protect, no override)",
+     lambda d: None,
+     """python3 -c 'open("~/.claude/hooks/command-guard.py","w").write("x")'""", None, 2),
+    ("A2: level3 override does NOT lift interpreter self-protect write",
+     lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 3)),
+     """python3 -c 'open("~/.claude/hooks/command-guard.py","w").write("x")'""", AID, 2),
+
+    # --- A.3: deleting the rules file via interpreter -> blocked (self-protect) ---
+    ("A3: python3 -c os.remove(rules.json) -> blocked (self-protect)",
+     lambda d: None,
+     """python3 -c 'import os;os.remove("~/.claude/safety-guard/security-rules.json")'""", None, 2),
+
+    # --- D: ${IFS} word-split obfuscation -> normalised, then blocked ---
+    ("D: cat${IFS}id_rsa -> blocked (IFS normalised)",
+     lambda d: None, "cat${IFS}~/.ssh/id_rsa", None, 2),
+    ("D: rm${IFS}-rf${IFS}/ -> blocked (IFS normalised, blocked_pattern)",
+     lambda d: None, "rm${IFS}-rf${IFS}/", None, 2),
+
+    # --- False-positive controls: legitimate interpreter use must pass ---
+    ("FP: python3 manage.py runserver (script file, no inline) -> allowed",
+     lambda d: None, "python3 manage.py runserver", None, 0),
+    ("FP: python3 -c harmless -> allowed",
+     lambda d: None, "python3 -c 'print(1+1)'", None, 0),
+    ("FP: python3 -c open(data.json) (unprotected) -> allowed",
+     lambda d: None, """python3 -c 'import json;print(json.load(open("data.json")))'""", None, 0),
+    ("FP: python3 -c reads ALLOWED *.pub key -> allowed",
+     lambda d: None, """python3 -c 'print(open("~/.ssh/id_rsa.pub").read())'""", None, 0),
+]
+CASES.extend(NEW_CASES)
+
+
 # --- Session-binding cases: format (name, setup, command, agent_id, call_session_id, expected) ---
 # An override carrying a session_id only applies to that exact session; an
 # override WITHOUT a session_id field still applies across sessions (compat).

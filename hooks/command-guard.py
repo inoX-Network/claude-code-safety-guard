@@ -86,14 +86,100 @@ RECURSIVE_READ_CMDS = {
 # '~/.claude/.sudo-overrides-pending' (after 'overrides' there is a '-').
 _PATH_BOUNDARY = r"(?:/|\s|['\";|&>)]|$)"
 
+# Script interpreters that can read/write files through inline code, bypassing
+# shell-syntax detection (no WRITE_INDICATOR, no whitespace before the path).
+_INTERPRETERS = {
+    "python", "python2", "python3", "node", "nodejs", "deno", "bun",
+    "ruby", "perl", "php", "lua", "Rscript", "tclsh",
+}
+# Flags that introduce INLINE code (vs. running a script file).
+_INLINE_CODE_FLAGS = {
+    "-c", "-e", "-E", "-r", "-p", "-n", "-pe", "-ne", "-np", "-pi",
+    "--eval", "--exec", "--print",
+}
+
+# Shell word-splitting obfuscation: ${IFS}, $IFS, ${IFS%??} are expanded to
+# whitespace by the shell before execution. The hook sees the literal string, so
+# `cat${IFS}~/.ssh/id_rsa` would read as ONE token and slip past the tokenizer.
+# Normalise these to a space up front so every downstream check benefits.
+_IFS_RE = re.compile(r"\$\{IFS[^}]*\}|\$IFS\b")
+
+# Path-like substrings inside opaque interpreter code (~/..., /abs/..., $HOME/...).
+_PATHLIKE_RE = re.compile(r"(?:~|\$\{?HOME\}?|/)[\w./+\-]*")
+
+
+def _normalize_obfuscation(command: str) -> str:
+    """Replace IFS-style word-split obfuscation with a real space."""
+    return _IFS_RE.sub(" ", command)
+
+
+def _interpreter_inline_code(command: str) -> bool:
+    """True if the command invokes a script interpreter with INLINE code
+    (python -c, node -e, perl -ne, ...). Inline code is opaque to shell
+    tokenisation: a protected path embedded in `open("...")` is not at a token
+    start, so it must be scanned by substring instead of token-startswith.
+    Running a script FILE (python manage.py) has no inline flag -> not flagged.
+    """
+    toks = [t.strip("'\"") for t in command.split()]
+    if not any(os.path.basename(t) in _INTERPRETERS for t in toks):
+        return False
+    return any(t in _INLINE_CODE_FLAGS for t in toks)
+
+
+# Hardcoded minimal ruleset. Used ONLY when security-rules.json is missing,
+# unreadable, or empty — so deleting/corrupting the rules file can no longer
+# disable the guard (fail-CLOSED instead of fail-open). Deliberately conservative:
+# covers the catastrophic patterns, system paths, and credential reads.
+_FALLBACK_RULES = {
+    "blocked_patterns": [
+        r"rm\s+-rf?\s+/(\s|$)", r"rm\s+-rf?\s+/\*", r"rm\s+-rf?\s+~(\s|$|/\*)",
+        r"rm\s+-rf?\s+\$HOME(\s|$|/\*)", r"rm\s+-rf?\s+\.(\s|$)",
+        r"\bmkfs\b", r"\bdd\s+if=.*\s+of=/dev/(sd|nvme|hd)", r"> /dev/sd",
+        r"chmod\s+-?R?\s*777", r":\(\)\{ :\|:& \};:",
+        r"curl\s+[^|]*\|\s*sh", r"curl\s+[^|]*\|\s*bash",
+        r"wget\s+[^|]*\|\s*sh", r"wget\s+[^|]*\|\s*bash",
+        r"chown -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
+        r"chmod -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
+    ],
+    "blocked_paths_write": [
+        "~/.ssh", "~/.gnupg", "/etc", "/boot", "/usr/bin", "/usr/sbin",
+        "/usr/lib", "/sbin", "/bin",
+    ],
+    "protected_reads": {
+        "always_blocked_reads": ["/etc/shadow", "/etc/gshadow"],
+        "require_override_1": ["~/.ssh/id_", "~/.aws/credentials", "~/.gnupg/"],
+        "always_allowed": ["~/.ssh/config", "~/.ssh/known_hosts", "~/.ssh/*.pub"],
+        "env_files_require_override_1": [".env"],
+    },
+    "blocked_bash_patterns_force_push": [
+        r"git\s+push\s+.*--force", r"git\s+push\s+.*\s-f(\s|$)",
+    ],
+}
+
 
 def load_rules() -> dict:
-    """Load security rules from JSON file."""
+    """Load security rules from JSON file.
+
+    Fail-CLOSED: if the file is missing, unreadable, or empty/invalid, fall back
+    to _FALLBACK_RULES (a hardcoded minimal ruleset) instead of returning {} —
+    otherwise deleting/corrupting the rules file would silently disable the guard.
+    """
     if not RULES_PATH.exists():
-        print(f"WARNING: {RULES_PATH} not found — no protection active", file=sys.stderr)
-        return {}
-    with open(RULES_PATH, encoding="utf-8") as f:
-        return json.load(f)
+        print(f"WARNING: {RULES_PATH} not found — FALLBACK ruleset active (fail-closed)",
+              file=sys.stderr)
+        return dict(_FALLBACK_RULES)
+    try:
+        with open(RULES_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"WARNING: {RULES_PATH} unreadable ({exc}) — FALLBACK ruleset active",
+              file=sys.stderr)
+        return dict(_FALLBACK_RULES)
+    if not isinstance(data, dict) or not data:
+        print(f"WARNING: {RULES_PATH} empty/invalid — FALLBACK ruleset active",
+              file=sys.stderr)
+        return dict(_FALLBACK_RULES)
+    return data
 
 
 def expand_path(path: str) -> str:
@@ -389,6 +475,20 @@ def command_hits_self_protect(command: str) -> str | None:
     If a command targets multiple self-protection paths, the first one NOT
     unlocked in dev mode blocks.
     """
+    command = _normalize_obfuscation(command)
+
+    # Interpreter one-liners (python -c open(hook,"w"), node -e fs.writeFileSync,
+    # python -c os.remove(rules)) carry no shell WRITE_INDICATOR, so the detection
+    # below misses them. When inline interpreter code references a self-protect
+    # path AT ALL, block it: there is no legitimate reason for an AI to touch the
+    # guard's own files through -c/-e (reading them is possible via cat/grep).
+    if _interpreter_inline_code(command):
+        ce = expand_path(command)
+        for prot in SELF_PROTECT_PATHS:
+            p = expand_path(prot).rstrip("/")
+            if p in ce and not _dev_unlocked(prot):
+                return prot
+
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
     if not any(indicator in cleaned for indicator in WRITE_INDICATORS):
@@ -624,7 +724,32 @@ def command_hits_protected_read(command: str, rules: dict,
     if not protected:
         return False, "", False
 
+    command = _normalize_obfuscation(command)
     env_patterns = protected.get("env_files_require_override_1", [])
+
+    # Interpreter inline code (python -c 'open("~/.ssh/id_rsa")', node -e
+    # readFileSync(...)) hides the path inside an opaque string, so the token scan
+    # below never sees a token that STARTS with the protected path. Scan the full
+    # expanded command by substring instead. Only fires for inline interpreters,
+    # so a plain `python manage.py` is unaffected.
+    if _interpreter_inline_code(command):
+        # Reuse the tier logic (always_blocked -> always_allowed -> require_override_1)
+        # by extracting path-like substrings from the opaque inline code and running
+        # each through check_read_protection — the SAME source of truth as the Read
+        # tool, so always_allowed (e.g. ~/.ssh/*.pub) is honoured and we avoid the
+        # false positive of blocking a public-key read.
+        for cand in set(_PATHLIKE_RE.findall(command)):
+            blocked, reason = check_read_protection(cand, rules, agent_id, session_id)
+            if blocked:
+                overridable = not reason.startswith("ALWAYS BLOCKED")
+                return True, reason, overridable
+        if env_patterns and ".env" in command:
+            override = load_override(agent_id, session_id)
+            if not override or override.get("override_level", 0) < 1:
+                return True, (
+                    "reading a .env file via interpreter inline code "
+                    "requires override level 1+"
+                ), True
 
     # Strip standard redirects (analogous to check_blocked_paths).
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
@@ -873,6 +998,10 @@ def main():
 
     if not command:
         sys.exit(0)
+
+    # De-obfuscate IFS-style word-splitting once, so EVERY downstream check
+    # (blocked_patterns, paths, sudo, self-protect, reads) sees real whitespace.
+    command = _normalize_obfuscation(command)
 
     rules = load_rules()
     if not rules:
