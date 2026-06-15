@@ -1,0 +1,31 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "_comment": "Minimal-Variante OHNE Plugin: opencodes natives permission.bash Denylist. Fuer einfache Allow/Ask/Deny-Faelle. Reicht NICHT an den vollen command-guard.py heran (kein .env-/Credential-Read-Schutz, keine Interpreter-Fix-Erkennung, kein Override-System). Fuer den vollen Schutz das Plugin unter .opencode/plugin/safety-guard.ts nutzen.",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "rm -rf /*": "deny",
+      "rm -rf ~*": "deny",
+      "rm -rf .": "deny",
+      "chmod 777 *": "deny",
+      "chmod -R 777 *": "deny",
+      "mkfs*": "deny",
+      "dd if=* of=/dev/*": "deny",
+      "* | sh": "deny",
+      "* | bash": "deny",
+      "curl * | *sh": "deny",
+      "wget * | *sh": "deny",
+      "cat ~/.ssh/*": "deny",
+      "cat *id_rsa*": "deny",
+      "cat *.env": "deny",
+      "git push --force*": "ask",
+      "git reset --hard*": "ask",
+      "git commit *--no-verify*": "deny",
+      "git commit *--amend*": "ask",
+      "sudo *": "ask",
+      "apt install *": "ask",
+      "npm install *": "ask",
+      "pip install *": "ask"
+    }
+  }
+}
