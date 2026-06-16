@@ -65,8 +65,12 @@ const TOOL_MAP: Record<string, GuardMapping> = {
   write: { toolName: "Write", argKey: "filePath", inputKey: "file_path" },
   // edit -> Edit, filePath -> tool_input.file_path
   edit: { toolName: "Edit", argKey: "filePath", inputKey: "file_path" },
-  // patch -> Edit (opencodes Patch-Tool aendert ebenfalls eine Datei)
-  patch: { toolName: "Edit", argKey: "filePath", inputKey: "file_path" },
+  // HINWEIS (verifiziert gegen @opencode-ai/plugin 1.17.7): opencodes Multi-File-
+  // Patch-Tool heisst "apply_patch" und liefert KEINEN filePath, sondern
+  // "patchText" (ein Diff ueber ggf. mehrere Dateien). command-guard erwartet
+  // aber einen einzelnen file_path -> ein sauberes Mapping ist nicht moeglich.
+  // apply_patch wird daher hier bewusst NICHT gegated; decke es stattdessen ueber
+  // opencodes natives permission.edit ab (siehe opencode/README.md).
 };
 
 // Damit die "Guard nicht installiert"-Warnung nur EINMAL pro Prozess erscheint.
@@ -76,8 +80,10 @@ let warnedMissingGuard = false;
 // Plugin
 // ---------------------------------------------------------------------------
 
-// Der Plugin-Default-Export erhaelt von opencode einen Kontext (app, client,
-// $, ...). Wir brauchen davon nichts und geben direkt das Hooks-Objekt zurueck.
+// opencode entdeckt Plugins als BENANNTE Exports (kein Default-Export; verifiziert
+// gegen @opencode-ai/plugin 1.17.7). Die Plugin-Funktion erhaelt einen Kontext
+// (project, client, $, directory, worktree) — wir brauchen davon nichts und geben
+// direkt das Hooks-Objekt zurueck. Typ laut Package: (input, options?) => Promise<Hooks>.
 export const SafetyGuardPlugin = async (_ctx: unknown) => {
   return {
     "tool.execute.before": async (input: unknown, output: unknown) => {
@@ -167,5 +173,3 @@ export const SafetyGuardPlugin = async (_ctx: unknown) => {
     },
   };
 };
-
-export default SafetyGuardPlugin;

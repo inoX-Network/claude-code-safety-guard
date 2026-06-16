@@ -49,7 +49,13 @@ Tool-Call (`throw`), wenn der Guard mit Exit-Code 2 antwortet.
 ## Verhalten
 
 - **Geprüfte Tools:** `bash` → `Bash/command`, `read` → `Read/file_path`,
-  `write`/`edit`/`patch` → `Write`/`Edit/file_path`.
+  `write` → `Write/file_path`, `edit` → `Edit/file_path`.
+- **`apply_patch` wird NICHT geprüft.** opencodes Multi-File-Patch-Tool liefert
+  `patchText` (einen Diff über ggf. mehrere Dateien), keinen einzelnen `filePath` —
+  ein sauberes Mapping auf den dateibasierten Guard ist nicht möglich. Decke
+  Schreibzugriffe via `apply_patch` daher über opencodes **natives**
+  `permission.edit` ab (z.B. `"edit": "ask"` in `opencode.json`, deckt auch
+  `apply_patch`). Sonst wäre `apply_patch` ein ungeschützter Schreibweg.
 - **Nicht geprüfte Tools** (z.B. `list`, `glob`, `grep`, `webfetch`, MCP-Tools)
   werden **bewusst durchgelassen** — der Guard hat dafür keine Regeln, und ein
   pauschales Blocken würde jede Session unbrauchbar machen.
@@ -86,25 +92,25 @@ auf und erwartet:
 
 ## What to verify against your opencode version
 
-Diese Punkte sind aus den opencode-Docs hergeleitet, **nicht** gegen den
-`@opencode-ai/plugin`-TypeScript-Typ der jeweils installierten Version verifiziert.
-Bitte prüfen:
+Die Hook-Signatur, Feldnamen und Tool-IDs wurden gegen den echten Typ
+`@opencode-ai/plugin@1.17.7` (`dist/index.d.ts`) und den opencode-Quellcode
+verifiziert. `output.args` ist dort allerdings als `any` typisiert — die
+Feldnamen sind also kein stabiler Compile-Vertrag, sondern können sich zwischen
+Versionen ändern. Prüfe bei abweichender Version:
 
-1. **Hook-Signatur.** Das Plugin nutzt das Event `tool.execute.before` mit der
-   Signatur `async (input, output) => {}`, wobei `input.tool` der Tool-Name
-   (`"bash"`, `"read"`, ...) und `output.args` die strukturierten Argumente sind
-   (`output.args.command` für bash, `output.args.filePath` für Datei-Tools).
-   Stimmen diese Feldnamen mit deiner Version überein? Bei Abweichung das Mapping
-   in `safety-guard.ts` (`TOOL_MAP`, `argKey`) anpassen.
+1. **Tool-ID `bash` (Stabilitäts-Risiko).** opencodes Quellcode markiert die
+   Tool-ID `"bash"` ausdrücklich mit „*rename with opencode 2.0*". Ab opencode 2.0
+   kann sich der Tool-Name ändern → dann greift das `bash`-Mapping nicht mehr.
+   Bei einem Major-Update `TOOL_MAP` gegen die neuen Tool-IDs abgleichen.
 
-2. **Blocken via `throw`.** Das Plugin blockt durch `throw new Error(...)` im
-   Hook. Prüfe, dass deine opencode-Version einen geworfenen Fehler in
-   `tool.execute.before` tatsächlich als Abbruch des Tool-Calls behandelt.
+2. **`output.args`-Felder (`any`, kein Typ-Vertrag).** Verifiziert für 1.17.7:
+   `output.args.command` (bash), `output.args.filePath` (read/write/edit). Da der
+   Typ `any` ist, greift das Plugin defensiv zu (Optional-Chaining) — bei
+   Abweichung das Mapping in `safety-guard.ts` (`TOOL_MAP`, `argKey`) anpassen.
 
-3. **`input.sessionID` / `input.callID`.** Diese Felder sind in den Docs nicht
-   eindeutig zugesichert. Das Plugin behandelt sie defensiv (optional) und
-   verlässt sich nicht darauf; `session_id` wird nur weitergegeben, wenn
-   vorhanden.
+3. **Blocken via `throw`.** Das Plugin blockt durch `throw new Error(...)` im
+   Hook (entspricht dem offiziellen opencode-Doku-Beispiel). Prüfe per E2E-Test,
+   dass deine Version einen geworfenen Fehler tatsächlich als Abbruch behandelt.
 
 4. **Subagent-Coverage.** opencode-Issue
    [#5894](https://github.com/sst/opencode/issues/5894) (Hooks feuern bei
