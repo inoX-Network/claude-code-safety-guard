@@ -22,6 +22,16 @@ all present to the guard as `agent_id = None` — i.e. all of them are "the main
 session". An override you grant for *one* of them therefore applies to **all** of
 them within its time window.
 
+This is not hypothetical — it surfaced from a real setup. IDEs built **on top of
+the Claude Code CLI** inherit this `PreToolUse` hook automatically: the guard fires
+straight from `~/.claude/settings.json`, no plugin or porting needed. A visual
+workspace like [Nimbalyst](https://github.com/Nimbalyst/nimbalyst) runs Claude Code
+under the hood and orchestrates **several agents in parallel, each as its own
+session** — and every one of them reaches the guard as `agent_id = None`. Without
+session scoping, a single deploy override granted in one agent's session would
+silently apply to every other parallel agent during its window. That multi-session
+case is what motivated the optional `session_id` binding below.
+
 ### Before (the gap)
 
 | Situation | Behaviour | correct? |
