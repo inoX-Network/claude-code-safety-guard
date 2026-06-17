@@ -1,13 +1,31 @@
-# Claude Code Safety Guard — v2
+# Safety Guard — for Claude Code &amp; opencode
 
 [![Born from a real incident](https://img.shields.io/badge/born%20from-a%20real%20incident-red)](https://github.com/anthropics/claude-code/issues/39283)
+[![Works with](https://img.shields.io/badge/works%20with-Claude%20Code%20%2B%20opencode-success)](opencode/README.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A **PreToolUse hook system** for Claude Code that blocks destructive system operations and credential leaks, with a **3-level, agent-scoped override mechanism** for when you genuinely need elevated permissions — and a self-protection layer so the AI can never disarm its own guard.
+A **deterministic tool-call guard** for AI coding agents. It sees every tool call *before* it runs and blocks the catastrophic ones — `rm -rf /`, reading `~/.ssh`, writing `/etc`, force-push to `main`, credential exfiltration — with a **3-level, agent-scoped override** for when you genuinely need elevated rights, and a self-protection layer so the AI can never disarm its own guard. Same input, same verdict, every time. No LLM in the loop: it's the net for when the model's judgment (or the permission prompt) fails or gets subverted by prompt injection.
 
-> **Context:** This project was born after [a real incident](https://github.com/anthropics/claude-code/issues/39283) where Claude Code executed a destructive `chown -R` on `/etc/` — requiring a multi-hour recovery session. The built-in permission system wasn't enough. This hook adds defense-in-depth.
+- **Claude Code:** runs as a `PreToolUse` hook.
+- **opencode:** runs as a plugin that bridges to the same guard — see [opencode/README.md](opencode/README.md).
+
+> **Born from a real incident.** This started after [Claude Code executed a destructive `chown -R` on `/etc/`](https://github.com/anthropics/claude-code/issues/39283) — a multi-hour recovery. The built-in permission system wasn't enough. This is defense-in-depth.
+
+> **Hardened by self-audit.** The guard was put through a white-box audit of its *own* code, which found five real bypasses (credential reads via `python3 -c`, `${IFS}` obfuscation, a fail-open on a missing rules file, …). All five are fixed, each with a regression test. What it deliberately does **not** try to do is documented honestly in [THREAT-MODEL.md](THREAT-MODEL.md) — it's a bouncer inside the wall, not the wall itself.
+
+### Quickstart
+
+```bash
+# Claude Code: point a PreToolUse hook at command-guard.py (full guide in INSTALL.md)
+cp security-rules.example.json ~/.claude/safety-guard/security-rules.json
+# then register hooks/command-guard.py as a PreToolUse hook in ~/.claude/settings.json
+
+# opencode: drop the plugin in and reuse the same rules — see opencode/README.md
+```
 
 > **Install:** A full, from-scratch setup guide lives in [INSTALL.md](INSTALL.md). This README explains *what* the guard does and *why*; INSTALL.md explains *how* to deploy it.
+
+> Built and maintained by [inoX-Network](https://inox-network.de). Bug reports — especially new bypasses — are very welcome.
 
 ---
 
