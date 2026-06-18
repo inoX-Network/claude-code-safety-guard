@@ -22,19 +22,28 @@ do, and which layer is responsible for the rest.
   `dd if=`, `tar`/`zip`/`rsync` of key directories) against private keys,
   cloud credentials, `.npmrc`, Docker/GnuPG config, `.env` files. Override
   level 1+ required; `/etc/shadow` always blocked.
-- **Interpreter inline code** — `python -c`, `node -e`, `ruby -e`, `perl -e`,
-  `php -r` etc. that read a protected path embedded inside the code, or write
-  to a self-protected file. Scanned by substring against the same tier logic,
-  so obfuscation via interpreters does not bypass the credential/self-protect
-  gates.
+- **Interpreter inline code (literal embedding)** — `python -c`, `node -e`,
+  `ruby -e`, `perl -e`, `php -r` etc. that read a protected path written
+  **literally** inside the code, or write to a self-protected file. Path-like
+  literals are matched against the same tier logic, so the naive case
+  (`open("~/.ssh/id_rsa")`) is caught. This closes the literal vector **only** —
+  string-building (`open("~/.ss"+"h/id_rsa")`), base64, or `$(…)` staging produce
+  no literal for the hook to see, and belong to the same boundary as
+  "Obfuscation in general" below (sandbox / least privilege).
 - **Shell word-split obfuscation** — `${IFS}`/`$IFS` are normalised to
   whitespace before every check, so `cat${IFS}~/.ssh/id_rsa` is caught.
 - **Protected-path writes** — Bash and `Write`/`Edit`/`MultiEdit`/`NotebookEdit`
   against `~/.ssh`, `/etc/*`, `/boot`, `/usr/bin`, etc. Level-dependent.
-- **Self-protection** — no tool call (Bash or editor, including interpreter
-  one-liners) may modify the guard itself: its hook, rules, override directory,
-  approval scripts, settings, or rules docs. No override lifts this; only the
-  owner via `!` (or scoped dev mode for the hook sources).
+- **Self-protection (Claude Code)** — under Claude Code, no tool call (Bash or
+  editor, including interpreter one-liners) may modify the guard itself: its
+  hook, rules, override directory, approval scripts, settings, or rules docs. No
+  override lifts this; only the owner via `!`. The one relaxation is **dev mode**
+  — the single owner-only window in which hook-*source* self-protection is
+  deliberately lowered (and only the hook sources; settings, the override dir and
+  `bin/` stay hard-protected even then). It is therefore the most sensitive
+  surface of the whole system: **never enable dev mode on an unattended or remote
+  session.** (Under opencode this guarantee does not hold deterministically — see
+  the limits table below.)
 - **MCP tool calls** — default-deny for write/unknown MCP tools; read verbs and
   whitelisted safe servers pass; sensitive servers gated at level 1+.
 - **Sudo** — only whitelisted commands follow `sudo`; tab/whitespace bypasses
@@ -53,6 +62,7 @@ trying to handle them here would only add false positives and false confidence.
 | **Deferred execution.** Malicious content written into `Makefile`, `package.json` (`postinstall`), `.bashrc`, build configs — fires *later*, when a normal command (`make`, `npm install`) runs. | These files are written constantly in normal work. The malicious entry is byte-for-byte indistinguishable from a legitimate one. Gating them = false positives on nearly every project → users disable the guard. | **Package manager & discipline** — `npm install --ignore-scripts`, lockfile review, pinned/audited dependencies. (Scheduler-based persistence — `cron`, `at`, `systemd` timers, `.git/hooks`, autostart — *is* in scope as an optional gate, because it is rare and distinctive.) |
 | **"Is this content malicious?"** Judging whether a script/diff/file is hostile. | A deterministic hook cannot reason about intent. An LLM classifier inside the hook would be non-deterministic, slow on every call, and itself injectable by the very content it inspects. | **Advisory review layer** — a separate, non-blocking LLM-in-the-loop review (fresh context) plus a human who gates. Advisor, not gatekeeper. |
 | **Obfuscation in general.** Bash is Turing-complete; a determined attacker can encode payloads through user-defined variables, indirect expansion, or external stages the hook never sees as a literal string. | No regex/substring layer can fully tame a Turing-complete shell. The hook closes the common, high-signal vectors, not every theoretical one. | **Sandbox + least privilege** as the hard boundary; the hook as defense-in-depth on top. |
+| **opencode write/self-protect gates are not deterministic.** Under opencode (vs. Claude Code) the guard runs as a plugin bridge. `apply_patch` is **not** gated — it carries a multi-file `patchText`, not a single path — so it is an un-gated write path, including to self-protected files. The bridge also forwards `session_id` only optionally and never `agent_id`. | A multi-file patch cannot map onto the file-path-based write/self-protect checks, and the bridge cannot supply the `agent_id`/stable `session_id` scoping the hook expects. So the "no tool call may modify the guard" and protected-path-write guarantees above hold for Claude Code, **not** deterministically for opencode. | **opencode's native `permission`** — set `apply_patch`/`edit` to `ask`/`deny` in `opencode.json` as a conscious config — plus sandbox/least-privilege. For session-bound overrides use `--all-sessions` (see SESSION-BINDING-GAP.md §7). |
 
 ## How it composes
 
