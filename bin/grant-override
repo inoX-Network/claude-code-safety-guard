@@ -21,6 +21,11 @@ Usage:
                 "CRITICAL"). Deliberate friction -- the owner confirms the
                 level explicitly.
   --snapshot    Required from level 3 on: the snapshot ID (briefing duty).
+  --all-sessions  Opt out of the default session-binding: make the override
+                valid across ALL sessions (the old broad behaviour) as a
+                deliberate, logged choice. Without this flag the override is
+                pinned to the granting session's CLAUDE_CODE_SESSION_ID, so a
+                single grant cannot silently apply to other parallel sessions.
 
 Exit: 0 = activated, 1 = error/aborted.
 """
@@ -82,6 +87,8 @@ def main() -> int:
     parser.add_argument("--minutes", type=int, default=120)
     parser.add_argument("--confirm", default=None)
     parser.add_argument("--snapshot", default=None)
+    parser.add_argument("--all-sessions", action="store_true",
+                        help="opt out of default session-binding (cross-session)")
     args = parser.parse_args()
 
     if args.minutes <= 0 or args.minutes > 24 * 60:
@@ -136,6 +143,30 @@ def main() -> int:
     data["expires_at"] = (now + timedelta(minutes=args.minutes)).isoformat()
     data["granted_at"] = now.isoformat()
     data["granted_by"] = "owner-via-!"
+
+    # Fail-safe session binding (DEFAULT). Pin the override to the session that
+    # grants it, so a single grant cannot silently apply to every other parallel
+    # main session. The granting session is authoritative: any session_id the AI
+    # may have placed in the proposal is overwritten. --all-sessions opts back
+    # into the old broad cross-session behaviour as a deliberate, logged choice.
+    if args.all_sessions:
+        data.pop("session_id", None)
+        data["granted_by"] = "owner-via-! (all-sessions: cross-session granted intentionally)"
+    else:
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+        if not sid:
+            # Fail-closed: do NOT silently fall back to broad. No active file written.
+            print(
+                "ERROR: no CLAUDE_CODE_SESSION_ID in the environment -- cannot "
+                "session-bind, override NOT activated.\n"
+                "For a deliberate cross-session grant, re-run with --all-sessions.",
+                file=sys.stderr,
+            )
+            _audit("owner-via-!", pending.name, "error",
+                   "no session id in env; not activated", level)
+            return 1
+        data["session_id"] = sid
+
     if args.snapshot:
         data["snapshot_id"] = args.snapshot
 

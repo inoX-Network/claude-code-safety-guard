@@ -107,6 +107,14 @@ _IFS_RE = re.compile(r"\$\{IFS[^}]*\}|\$IFS\b")
 # Path-like substrings inside opaque interpreter code (~/..., /abs/..., $HOME/...).
 _PATHLIKE_RE = re.compile(r"(?:~|\$\{?HOME\}?|/)[\w./+\-]*")
 
+# Detects a .env-style filename inside opaque interpreter code, on a word boundary.
+# Used instead of a plain `".env" in command` substring test, which false-positives
+# on os.environ / .environment (both contain ".env"). Matches .env, .envrc,
+# .env.local, .env.production — must be preceded by start/separator and followed by
+# end/separator. .envrc is included for parity with check_env_file_read (which also
+# treats it as a .env file via startswith). os.environ / .environment do NOT match.
+_ENV_RE = re.compile(r"""(?:^|[/\s='"])\.env(rc|\.[\w.\-]+)?(?=$|[\s'":])""")
+
 
 def _normalize_obfuscation(command: str) -> str:
     """Replace IFS-style word-split obfuscation with a real space."""
@@ -743,7 +751,7 @@ def command_hits_protected_read(command: str, rules: dict,
             if blocked:
                 overridable = not reason.startswith("ALWAYS BLOCKED")
                 return True, reason, overridable
-        if env_patterns and ".env" in command:
+        if env_patterns and _ENV_RE.search(command):
             override = load_override(agent_id, session_id)
             if not override or override.get("override_level", 0) < 1:
                 return True, (

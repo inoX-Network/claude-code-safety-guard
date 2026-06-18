@@ -77,6 +77,21 @@ def _matches_context(data: dict) -> bool:
 Fail-closed: if the override carries a `session_id` but the call has none (or a
 different one), the override does not apply.
 
+### 2a. Default-binding in the approval scripts (fail-safe default)
+
+The matching above is the *mechanism*; the *policy* lives in the approval scripts.
+`override-freigeben` / `grant-override` now bind a granted override to the
+**granting session's** `CLAUDE_CODE_SESSION_ID` **by default** — the AI's proposal
+cannot influence it (any `session_id` in the pending file is overwritten with the
+granting session's id). `--all-sessions` opts back into cross-session validity as a
+deliberate, logged choice. If no `CLAUDE_CODE_SESSION_ID` is in the environment and
+`--all-sessions` is not given, activation is **aborted** — never a silent fall-back
+to broad. So "forgetting" the flag yields narrow-and-safe, not broad-and-open.
+
+(Verified: `CLAUDE_CODE_SESSION_ID` equals the stdin `session_id` the hook sees,
+for both the main session and task-subagents — subagents share the parent's
+`session_id` and differ only by `agent_id`.)
+
 ---
 
 ## 3. Test cases (no override / bound override)
@@ -110,11 +125,15 @@ call "S2 (other)"  '{"tool_name":"Bash","tool_input":{"command":"sudo htop"},"se
 ## 5. Automated suite
 
 ```bash
-python3 tests/test_command_guard.py   # expected: 129 passed, 0 failed
+python3 tests/test_command_guard.py   # expected: 147 passed, 0 failed
+python3 tests/test_grant_override.py  # default session-binding of the approval script
+python3 tests/test_fail_closed.py     # fail-closed ruleset fallback
+python3 tests/test_freigabe_e2e.py    # approve -> apply flow (session-consistent)
 ```
 
-The new cases live in the `SESSION_CASES` and `MCP_SESSION_CASES` lists in
-`tests/test_command_guard.py`.
+The session cases live in the `SESSION_CASES` and `MCP_SESSION_CASES` lists in
+`tests/test_command_guard.py`; the default-binding of the approval script is in
+`tests/test_grant_override.py`.
 
 ---
 
@@ -130,6 +149,16 @@ which previously turned self-protect tests falsely red under an active dev mode.
 
 - The binding is only as good as the `session_id` the host passes in the payload.
 - It does not replace `agent_id` scoping; it complements it for the parallel
-  main-session case.
-- An override without `session_id` remains valid across sessions by design — use
-  the field when you want to pin an override to one session.
+  main-session case. Task-subagents share the parent's `session_id` (they differ
+  only by `agent_id`), so default-binding does **not** break in-session subagents.
+- An override **with** `--all-sessions` (no `session_id` field) remains valid across
+  sessions by design — use it when you consciously want cross-session validity.
+- **Default-binding pins to the _granting_ session.** It is correct only when the
+  grant happens *in the session that runs the calls*. If a host grants from a
+  different session context than the one needing the override, default-binding pins
+  to the wrong session → the override won't apply; use `--all-sessions` there.
+- **opencode is out of scope for session-bound overrides.** The opencode bridge
+  forwards `session_id` only optionally and never `agent_id`, so a session-bound
+  override is unreliable there (fail-closed → it may never apply). Use
+  `--all-sessions` for opencode as a conscious, documented trade-off until the
+  bridge's `session_id` is verified stable.

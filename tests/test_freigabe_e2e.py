@@ -54,6 +54,11 @@ def _env(active: Path, pending: Path, flag: Path, audit: Path) -> dict:
     e["CLAUDE_SUDO_PENDING_DIR"] = str(pending)
     e["CLAUDE_HOOK_DEV_FLAG"] = str(flag)
     e["CLAUDE_AUDIT_DIR"] = str(audit)
+    # Default session-binding: grant-override stamps CLAUDE_CODE_SESSION_ID into
+    # the override. Pin it to the SAME id the hook calls use below ("e2e") so the
+    # whole approve->apply flow is session-consistent; this also exercises that a
+    # session-bound override DOES apply when the calling session matches.
+    e["CLAUDE_CODE_SESSION_ID"] = "e2e"
     return e
 
 
