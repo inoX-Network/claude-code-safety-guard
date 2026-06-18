@@ -451,6 +451,23 @@ NEW_CASES = [
      lambda d: None, """python3 -c 'import json;print(json.load(open("data.json")))'""", None, 0),
     ("FP: python3 -c reads ALLOWED *.pub key -> allowed",
      lambda d: None, """python3 -c 'print(open("~/.ssh/id_rsa.pub").read())'""", None, 0),
+
+    # === .env interpreter check: word-boundary instead of substring (FP fix) ===
+    # os.environ / .environment contain ".env" but are NOT .env files -> must pass.
+    ("env-FP: python3 -c os.environ -> allowed (no more .env substring FP)",
+     lambda d: None, """python3 -c 'import os; print(os.environ.get("X"))'""", None, 0),
+    ("env-FP: python3 -c .environment string -> allowed (not a .env file)",
+     lambda d: None, """python3 -c 'x=".environment"; print(x)'""", None, 0),
+    # Real .env reads stay blocked (level 0), both via interpreter and plain cat:
+    ("env: python3 -c open(.env) -> blocked",
+     lambda d: None, """python3 -c 'print(open(".env").read())'""", None, 2),
+    ("env: cat .env -> blocked (token path, regression)",
+     lambda d: None, "cat .env", None, 2),
+    ("env: cat .env.production -> blocked",
+     lambda d: None, "cat .env.production", None, 2),
+    # .envrc: deliberately caught — parity with check_env_file_read (startswith .env).
+    ("env: cat .envrc -> blocked (deliberate parity decision)",
+     lambda d: None, "cat .envrc", None, 2),
 ]
 CASES.extend(NEW_CASES)
 
