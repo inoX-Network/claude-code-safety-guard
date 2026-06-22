@@ -72,6 +72,13 @@ const cases = [
   },
   { tool: "bash", payload: "ls -la", expect: 0, name: "bash ls -la" },
   { tool: "read", payload: "data.json", expect: 0, name: "read data.json" },
+  // Docker vector (Spec 0060): OC forwards no agent_id, yet A and
+  // B-encirclement still block -> the subagent guarantee holds under opencode.
+  { tool: "bash", payload: "docker run --privileged ubuntu", expect: 2, name: "docker --privileged" },
+  { tool: "bash", payload: "docker run -v ~/.claude/hooks:/x ubuntu", expect: 2, name: "docker mount hooks (encirclement)" },
+  { tool: "bash", payload: "docker run -v /:/host ubuntu", expect: 2, name: "docker -v /:/host (root escape)" },
+  { tool: "bash", payload: "docker run -v ./app:/app node", expect: 0, name: "docker -v ./app:/app (workflow free)" },
+  { tool: "bash", payload: "docker ps", expect: 0, name: "docker ps" },
 ];
 
 let failures = 0;
@@ -96,7 +103,7 @@ rmSync(tmp, { recursive: true, force: true });
 
 console.log("");
 if (failures === 0) {
-  console.log("Ergebnis: ALLE 6 Bridge-Tests bestanden.");
+  console.log(`Ergebnis: ALLE ${cases.length} Bridge-Tests bestanden.`);
   process.exit(0);
 } else {
   console.log(`Ergebnis: ${failures} von ${cases.length} Bridge-Tests FEHLGESCHLAGEN.`);
