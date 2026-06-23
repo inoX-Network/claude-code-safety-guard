@@ -124,7 +124,7 @@ check "tar proj"  '{"tool_name":"Bash","tool_input":{"command":"tar czf /tmp/p.t
 ## 8. Automated suite
 
 ```bash
-python3 tests/test_command_guard.py   # expected: 103 passed, 0 failed
+python3 tests/test_command_guard.py   # expected: 187 passed, 0 failed
 python3 tests/test_freigabe_e2e.py    # expected:  25 passed, 0 failed
 ```
 

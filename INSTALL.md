@@ -232,11 +232,11 @@ log, dev-mode flag) in a temp directory via environment variables, so they
 or after installing — only Python 3 is required:
 
 ```bash
-python3 tests/test_command_guard.py    # hook behavior — 76 cases
+python3 tests/test_command_guard.py    # hook behavior — 187 cases
 python3 tests/test_freigabe_e2e.py     # approval channel + dev mode — 25 cases
 ```
 
-Expected output ends with `76 passed, 0 failed` and `25 passed, 0 failed`. Each
+Expected output ends with `187 passed, 0 failed` and `25 passed, 0 failed`. Each
 case feeds the real hook a constructed stdin payload and asserts its exit code
 (`0` = allow, `2` = block), so a green run means the guard in this checkout
 enforces exactly what it should.

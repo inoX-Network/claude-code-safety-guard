@@ -125,7 +125,7 @@ call "S2 (other)"  '{"tool_name":"Bash","tool_input":{"command":"sudo htop"},"se
 ## 5. Automated suite
 
 ```bash
-python3 tests/test_command_guard.py   # expected: 147 passed, 0 failed
+python3 tests/test_command_guard.py   # expected: 187 passed, 0 failed
 python3 tests/test_grant_override.py  # default session-binding of the approval script
 python3 tests/test_fail_closed.py     # fail-closed ruleset fallback
 python3 tests/test_freigabe_e2e.py    # approve -> apply flow (session-consistent)

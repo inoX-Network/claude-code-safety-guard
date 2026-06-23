@@ -556,6 +556,20 @@ _DOCKER_FALLBACK_FLAGS = [
 ]
 
 
+def _norm_path(p: str) -> str:
+    """Expand ~/$HOME, collapse repeated slashes, resolve . / .. LEXICALLY.
+
+    A bind-mount source like `/etc/../etc`, `//etc` or `/./etc` resolves to the
+    same host dir as `/etc` once Docker mounts it, but a raw string compare would
+    miss it — so an attacker could slip a protected path past _paths_overlap.
+    os.path.normpath is purely lexical (no filesystem/symlink access, which the
+    hook deliberately avoids), enough to close the traversal forms. Symlinked
+    sources stay out of scope (filesystem boundary, see THREAT-MODEL).
+    """
+    expanded = re.sub(r"/{2,}", "/", expand_path(p))   # normpath keeps a leading //
+    return os.path.normpath(expanded).rstrip("/")
+
+
 def _paths_overlap(a: str, b: str) -> bool:
     """True if two host paths overlap: equal, or one contains the other.
 
@@ -565,9 +579,11 @@ def _paths_overlap(a: str, b: str) -> bool:
     Plain prefix matching (what a direct write uses) only covers the first two;
     a mount needs BOTH directions. Boundary-exact via the trailing "/", so /etc
     does not match /etc-other and .sudo-overrides not .sudo-overrides-pending.
+    Both sides are normalised first (_norm_path), so `/etc/../etc`, `//etc` and
+    `/./etc` cannot sneak a protected path past the comparison.
     """
-    pa = expand_path(a).rstrip("/")
-    pb = expand_path(b).rstrip("/")
+    pa = _norm_path(a)
+    pb = _norm_path(b)
     if pa == pb:
         return True
     # pa == "" is the root mount ("/"); pb.startswith("/") then matches every
@@ -657,8 +673,11 @@ def check_docker_always(command: str, rules: dict) -> tuple[bool, str]:
 
     configured = rules.get("docker", {}).get("blocked_flags", [])
     flags = _DOCKER_FALLBACK_FLAGS + [f for f in configured if f not in _DOCKER_FALLBACK_FLAGS]
+    # Case-insensitive: Docker treats `--cap-add=all` / `=ALL` and `--net=Host`
+    # equivalently, so a lowercased flag value must not slip past the match.
+    cl = command.lower()
     for flag in flags:
-        if flag and flag in command:
+        if flag and flag.lower() in cl:
             return True, flag
 
     for src in _docker_bind_sources(command):

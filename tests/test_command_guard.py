@@ -472,7 +472,7 @@ NEW_CASES = [
 CASES.extend(NEW_CASES)
 
 
-# === Docker / Podman vector (Spec 0060) ====================================
+# === Docker / Podman vector ================================================
 # A (catastrophic flags) and B-encirclement (mounts that expose the guard's own
 # files — incl. a parent dir like / or ~/.claude that CONTAINS them) are ALWAYS
 # blocked: no override, reaches subagents. B-protected (mount onto a
@@ -553,6 +553,27 @@ DOCKER_CASES = [
      lambda d: None, "docker run -v ./app:/app node", AID, 0),
     ("Docker/neg: non-docker path containing the word -> allowed",
      lambda d: None, "cat ./docker/readme", None, 0),
+
+    # --- Adversarial: path-traversal / obfuscation must NOT slip a protected path through ---
+    ("Docker/adv: -v /etc/../etc -> blocked (traversal)",
+     lambda d: None, "docker run -v /etc/../etc:/x ubuntu", None, 2),
+    ("Docker/adv: -v //etc (double slash) -> blocked",
+     lambda d: None, "docker run -v //etc:/x ubuntu", None, 2),
+    ("Docker/adv: -v /./etc -> blocked",
+     lambda d: None, "docker run -v /./etc:/x ubuntu", None, 2),
+    ("Docker/adv: -v /etc/./passwd -> blocked",
+     lambda d: None, "docker run -v /etc/./passwd:/x ubuntu", None, 2),
+    ("Docker/adv: -v ~/.claude/../.claude/hooks -> blocked (traversal encirclement)",
+     lambda d: None, "docker run -v ~/.claude/../.claude/hooks:/x ubuntu", None, 2),
+    ("Docker/adv: --cap-add=all (lowercase) -> blocked",
+     lambda d: None, "docker run --cap-add=all ubuntu", None, 2),
+    ("Docker/adv: -v /:/host stays blocked after normalisation",
+     lambda d: None, "docker run -v /:/host ubuntu", None, 2),
+    # Negative controls: normalisation must NOT over-block a harmless relative/other path
+    ("Docker/adv-neg: -v ./etc:/app -> allowed (relative, normalises to 'etc', not /etc)",
+     lambda d: None, "docker run -v ./etc:/app node", None, 0),
+    ("Docker/adv-neg: -v /tmp/etc/../data:/x -> allowed (resolves to /tmp/data)",
+     lambda d: None, "docker run -v /tmp/etc/../data:/x node", None, 0),
 ]
 CASES.extend(DOCKER_CASES)
 
