@@ -472,6 +472,91 @@ NEW_CASES = [
 CASES.extend(NEW_CASES)
 
 
+# === Docker / Podman vector (Spec 0060) ====================================
+# A (catastrophic flags) and B-encirclement (mounts that expose the guard's own
+# files — incl. a parent dir like / or ~/.claude that CONTAINS them) are ALWAYS
+# blocked: no override, reaches subagents. B-protected (mount onto a
+# blocked_paths_write path that is NOT a guard file, e.g. /etc, ~/.ssh) is
+# level-dependent, exactly like a direct write to that path.
+DOCKER_CASES = [
+    # --- A: catastrophic flags, ALWAYS block (no override) ---
+    ("Docker/A: --privileged -> blocked",
+     lambda d: None, "docker run --privileged ubuntu", None, 2),
+    ("Docker/A: docker.sock mount -> blocked",
+     lambda d: None, "docker run -v /var/run/docker.sock:/var/run/docker.sock ubuntu", None, 2),
+    ("Docker/A: --pid=host -> blocked",
+     lambda d: None, "docker run --pid=host ubuntu", None, 2),
+    ("Docker/A: --network host -> blocked",
+     lambda d: None, "docker run --network host ubuntu", None, 2),
+    ("Docker/A: --cap-add=SYS_ADMIN -> blocked",
+     lambda d: None, "docker run --cap-add=SYS_ADMIN ubuntu", None, 2),
+    ("Docker/A: seccomp=unconfined -> blocked",
+     lambda d: None, "docker run --security-opt seccomp=unconfined ubuntu", None, 2),
+    ("Docker/A: --privileged stays blocked WITH a level-2 override",
+     lambda d: write_override(d, "system-test.json", coordinator_override(2)),
+     "docker run --privileged ubuntu", None, 2),
+
+    # --- B-encirclement: mount onto the guard's files, ALWAYS block ---
+    ("Docker/B-enc: -v ~/.claude/hooks -> blocked",
+     lambda d: None, "docker run -v ~/.claude/hooks:/x ubuntu", None, 2),
+    ("Docker/B-enc: -v ~/.claude/bin :ro -> blocked (:ro must not save it)",
+     lambda d: None, "docker run -v ~/.claude/bin:/x:ro ubuntu", None, 2),
+    ("Docker/B-enc: --mount src=~/.claude/.sudo-overrides -> blocked",
+     lambda d: None, "docker run --mount type=bind,src=~/.claude/.sudo-overrides,dst=/x ubuntu", None, 2),
+    ("Docker/B-enc: -v ~/.claude/settings.json -> blocked",
+     lambda d: None, "docker run -v ~/.claude/settings.json:/x ubuntu", None, 2),
+    ("Docker/B-enc: docker cp onto command-guard.py -> blocked",
+     lambda d: None, "docker cp somectr:/etc/passwd ~/.claude/hooks/command-guard.py", None, 2),
+    ("Docker/B-enc: PARENT mount -v ~/.claude (contains hooks) -> blocked",
+     lambda d: None, "docker run -v ~/.claude:/x ubuntu", None, 2),
+    ("Docker/B-enc: subagent (agent_id) -> blocked (reaches subagents)",
+     lambda d: None, "docker run -v ~/.claude/hooks:/x ubuntu", AID, 2),
+    ("Docker/A: subagent + own level-2 override stays blocked",
+     lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 2)),
+     "docker run --privileged ubuntu", AID, 2),
+    # Boundary: pending dir is deliberately NOT self-protected -> must NOT over-match
+    ("Docker/B-enc: -v ~/.claude/.sudo-overrides-pending -> allowed (boundary)",
+     lambda d: None, "docker run -v ~/.claude/.sudo-overrides-pending:/x ubuntu", None, 0),
+
+    # --- B-protected: mount onto a blocked_paths_write path, level-dependent ---
+    ("Docker/B-prot: -v /:/host -> blocked (root escape)",
+     lambda d: None, "docker run -v /:/host ubuntu", None, 2),
+    ("Docker/B-prot: -v /etc:/x no override -> blocked",
+     lambda d: None, "docker run -v /etc:/x ubuntu", None, 2),
+    ("Docker/B-prot: -v ~/.ssh:/x no override -> blocked",
+     lambda d: None, "docker run -v ~/.ssh:/x ubuntu", None, 2),
+    ("Docker/B-prot: -v /etc:/x ALLOWED with a level-2 override",
+     lambda d: write_override(d, "system-test.json", coordinator_override(2)),
+     "docker run -v /etc:/x ubuntu", None, 0),
+    ("Docker/B-prot: subagent -v /etc:/x no override -> blocked",
+     lambda d: None, "docker run -v /etc:/x ubuntu", AID, 2),
+    ("Docker/B-prot: subagent -v /etc:/x WITH agent level-2 -> allowed",
+     lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 2)),
+     "docker run -v /etc:/x ubuntu", AID, 0),
+
+    # --- Negative: normal container testing MUST run free (no override) ---
+    ("Docker/neg: -v ./app:/app -p ... node -> allowed",
+     lambda d: None, "docker run -v ./app:/app -p 8080:80 node", None, 0),
+    ("Docker/neg: plain docker run ubuntu -> allowed",
+     lambda d: None, "docker run ubuntu", None, 0),
+    ("Docker/neg: -u 1000 -v ./app:/app -> allowed",
+     lambda d: None, "docker run -u 1000 -v ./app:/app myimg", None, 0),
+    ("Docker/neg: -v $(pwd):/work -> allowed (substituted source out of scope)",
+     lambda d: None, "docker run --rm -v $(pwd):/work python pytest", None, 0),
+    ("Docker/neg: docker build . -> allowed",
+     lambda d: None, "docker build -t x .", None, 0),
+    ("Docker/neg: docker compose up -> allowed",
+     lambda d: None, "docker compose up", None, 0),
+    ("Docker/neg: docker ps -> allowed",
+     lambda d: None, "docker ps", None, 0),
+    ("Docker/neg: subagent -v ./app:/app -> allowed (subagent testing is free too)",
+     lambda d: None, "docker run -v ./app:/app node", AID, 0),
+    ("Docker/neg: non-docker path containing the word -> allowed",
+     lambda d: None, "cat ./docker/readme", None, 0),
+]
+CASES.extend(DOCKER_CASES)
+
+
 # --- Session-binding cases: format (name, setup, command, agent_id, call_session_id, expected) ---
 # An override carrying a session_id only applies to that exact session; an
 # override WITHOUT a session_id field still applies across sessions (compat).

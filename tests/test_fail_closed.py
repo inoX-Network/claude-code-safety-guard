@@ -41,6 +41,9 @@ def test_fail_closed():
     os.unlink(empty)
     # B5: fallback must not over-block normal work
     results.append(("B5 missing rules: 'ls -la' allowed", _run("ls -la", "/no/such/rules.json") == 0))
+    # B6: missing rules -> docker --privileged still blocked (hardcoded flag fallback)
+    results.append(("B6 missing rules: docker --privileged blocked",
+                    _run("docker run --privileged ubuntu", "/no/such/rules.json") == 2))
 
     passed = sum(1 for _, ok in results if ok)
     for name, ok in results:

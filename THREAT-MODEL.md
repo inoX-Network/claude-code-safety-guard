@@ -34,6 +34,18 @@ do, and which layer is responsible for the rest.
   whitespace before every check, so `cat${IFS}~/.ssh/id_rsa` is caught.
 - **Protected-path writes** — Bash and `Write`/`Edit`/`MultiEdit`/`NotebookEdit`
   against `~/.ssh`, `/etc/*`, `/boot`, `/usr/bin`, etc. Level-dependent.
+- **Docker / Podman host access** — catastrophic flags (`--privileged`, the
+  Docker socket, host namespaces `--pid/network/ipc/uts=host`,
+  `--cap-add=ALL/SYS_ADMIN`, `seccomp/apparmor=unconfined`) are always blocked.
+  A bind-mount whose host source *is, contains, or lies under* a self-protected
+  path is always blocked (**encirclement** — a container editing the guard's own
+  files from the inside, which on the host never appears as an `Edit`/`>`). A
+  bind-mount onto another protected write-path (`/etc`, `~/.ssh`, …) is
+  level-dependent, exactly like a direct write. Normal container work
+  (`docker run -v ./project:/app …`, named volumes, `$(pwd)`) runs free. One
+  check on the Bash command string — so opencode inherits it (Docker arrives via
+  `bash`, not the un-gated `apply_patch`, so the opencode caveat below does not
+  weaken it).
 - **Self-protection (Claude Code)** — under Claude Code, no tool call (Bash or
   editor, including interpreter one-liners) may modify the guard itself: its
   hook, rules, override directory, approval scripts, settings, or rules docs. No
@@ -63,6 +75,7 @@ trying to handle them here would only add false positives and false confidence.
 | **"Is this content malicious?"** Judging whether a script/diff/file is hostile. | A deterministic hook cannot reason about intent. An LLM classifier inside the hook would be non-deterministic, slow on every call, and itself injectable by the very content it inspects. | **Advisory review layer** — a separate, non-blocking LLM-in-the-loop review (fresh context) plus a human who gates. Advisor, not gatekeeper. |
 | **Obfuscation in general.** Bash is Turing-complete; a determined attacker can encode payloads through user-defined variables, indirect expansion, or external stages the hook never sees as a literal string. | No regex/substring layer can fully tame a Turing-complete shell. The hook closes the common, high-signal vectors, not every theoretical one. | **Sandbox + least privilege** as the hard boundary; the hook as defense-in-depth on top. |
 | **opencode write/self-protect gates are not deterministic.** Under opencode (vs. Claude Code) the guard runs as a plugin bridge. `apply_patch` is **not** gated — it carries a multi-file `patchText`, not a single path — so it is an un-gated write path, including to self-protected files. The bridge also forwards `session_id` only optionally and never `agent_id`. | A multi-file patch cannot map onto the file-path-based write/self-protect checks, and the bridge cannot supply the `agent_id`/stable `session_id` scoping the hook expects. So the "no tool call may modify the guard" and protected-path-write guarantees above hold for Claude Code, **not** deterministically for opencode. | **opencode's native `permission`** — set `apply_patch`/`edit` to `ask`/`deny` in `opencode.json` as a conscious config — plus sandbox/least-privilege. For session-bound overrides use `--all-sessions` (see SESSION-BINDING-GAP.md §7). |
+| **Docker ≈ host-root; indirect & obfuscated container starts.** If the agent's user is in the `docker` group, the daemon can be driven to root regardless of any flag-gating. `docker compose up` (flags live in YAML), Makefile targets and shell scripts never expose the flags as a literal; `-v $(echo /):/host` hides the mount source; `docker exec` into an already-running container is not gated. | The Docker check reduces the surface of *direct, literal, flagged* `docker run`/`cp` calls through the tool path — it is **not** daemon-level access control, and the same Turing-complete / deferred-execution limits as the rows above apply to indirect starts and substituted sources. Container *creation* is gated (A/B), so a dangerous container is hard to create directly; `docker exec` is mitigated by that. (Root-owned files a root container leaves behind are a usability annoyance, not a hole.) | **Rootless Docker, a dedicated build user, or no daemon access** — plus sandbox/least-privilege. Gate flags in `compose`/Makefiles at their source. |
 
 ## How it composes
 

@@ -124,5 +124,20 @@
     "gate_servers": ["postgres"],
     "safe_servers": ["context7", "sequential-thinking"],
     "read_verb_prefixes": ["get", "list", "search", "read", "view", "status", "preview", "describe", "fetch"]
+  },
+  "_comment_docker": "Docker/Podman catastrophic flags -- ALWAYS blocked (no override), like blocked_patterns. The hook unions these onto a hardcoded fallback, so they fire even with a missing rules file. Bind-mounts onto self-protected or blocked_paths_write paths are handled by the hook directly (it reuses SELF_PROTECT_PATHS / blocked_paths_write), so no path config is needed here.",
+  "docker": {
+    "blocked_flags": [
+      "--privileged",
+      "/var/run/docker.sock", "/run/docker.sock",
+      "--pid=host", "--pid host",
+      "--network=host", "--network host", "--net=host", "--net host",
+      "--ipc=host", "--ipc host",
+      "--uts=host", "--uts host",
+      "--cap-add=ALL", "--cap-add ALL",
+      "--cap-add=SYS_ADMIN", "--cap-add SYS_ADMIN",
+      "--security-opt=seccomp=unconfined", "seccomp=unconfined",
+      "apparmor=unconfined"
+    ]
   }
 }

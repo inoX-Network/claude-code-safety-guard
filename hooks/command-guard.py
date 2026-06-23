@@ -530,6 +530,162 @@ def path_decision(blocked_path: str, level: int, grants: dict) -> tuple[bool, st
     return allowed, need
 
 
+# --- Docker / Podman bind-mount + flag protection ---------------------------
+# A container started through the tool path can reach the host underneath the
+# self-protection: a bind-mount onto a host path is, security-wise, a write to
+# that host path (the "encirclement" vector — the container edits the guard's
+# own files from the inside; on the host that is a write that never appeared as
+# an Edit/>). The Docker socket, --privileged and host namespaces hand over the
+# host directly. Implemented on the Bash command-string layer, so opencode
+# (bash -> Bash -> command-guard.py) inherits it with zero plugin code.
+
+# Catastrophic flags — hardcoded minimal fallback so they fire even with a
+# missing/empty rules file (load_rules() then returns _FALLBACK_RULES, which has
+# no "docker" key). rules["docker"]["blocked_flags"] is unioned on top. NEVER
+# overridable — like blocked_patterns / force_push.
+_DOCKER_FALLBACK_FLAGS = [
+    "--privileged",
+    "/var/run/docker.sock", "/run/docker.sock",
+    "--pid=host", "--pid host",
+    "--network=host", "--network host", "--net=host", "--net host",
+    "--ipc=host", "--ipc host",
+    "--uts=host", "--uts host",
+    "--cap-add=ALL", "--cap-add ALL",
+    "--cap-add=SYS_ADMIN", "--cap-add SYS_ADMIN",
+    "seccomp=unconfined", "apparmor=unconfined",
+]
+
+
+def _paths_overlap(a: str, b: str) -> bool:
+    """True if two host paths overlap: equal, or one contains the other.
+
+    A bind-mount is dangerous whenever the mounted dir IS a protected path, lies
+    BELOW one, or CONTAINS one — mounting a parent hands the container every
+    protected path underneath (`-v /:/host`, `-v /etc:/x`, `-v ~/.claude:/x`).
+    Plain prefix matching (what a direct write uses) only covers the first two;
+    a mount needs BOTH directions. Boundary-exact via the trailing "/", so /etc
+    does not match /etc-other and .sudo-overrides not .sudo-overrides-pending.
+    """
+    pa = expand_path(a).rstrip("/")
+    pb = expand_path(b).rstrip("/")
+    if pa == pb:
+        return True
+    # pa == "" is the root mount ("/"); pb.startswith("/") then matches every
+    # absolute protected path, i.e. "/" contains them all.
+    return pb.startswith(pa + "/") or pa.startswith(pb + "/")
+
+
+def _mount_kv_src(val: str) -> str | None:
+    """Extract src=/source= from a --mount comma-list (type=bind,src=SRC,dst=…)."""
+    for part in val.split(","):
+        part = part.strip()
+        for key in ("src=", "source="):
+            if part.startswith(key):
+                return part[len(key):]
+    return None
+
+
+def _docker_bind_sources(command: str) -> list[str]:
+    """Best-effort: parse host bind-mount sources out of a docker/podman command.
+
+    High-signal, not exhaustive (like the sudo/self-protect parsers):
+      -v SRC:DST[:opts] / --volume SRC:DST[:opts] / -vSRC:… / --volume=SRC:…
+      --mount type=bind,src=SRC,… / source=SRC
+      docker cp <ctr>:<path> SRC                 -> the host path argument
+    Only path-like literal sources are kept (contain '/' or start with '~');
+    named volumes (no '/') and substituted sources ($(…), ${…}, `…`) are skipped
+    — covered by the harmless/limits path, not misclassified (see THREAT-MODEL).
+    """
+    sources: list[str] = []
+
+    def _add(src: str | None) -> None:
+        if not src:
+            return
+        src = src.strip().strip("'\"")
+        if not src or "$" in src or "`" in src:          # substituted -> out of scope
+            return
+        if "/" not in src and not src.startswith("~"):   # named volume / non-path
+            return
+        sources.append(src)
+
+    toks = command.split()
+    for i, tok in enumerate(toks):
+        nxt = toks[i + 1] if i + 1 < len(toks) else ""
+        if tok in ("-v", "--volume") and nxt:
+            _add(nxt.split(":", 1)[0])
+        elif tok.startswith("-v") and len(tok) > 2:
+            _add(tok[2:].split(":", 1)[0])
+        elif tok.startswith("--volume="):
+            _add(tok[len("--volume="):].split(":", 1)[0])
+        elif tok == "--mount" and nxt:
+            _add(_mount_kv_src(nxt))
+        elif tok.startswith("--mount="):
+            _add(_mount_kv_src(tok[len("--mount="):]))
+
+    # docker cp <ctr>:<path> SRC -> host path argument(s). Container refs look
+    # like name:/path (a ':' but no leading /, ~ or .); skip those, keep host paths.
+    if "cp" in toks:
+        for tok in toks:
+            t = tok.strip("'\"")
+            if t.startswith("-") or t in ("docker", "podman", "cp"):
+                continue
+            if ":" in t and t[:1] not in ("/", "~", "."):
+                continue
+            if "/" in t or t.startswith("~"):
+                _add(t)
+    return sources
+
+
+def check_docker_always(command: str, rules: dict) -> tuple[bool, str]:
+    """ALWAYS-block docker/podman checks — independent of override/agent/session.
+
+    A — catastrophic flags: privileged, the Docker socket, host namespaces,
+        cap-add ALL/SYS_ADMIN, seccomp/apparmor unconfined. Configured
+        rules["docker"]["blocked_flags"] are unioned onto _DOCKER_FALLBACK_FLAGS.
+    B-encirclement — a bind-mount whose host source overlaps a SELF_PROTECT path
+        (incl. mounting a PARENT dir that contains it). No :ro/:rw distinction —
+        there is no legitimate reason for an agent-started container to mount the
+        guard's own files, so dev mode does NOT lift it either.
+    Neither is overridable — only the owner via !. Called before the override
+    load in main(), so it reaches every subagent and every opencode call.
+
+    Returns (block, reason).
+    """
+    command = _normalize_obfuscation(command)
+    if not re.search(r"\b(docker|podman)\b", command):
+        return False, ""
+
+    configured = rules.get("docker", {}).get("blocked_flags", [])
+    flags = _DOCKER_FALLBACK_FLAGS + [f for f in configured if f not in _DOCKER_FALLBACK_FLAGS]
+    for flag in flags:
+        if flag and flag in command:
+            return True, flag
+
+    for src in _docker_bind_sources(command):
+        for prot in SELF_PROTECT_PATHS:
+            if _paths_overlap(src, prot):
+                return True, f"bind-mount onto {prot}"
+    return False, ""
+
+
+def docker_mount_blocked_path(command: str, blocked_paths_write: list[str]) -> str | None:
+    """Level-dependent B class: a bind-mount whose host source overlaps a
+    blocked_paths_write entry. Returns which protected path is hit so main() runs
+    the normal path_decision — identical level behaviour to a direct write to
+    that path. Overlap is bidirectional, so `-v /:/host` / `-v /etc:/x` are caught
+    even though `/` and `/etc` are not themselves listed (they CONTAIN listed
+    paths like /etc/passwd).
+    """
+    command = _normalize_obfuscation(command)
+    if not re.search(r"\b(docker|podman)\b", command):
+        return None
+    for src in _docker_bind_sources(command):
+        for bp in blocked_paths_write:
+            if _paths_overlap(src, bp):
+                return bp
+    return None
+
+
 def check_confirmation(command: str, patterns: list[str]) -> bool:
     """Check whether the command requires confirmation (desktop notification)."""
     for pattern in patterns:
@@ -1069,6 +1225,21 @@ def main():
         )
         sys.exit(2)
 
+    # 2e. Docker/Podman ALWAYS-block — catastrophic flags + encirclement mounts.
+    #     Sits before the override load (like 1/2/2b/2c), so it reaches every
+    #     subagent and every opencode call (which forwards no agent_id) — neither
+    #     A nor B-encirclement is overridable. A docker `-v` carries no
+    #     WRITE_INDICATOR, so it slips under 2c and needs its own check.
+    docker_always, docker_reason = check_docker_always(command, rules)
+    if docker_always:
+        _audit(input_data, "Bash", command, "block", f"docker:{docker_reason}", "hard")
+        print(
+            f"BLOCKED: docker — {docker_reason}. ALWAYS blocked (no override); "
+            f"only the owner via ! may run this.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     # 2d. Credential-/.env-read protection on the Bash side (closes the Read-tool gap).
     #     Runs BEFORE the override-dependent path/sudo logic: check_read_protection
     #     regulates its own override level (always_blocked is hard, require_override_1
@@ -1124,6 +1295,10 @@ def main():
     #    (allowed_paths). Level 2+: all protected paths (single ops;
     #    recursive-system stays hard-blocked via blocked_patterns).
     blocked_path = check_blocked_paths(command, rules.get("blocked_paths_write", []))
+    if not blocked_path:
+        # A docker bind-mount onto a blocked_paths_write entry is, security-wise,
+        # a write to that path — same level behaviour as `echo x > /etc/passwd`.
+        blocked_path = docker_mount_blocked_path(command, rules.get("blocked_paths_write", []))
     if blocked_path:
         allowed, need = path_decision(blocked_path, level, grants)
         if not allowed:
