@@ -145,7 +145,7 @@ check "ctx docs"  '{"tool_name":"mcp__context7__query-docs","tool_input":{}}'
 ## 8. Automated suite
 
 ```bash
-python3 tests/test_command_guard.py   # expected: 122 passed, 0 failed
+python3 tests/test_command_guard.py   # expected: 187 passed, 0 failed
 python3 tests/test_freigabe_e2e.py    # expected:  25 passed, 0 failed
 ```
 
