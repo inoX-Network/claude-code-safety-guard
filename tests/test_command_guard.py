@@ -316,6 +316,20 @@ CASES = [
     ("SELF/Bash: only READING the hook (no write indicator) -> allowed",
      lambda d: None, "grep def ~/.claude/hooks/command-guard.py", None, 0),
 
+    # === SELF-PROTECTION Bash — path-traversal disguise (escalation fix) ===
+    # /./ , /../ and // resolve to the same self-protect path on write, but
+    # slipped past the string matching. MUST stay blocked.
+    ("SELF/Bash traversal: /./ in active override dir -> blocked",
+     lambda d: None, "echo x > ~/.claude/./.sudo-overrides/agent-self.json", None, 2),
+    ("SELF/Bash traversal: /../ back into override dir -> blocked",
+     lambda d: None, "echo x > ~/.claude/.sudo-overrides-pending/../.sudo-overrides/agent-self.json", None, 2),
+    ("SELF/Bash traversal: // in command-guard path -> blocked",
+     lambda d: None, "echo x > ~/.claude//hooks/command-guard.py", None, 2),
+    ("SELF/Bash traversal: /./ via cp into override dir -> blocked",
+     lambda d: None, "cp /tmp/x ~/.claude/./.sudo-overrides/agent-self.json", None, 2),
+    ("SELF/Bash traversal: /./ in interpreter open() -> blocked",
+     lambda d: None, "python3 -c \"open('~/.claude/./.sudo-overrides/a.json','w')\"", None, 2),
+
     # === OWNER-ONLY commands (approval-channel protection 2026-06-07) ===
     ("OWNER-ONLY: AI calls grant-override -> blocked",
      lambda d: None, "grant-override agent-x", None, 2),
@@ -692,6 +706,14 @@ WRITE_CASES = [
     # pending directory is NOT protected -> proposal allowed
     ("Write: pending override proposal -> allowed",
      lambda d: None, "Write", "~/.claude/.sudo-overrides-pending/agent-x.json", None, 0),
+
+    # SELF-PROTECTION traversal — Write/Edit (escalation fix)
+    ("Write SELF traversal: /./ override dir -> blocked",
+     lambda d: None, "Write", "~/.claude/./.sudo-overrides/agent-self.json", None, 2),
+    ("Write SELF traversal: /../ back into override dir -> blocked",
+     lambda d: None, "Write", "~/.claude/.sudo-overrides-pending/../.sudo-overrides/agent-self.json", None, 2),
+    ("Write SELF traversal: // command-guard -> blocked",
+     lambda d: None, "Edit", "~/.claude//hooks/command-guard.py", None, 2),
 
     # .env write protection (analogous to read)
     ("Write .env/Level0 -> blocked",
