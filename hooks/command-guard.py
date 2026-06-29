@@ -463,9 +463,9 @@ def hits_self_protect(file_path: str) -> str | None:
     proposals). NO override lifts a match — only dev mode unlocks the hook
     source files (DEV_UNLOCKABLE_PATHS).
     """
-    fp = expand_path(file_path).rstrip("/")
+    fp = _norm_path(file_path)
     for prot in SELF_PROTECT_PATHS:
-        p = expand_path(prot).rstrip("/")
+        p = _norm_path(prot)
         if fp == p or fp.startswith(p + "/"):
             return None if _dev_unlocked(prot) else prot
     return None
@@ -484,6 +484,10 @@ def command_hits_self_protect(command: str) -> str | None:
     unlocked in dev mode blocks.
     """
     command = _normalize_obfuscation(command)
+    # Resolve path traversal lexically (/./ , // , /seg/../) so disguised
+    # self-protect targets do not slip past the string matchers below (escalation
+    # fix): re.search/substring on the raw line missed them otherwise.
+    command = _collapse_path_traversal(command)
 
     # Interpreter one-liners (python -c open(hook,"w"), node -e fs.writeFileSync,
     # python -c os.remove(rules)) carry no shell WRITE_INDICATOR, so the detection
@@ -568,6 +572,26 @@ def _norm_path(p: str) -> str:
     """
     expanded = re.sub(r"/{2,}", "/", expand_path(p))   # normpath keeps a leading //
     return os.path.normpath(expanded).rstrip("/")
+
+
+def _collapse_path_traversal(s: str) -> str:
+    """Resolve /./ , // and /seg/../ in an ARBITRARY string, lexically.
+
+    Unlike _norm_path (single path) this works on a whole command line (multiple
+    tokens/arguments). Needed because the Bash self-protect matchers check via
+    substring / re.search across the whole line: a disguised
+    `~/.claude/./.sudo-overrides/x`, `.../-pending/../.sudo-overrides/x` or
+    `~/.claude//hooks/...` lands on the protected path on write but slipped past
+    the string match (escalation gap). Purely lexical, no filesystem access (like
+    _norm_path). Iterative until stable (resolves chained ../).
+    """
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(r"/{2,}", "/", s)                  # // -> /
+        s = re.sub(r"/\.(?=/)", "", s)                # /./ -> /
+        s = re.sub(r"/[^/]+/\.\.(?=/|$)", "", s)      # /seg/.. -> ''
+    return s
 
 
 def _paths_overlap(a: str, b: str) -> bool:
@@ -974,7 +998,10 @@ def command_hits_protected_read(command: str, rules: dict,
         #     reading the key file directly.
         if req1_dirs:
             tok_exp = expand_path(tok).rstrip("/")
-            if any(d == tok_exp or d.startswith(tok_exp + "/") for d in req1_dirs):
+            # An empty token (a bare "/" or a regex slash) would otherwise match
+            # EVERY absolute key path via startswith("/") -> over-block false
+            # positive (grep/rsync/cp with a /-argument).
+            if tok_exp and any(d == tok_exp or d.startswith(tok_exp + "/") for d in req1_dirs):
                 override = load_override(agent_id, session_id)
                 if not override or override.get("override_level", 0) < 1:
                     return True, (
