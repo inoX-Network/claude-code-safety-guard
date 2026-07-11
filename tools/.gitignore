@@ -1,0 +1,7 @@
+# Never commit generated audit reports.
+# --full reports contain real commands/paths/tasks (treat like a password).
+# The default export already lives outside the repo (~/.cache/guard-audit/),
+# but this catches it if someone exports here via --html ./x.html.
+report.html
+*guard-audit*.html
+*.audit.html
