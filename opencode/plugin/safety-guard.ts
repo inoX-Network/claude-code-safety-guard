@@ -28,7 +28,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Konfiguration
@@ -65,16 +65,97 @@ const TOOL_MAP: Record<string, GuardMapping> = {
   write: { toolName: "Write", argKey: "filePath", inputKey: "file_path" },
   // edit -> Edit, filePath -> tool_input.file_path
   edit: { toolName: "Edit", argKey: "filePath", inputKey: "file_path" },
-  // HINWEIS (verifiziert gegen @opencode-ai/plugin 1.17.7): opencodes Multi-File-
-  // Patch-Tool heisst "apply_patch" und liefert KEINEN filePath, sondern
-  // "patchText" (ein Diff ueber ggf. mehrere Dateien). command-guard erwartet
-  // aber einen einzelnen file_path -> ein sauberes Mapping ist nicht moeglich.
-  // apply_patch wird daher hier bewusst NICHT gegated; decke es stattdessen ueber
-  // opencodes natives permission.edit ab (siehe opencode/README.md).
+  // apply_patch wird NICHT hier gemappt, sondern gesondert behandelt (s.u.):
+  // Es traegt keinen einzelnen filePath, sondern einen Diff ueber n Dateien.
 };
+
+// --- apply_patch ------------------------------------------------------------
+//
+// opencodes Multi-Datei-Patch-Tool. Es liefert KEINEN filePath, sondern
+// "patchText" im OpenAI-apply_patch-Format:
+//
+//     *** Begin Patch
+//     *** Update File: src/foo.ts
+//     *** Move to: src/bar.ts
+//     *** Add File: neu.ts
+//     *** Delete File: alt.ts
+//     *** End Patch
+//
+// Frueher war apply_patch bewusst NICHT gegated (kein sauberes 1:1-Mapping auf
+// den Guard, der genau EINEN file_path erwartet). Das war eine echte Luecke:
+// Solange opencode in der bubblewrap-Sandbox lief, hat die Sandbox sie
+// aufgefangen. Laeuft opencode ungesandboxt auf dem Host (Guard-als-Autoritaet,
+// wie unter Claude Code), war apply_patch ein Schreibkanal voellig OHNE Bremse.
+//
+// Jetzt: Wir zerlegen den Patch in seine Ziel-Pfade und schicken JEDEN einzeln
+// als Write durch den Guard. Ein einziger blockierter Pfad blockt den ganzen
+// Patch (ein Patch ist atomar — teilweise anwenden gaebe es nicht).
+//
+// SICHERHEITSKERN — absolute Aufloesung: Die Pfade im Patch sind RELATIV zum
+// Arbeitsverzeichnis. Wuerden wir "../../.claude/settings.json" unaufgeloest an
+// den Guard geben, koennte der es gegen seine Self-Protect-Pfade nicht matchen
+// und wuerde durchwinken. Deshalb wird jeder Pfad gegen das Projektverzeichnis
+// absolut aufgeloest, BEVOR der Guard ihn sieht. Das ist der Traversal-Schutz.
+
+// Erfasst die drei Direktiven, die eine Datei als Ziel benennen.
+const PATCH_ZIEL_REGEX = /^\*\*\* (?:Add|Delete|Update) File:[ \t]*(.+?)[ \t]*$/gm;
+// "Move to:" benennt das Umbenennungs-ZIEL — ebenfalls ein Schreibziel.
+const PATCH_MOVE_REGEX = /^\*\*\* Move to:[ \t]*(.+?)[ \t]*$/gm;
+
+// Zieht alle Schreib-Ziele aus einem Patch und loest sie absolut auf.
+// Exportiert, damit opencode/test_apply_patch.mjs die ECHTE Funktion prueft
+// statt die Logik im Test nachzubauen (Nachbauten driften — siehe der frueher
+// verwaiste "patch"-Eintrag in test_bridge.mjs).
+export function patchZielPfade(patchText: string, arbeitsverzeichnis: string): string[] {
+  const gefunden = new Set<string>();
+
+  for (const regex of [PATCH_ZIEL_REGEX, PATCH_MOVE_REGEX]) {
+    regex.lastIndex = 0; // /g-Regex ist zustandsbehaftet — vor jedem Lauf zuruecksetzen
+    let treffer: RegExpExecArray | null;
+    while ((treffer = regex.exec(patchText)) !== null) {
+      const roh = treffer[1]?.trim();
+      if (!roh) continue;
+      // Absolut aufloesen: relative Pfade (inkl. ../-Traversal) gegen das
+      // Projektverzeichnis, absolute Pfade bleiben wie sie sind.
+      gefunden.add(isAbsolute(roh) ? resolve(roh) : resolve(arbeitsverzeichnis, roh));
+    }
+  }
+
+  return [...gefunden];
+}
 
 // Damit die "Guard nicht installiert"-Warnung nur EINMAL pro Prozess erscheint.
 let warnedMissingGuard = false;
+
+// Ruft command-guard.py mit einem tool_input auf und liefert Exit-Code + stderr.
+function rufeGuard(
+  guardPath: string,
+  toolName: string,
+  inputKey: string,
+  payload: string,
+  sessionID?: string,
+): { status: number | null; stderr: string; error?: Error } {
+  const guardInput: Record<string, unknown> = {
+    tool_name: toolName,
+    tool_input: { [inputKey]: payload },
+  };
+  // session_id defensiv mitgeben, falls vorhanden (Override-Session-Binding).
+  if (sessionID) guardInput.session_id = sessionID;
+  // agent_id liefert opencode hier nicht zuverlaessig -> bewusst weggelassen.
+  // Ohne agent_id behandelt der Guard den Call als Hauptsession (Stufe 0),
+  // was die sichere Default-Annahme ist.
+
+  const result = spawnSync("python3", [guardPath], {
+    input: JSON.stringify(guardInput),
+    encoding: "utf-8",
+  });
+
+  return {
+    status: result.status,
+    stderr: (result.stderr || "").trim(),
+    error: result.error ?? undefined,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -82,9 +163,16 @@ let warnedMissingGuard = false;
 
 // opencode entdeckt Plugins als BENANNTE Exports (kein Default-Export; verifiziert
 // gegen @opencode-ai/plugin 1.17.7). Die Plugin-Funktion erhaelt einen Kontext
-// (project, client, $, directory, worktree) — wir brauchen davon nichts und geben
-// direkt das Hooks-Objekt zurueck. Typ laut Package: (input, options?) => Promise<Hooks>.
-export const SafetyGuardPlugin = async (_ctx: unknown) => {
+// (project, client, $, directory, worktree) — wir brauchen daraus `directory`, um
+// die relativen apply_patch-Pfade absolut aufloesen zu koennen.
+// Typ laut Package: (input, options?) => Promise<Hooks>.
+export const SafetyGuardPlugin = async (ctx: unknown) => {
+  const kontext = (ctx ?? {}) as { directory?: string; worktree?: string };
+  // Fallback-Kette: directory -> worktree -> cwd. Ein falsches Arbeitsverzeichnis
+  // wuerde relative Patch-Pfade falsch aufloesen, deshalb lieber cwd als nichts.
+  const arbeitsverzeichnis =
+    kontext.directory || kontext.worktree || process.cwd();
+
   return {
     "tool.execute.before": async (input: unknown, output: unknown) => {
       // Defensives Auslesen — die exakte Form ist nicht gegen den Typ verifiziert.
@@ -100,19 +188,7 @@ export const SafetyGuardPlugin = async (_ctx: unknown) => {
       const toolName = inp.tool;
       if (!toolName) return; // ohne Tool-Namen koennen wir nichts mappen -> durchlassen
 
-      const mapping = TOOL_MAP[toolName];
-      if (!mapping) {
-        // Unbekanntes/nicht-gegatetes Tool -> bewusst durchlassen (s.o.).
-        return;
-      }
-
       const args = out.args ?? {};
-      const payload = args[mapping.argKey];
-      if (typeof payload !== "string" || payload === "") {
-        // Kein verwertbares Argument -> nichts zu pruefen, durchlassen.
-        return;
-      }
-
       const guardPath = resolveGuardPath();
 
       // Fail-OPEN nur fuer "Guard nicht installiert": Wuerden wir hier blocken,
@@ -130,40 +206,88 @@ export const SafetyGuardPlugin = async (_ctx: unknown) => {
         return;
       }
 
-      // command-guard-JSON bauen — exakt die Felder die main() in command-guard.py liest.
-      const guardInput: Record<string, unknown> = {
-        tool_name: mapping.toolName,
-        tool_input: { [mapping.inputKey]: payload },
-      };
-      // session_id defensiv mitgeben, falls vorhanden (Override-Session-Binding).
-      if (inp.sessionID) guardInput.session_id = inp.sessionID;
-      // agent_id liefert opencode hier nicht zuverlaessig -> bewusst weggelassen.
-      // Ohne agent_id behandelt der Guard den Call als Hauptsession (Stufe 0),
-      // was die sichere Default-Annahme ist.
+      // --- Sonderfall apply_patch: n Ziel-Pfade, jeder einzeln durch den Guard ---
+      if (toolName === "apply_patch") {
+        const patchText = args.patchText;
+        if (typeof patchText !== "string" || patchText.trim() === "") {
+          // Kein Patch-Inhalt -> nichts zu schreiben, nichts zu pruefen.
+          return;
+        }
 
-      const result = spawnSync("python3", [guardPath], {
-        input: JSON.stringify(guardInput),
-        encoding: "utf-8",
-      });
+        const zielPfade = patchZielPfade(patchText, arbeitsverzeichnis);
+
+        // FAIL-CLOSED: Es liegt ein Patch vor, aber wir erkennen kein einziges
+        // Ziel. Dann verstehen wir das Format nicht — und was wir nicht verstehen,
+        // koennen wir nicht pruefen. Durchlassen waere hier genau das Loch, das
+        // dieser Zweig schliessen soll.
+        if (zielPfade.length === 0) {
+          throw new Error(
+            "[safety-guard] apply_patch: Kein Ziel-Pfad im Patch erkennbar " +
+              "(erwartet: '*** Add/Update/Delete File:' oder '*** Move to:'). " +
+              "Der Patch wurde vorsorglich blockiert, weil ein nicht lesbarer " +
+              "Patch nicht geprüft werden kann.",
+          );
+        }
+
+        for (const pfad of zielPfade) {
+          const r = rufeGuard(guardPath, "Write", "file_path", pfad, inp.sessionID);
+
+          if (r.error) {
+            throw new Error(
+              `[safety-guard] Konnte command-guard.py nicht ausführen: ` +
+                `${r.error.message}. apply_patch vorsorglich blockiert. ` +
+                `(python3 im PATH? Guard-Pfad korrekt?)`,
+            );
+          }
+
+          if (r.status === 2) {
+            throw new Error(
+              `[safety-guard] apply_patch blockiert — Ziel-Pfad "${pfad}" ` +
+                `ist nicht erlaubt.\n${r.stderr || "Vom Safety-Guard blockiert."}`,
+            );
+          }
+        }
+
+        // Alle Ziel-Pfade erlaubt -> Patch darf laufen.
+        return;
+      }
+
+      // --- Regulaerer Fall: Tools mit genau einem Argument ---
+      const mapping = TOOL_MAP[toolName];
+      if (!mapping) {
+        // Unbekanntes/nicht-gegatetes Tool -> bewusst durchlassen (s.o.).
+        return;
+      }
+
+      const payload = args[mapping.argKey];
+      if (typeof payload !== "string" || payload === "") {
+        // Kein verwertbares Argument -> nichts zu pruefen, durchlassen.
+        return;
+      }
+
+      const r = rufeGuard(
+        guardPath,
+        mapping.toolName,
+        mapping.inputKey,
+        payload,
+        inp.sessionID,
+      );
 
       // spawnSync-Fehler (z.B. python3 fehlt): NICHT stillschweigend durchlassen
       // bei einem real existierenden Guard — das waere ein Schutz-Loch. Wir
       // blocken hier defensiv, damit ein kaputtes Setup auffaellt statt den
       // Schutz lautlos abzuschalten.
-      if (result.error) {
+      if (r.error) {
         throw new Error(
-          `[safety-guard] Konnte command-guard.py nicht ausfuehren: ` +
-            `${result.error.message}. Tool-Call vorsorglich blockiert. ` +
+          `[safety-guard] Konnte command-guard.py nicht ausführen: ` +
+            `${r.error.message}. Tool-Call vorsorglich blockiert. ` +
             `(python3 im PATH? Guard-Pfad korrekt?)`,
         );
       }
 
-      if (result.status === 2) {
+      if (r.status === 2) {
         // Block: stderr des Guards als Begruendung weiterreichen.
-        const reason =
-          (result.stderr && result.stderr.trim()) ||
-          "Tool-Call vom Safety-Guard blockiert.";
-        throw new Error(reason);
+        throw new Error(r.stderr || "Tool-Call vom Safety-Guard blockiert.");
       }
 
       // Exit 0 (oder alles ausser 2) -> erlauben. Der Guard selbst entscheidet
