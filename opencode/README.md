@@ -49,13 +49,27 @@ Tool-Call (`throw`), wenn der Guard mit Exit-Code 2 antwortet.
 ## Verhalten
 
 - **Geprüfte Tools:** `bash` → `Bash/command`, `read` → `Read/file_path`,
-  `write` → `Write/file_path`, `edit` → `Edit/file_path`.
-- **`apply_patch` wird NICHT geprüft.** opencodes Multi-File-Patch-Tool liefert
-  `patchText` (einen Diff über ggf. mehrere Dateien), keinen einzelnen `filePath` —
-  ein sauberes Mapping auf den dateibasierten Guard ist nicht möglich. Decke
-  Schreibzugriffe via `apply_patch` daher über opencodes **natives**
-  `permission.edit` ab (z.B. `"edit": "ask"` in `opencode.json`, deckt auch
-  `apply_patch`). Sonst wäre `apply_patch` ein ungeschützter Schreibweg.
+  `write` → `Write/file_path`, `edit` → `Edit/file_path`,
+  `apply_patch` → `Write/file_path` **je Ziel-Pfad im Patch** (siehe unten).
+- **`apply_patch` wird geprüft** (seit dem Schließen der Lücke). opencodes
+  Multi-File-Patch-Tool liefert `patchText` (einen Diff über ggf. mehrere Dateien)
+  statt eines einzelnen `filePath`. Das Plugin zerlegt den Patch in seine
+  Ziel-Pfade (`*** Add/Update/Delete File:` und `*** Move to:`) und schickt **jeden
+  einzeln** als `Write` durch den Guard. Ein blockierter Ziel-Pfad blockt den
+  **ganzen** Patch — ein Patch ist atomar, halb anwenden gibt es nicht.
+  - **Absolute Auflösung ist der Sicherheitskern:** Patch-Pfade sind *relativ* zum
+    Arbeitsverzeichnis. Unaufgelöst könnte der Guard `../../.claude/settings.json`
+    nicht gegen seine Self-Protect-Liste matchen und würde durchwinken. Das Plugin
+    löst deshalb jeden Pfad gegen das Projektverzeichnis absolut auf, **bevor** der
+    Guard ihn sieht.
+  - **Fail-closed bei unlesbarem Patch:** Liegt ein `patchText` vor, in dem kein
+    einziger Ziel-Pfad erkennbar ist, blockiert das Plugin. Was sich nicht parsen
+    lässt, lässt sich nicht prüfen.
+  - Warum das zählt: Solange opencode in einer Sandbox lief, fing die Sandbox diesen
+    Weg mit auf. Läuft opencode **ungesandboxt** auf dem Host (Guard als Autorität,
+    wie unter Claude Code), war `apply_patch` zuvor ein Schreibkanal ganz ohne Bremse.
+    Ein Verlass auf `permission.edit` allein reicht nicht — steht es auf `"allow"`,
+    ist der Weg offen.
 - **Nicht geprüfte Tools** (z.B. `list`, `glob`, `grep`, `webfetch`, MCP-Tools)
   werden **bewusst durchgelassen** — der Guard hat dafür keine Regeln, und ein
   pauschales Blocken würde jede Session unbrauchbar machen.
@@ -89,6 +103,25 @@ auf und erwartet:
 | bash | `python3 -c open("~/.ssh/id_rsa")` | Block (2) |
 | bash | `ls -la` | Allow (0) |
 | read | `data.json` | Allow (0) |
+
+Für `apply_patch` gibt es eine eigene Suite, die die **echte** Parser-Funktion aus
+`safety-guard.ts` importiert (kein Nachbau — Nachbauten driften) und die
+aufgelösten Pfade zusätzlich End-to-End durch den Guard schickt:
+
+```bash
+node opencode/test_apply_patch.mjs
+node opencode/test_plugin_load.mjs
+```
+
+| Patch-Inhalt | erwartet |
+|--------------|----------|
+| `*** Update File: ../../.claude/settings.json` | Block (Traversal → Self-Protect) |
+| `*** Add File: ../../.claude/hooks/boese.py` | Block (Guard selbst) |
+| `*** Update File: /etc/passwd` | Block |
+| `*** Add File: ../../.ssh/authorized_keys` | Block |
+| harmlose + **eine** böse Datei im selben Patch | Block (Patch ist atomar) |
+| `*** Update File: src/foo.ts` | Allow |
+| unlesbares Patch-Format | Block (fail-closed) |
 
 ## What to verify against your opencode version
 

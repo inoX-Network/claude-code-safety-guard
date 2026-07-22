@@ -2,7 +2,9 @@
 // - benannter Export vorhanden, KEIN Default-Export
 // - Hook tool.execute.before ist callable
 // - ein geblocktes bash-Tool wirft (throw)
-// - apply_patch wird NICHT gegated (kein Mapping) -> wirft NICHT
+// - apply_patch IST gegated: Patch auf geschuetzten Pfad wirft, harmloser nicht,
+//   unlesbares Patch-Format wirft (fail-closed). Frueher war apply_patch bewusst
+//   ungegated — das war die Luecke, die in der Sandbox versteckt lag.
 // Aufruf: node opencode/test_plugin_load.mjs   (Node >= 22 mit --experimental-strip-types,
 // node >= 23 automatisch). Setzt SAFETY_GUARD_PATH + CLAUDE_SECURITY_RULES auf Repo.
 import { fileURLToPath } from "node:url";
@@ -45,11 +47,35 @@ try { await before({ tool: "bash" }, { args: { command: "ls -la" } }); }
 catch { threwLs = true; }
 ok("bash 'ls -la' -> kein throw (allow)", !threwLs);
 
-// apply_patch: NICHT gemappt -> darf NICHT werfen (durchgelassen, per permission.edit abzudecken)
-let threwPatch = false;
-try { await before({ tool: "apply_patch" }, { args: { patchText: "*** Begin Patch" } }); }
-catch { threwPatch = true; }
-ok("apply_patch -> kein throw (bewusst nicht gegated)", !threwPatch);
+// apply_patch auf geschuetzten Pfad -> muss werfen. Absoluter Pfad, damit der
+// Fall unabhaengig vom Arbeitsverzeichnis eindeutig ist.
+const boeserPatch = [
+  "*** Begin Patch",
+  "*** Update File: /etc/passwd",
+  "*** End Patch",
+].join("\n");
+let threwBoeserPatch = false;
+try { await before({ tool: "apply_patch" }, { args: { patchText: boeserPatch } }); }
+catch { threwBoeserPatch = true; }
+ok("apply_patch auf /etc/passwd -> throw (block)", threwBoeserPatch);
+
+// apply_patch auf harmlose Projektdatei -> darf NICHT werfen (kein Fehlalarm)
+const harmloserPatch = [
+  "*** Begin Patch",
+  "*** Update File: src/foo.ts",
+  "*** End Patch",
+].join("\n");
+let threwHarmlos = false;
+try { await before({ tool: "apply_patch" }, { args: { patchText: harmloserPatch } }); }
+catch { threwHarmlos = true; }
+ok("apply_patch auf src/foo.ts -> kein throw (allow)", !threwHarmlos);
+
+// Unlesbares Patch-Format -> fail-closed, muss werfen. Was der Guard nicht
+// parsen kann, kann er nicht pruefen -> durchlassen waere die Luecke.
+let threwKaputt = false;
+try { await before({ tool: "apply_patch" }, { args: { patchText: "voellig kaputtes Format" } }); }
+catch { threwKaputt = true; }
+ok("apply_patch mit unlesbarem Format -> throw (fail-closed)", threwKaputt);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 

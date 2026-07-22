@@ -40,7 +40,9 @@ const TOOL_MAP = {
   read: { toolName: "Read", argKey: "filePath", inputKey: "file_path" },
   write: { toolName: "Write", argKey: "filePath", inputKey: "file_path" },
   edit: { toolName: "Edit", argKey: "filePath", inputKey: "file_path" },
-  patch: { toolName: "Edit", argKey: "filePath", inputKey: "file_path" },
+  // apply_patch fehlt hier bewusst: es traegt keinen filePath, sondern n Ziel-Pfade
+  // in patchText. Es wird in test_apply_patch.mjs gegen die echte Plugin-Funktion
+  // geprueft (Parser + Guard), nicht ueber diese vereinfachte Bridge-Nachbildung.
 };
 
 function callGuard(opencodeTool, payload) {
