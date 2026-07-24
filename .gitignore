@@ -23,3 +23,7 @@ actions.jsonl
 
 # Local Claude Code session state (if a clone ever lives under ~/.claude)
 session-state.json
+
+# Lokale spec-graph-Anbindung (Symlink maschinen-spezifisch + leerer Init) — per projekt-anbinden.sh
+scripts/graph.py
+graph/
