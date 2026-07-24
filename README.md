@@ -121,6 +121,40 @@ Only after those does the hook load the override for the calling context and run
 
 ---
 
+## Protection scope
+
+The guard protects **zones and catastrophic patterns**, not "every write or
+delete". Knowing this contract avoids surprise:
+
+- **In scope — zones:** writes/deletes to a configured `blocked_paths_write`
+  path (e.g. `/etc`, `/bin`, `~/.ssh`) or a hard-coded self-protection path are
+  blocked. Detection is a **write-verb gate** (`rm`, `rmdir`, `unlink`, `shred`,
+  `mv`, `cp`, `truncate`, `tee`, `ln`, `>`, `find … -delete`, `rsync … --delete`,
+  `git clean`, …) combined with a boundary-accurate path match.
+- **In scope — catastrophic patterns:** a small set of always-block regexes
+  (`rm -rf /`, `rm -rf ~`, `chmod 777`, `mkfs`, `dd of=/dev/sd…`, fork bomb,
+  `curl … | sh`, recursive `chown/chmod` on system trees, …).
+- **Out of scope — default allow:** anything outside those zones and patterns is
+  allowed by design. `rm -rf ~/Downloads/project` is **not** blocked — the guard
+  is a guardrail against catastrophic and protected-zone operations, not a
+  general "are you sure?" for ordinary file management.
+
+### Known limitations
+
+- **Symlinks are not resolved.** Path matching is purely lexical
+  (`os.path.normpath`, no `realpath`/`readlink`) — see the `_norm_path` docstring
+  ("no filesystem/symlink access, which the hook deliberately avoids"). A symlink
+  in an unprotected zone whose target lives in a protected zone is matched by its
+  **lexical** path, so a write *through* the link (`> safe/link`,
+  `truncate safe/link`) can reach the protected target unblocked. This is a
+  deliberate trade-off: resolving symlinks touches the filesystem and opens
+  TOCTOU, performance, and existence questions. Tracked in
+  `BEFUND-guard-scope-symlink-2026-07-24.md` (columns 3/4 of the test matrix).
+- The write-verb gate is a coarse *(some write verb) AND (protected path present)*
+  test, not a strict verb→path binding.
+
+---
+
 ## The 3 levels
 
 A static blocklist isn't enough — sometimes you legitimately need extra `sudo` (system maintenance) or even recursive recovery operations. Instead of disabling the guard, the override system grants **scoped, explicit, auditable** permissions per task.
