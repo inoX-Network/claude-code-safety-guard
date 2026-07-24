@@ -59,13 +59,41 @@ DEV_UNLOCKABLE_PATHS = [
 # via Write/Bash, only the owner via !. JSON with mandatory expires_at.
 HOOK_DEV_FLAG = "~/.claude/.hook-dev-mode"
 
-# Write-command indicators — shared by check_blocked_paths and
-# command_hits_self_protect, so both use the same write-access detection.
-WRITE_INDICATORS = [
-    ">", ">>", "tee ", "cp ", "mv ", "rm ", "touch ",
-    "chmod ", "chown ", "mkdir ", "rmdir ", "ln ",
-    "sed -i", "truncate ", "dd ", "install ",
+# Write-command detection — shared by check_blocked_paths and
+# command_hits_self_protect, so both use the same write-access gate.
+#
+# Word-boundary matching (not substring): a bare "rm " substring also fires on
+# "warm "/"firm " and on path fragments; \b-anchored verbs avoid that. The gate
+# is only the FIRST condition — a block still requires a protected path present
+# too (see check_blocked_paths), so a stray verb match alone blocks nothing.
+# Purely lexical, no filesystem/symlink access (see _norm_path).
+_WRITE_VERBS = [
+    "rm", "rmdir", "unlink", "shred", "mv", "cp", "touch",
+    "chmod", "chown", "mkdir", "ln", "dd", "install", "truncate", "tee",
 ]
+_WRITE_VERB_RE = re.compile(r"\b(?:" + "|".join(_WRITE_VERBS) + r")\b")
+# Redirects / in-place edit carry no word boundary — matched as operators.
+_WRITE_OPS = [">", ">>", "sed -i"]
+
+
+def _command_is_write(command: str) -> bool:
+    """Whether a command writes/deletes, for the protected-path gate.
+
+    Word-boundary verbs + redirect operators, plus tool-specific delete forms:
+    find/rsync count ONLY with their delete flag (a bare find/rsync is read-only
+    and would otherwise explode false positives); `git clean` removes files.
+    """
+    if _WRITE_VERB_RE.search(command):
+        return True
+    if any(op in command for op in _WRITE_OPS):
+        return True
+    if re.search(r"\bfind\b", command) and "-delete" in command:
+        return True
+    if re.search(r"\brsync\b", command) and "--delete" in command:
+        return True
+    if re.search(r"\bgit\s+clean\b", command):
+        return True
+    return False
 
 # Commands that read a DIRECTORY's contents recursively. Handing one of these a
 # directory that CONTAINS protected key files (e.g. `tar ~/.ssh`) exfiltrates
@@ -238,7 +266,7 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
 
     # Detect write operations
-    is_write = any(indicator in cleaned for indicator in WRITE_INDICATORS)
+    is_write = _command_is_write(cleaned)
     if not is_write:
         return None
 
@@ -476,7 +504,7 @@ def command_hits_self_protect(command: str) -> str | None:
 
     Best-effort counterpart to hits_self_protect for the Bash side: closes the
     gap 'echo x > ~/.claude/hooks/command-guard.py'. Only on detected write
-    access (WRITE_INDICATORS). Path boundary via _PATH_BOUNDARY, so the pending
+    access (see _command_is_write). Path boundary via _PATH_BOUNDARY, so the pending
     directory is not wrongly matched. NO override lifts a match — only dev mode
     unlocks DEV_UNLOCKABLE_PATHS.
 
@@ -503,7 +531,7 @@ def command_hits_self_protect(command: str) -> str | None:
 
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
-    if not any(indicator in cleaned for indicator in WRITE_INDICATORS):
+    if not _command_is_write(cleaned):
         return None
     cleaned_expanded = expand_path(cleaned)
     for prot in SELF_PROTECT_PATHS:
