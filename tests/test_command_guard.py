@@ -114,7 +114,8 @@ def write_override(overrides_dir: Path, filename: str, data: dict) -> None:
 
 # Reusable override building blocks
 def coordinator_override(level: int, additional_sudo=None, allowed_paths=None,
-                         system_paths=None, session_id=None) -> dict:
+                         system_paths=None, session_id=None,
+                         expires_at=None, freigegeben_am=None) -> dict:
     """System override (main session, NO agent_id).
 
     session_id: if set, written into the override as a 'session_id' field, so
@@ -136,6 +137,10 @@ def coordinator_override(level: int, additional_sudo=None, allowed_paths=None,
             "system_paths": (level >= 2) if system_paths is None else system_paths,
         },
     }
+    if expires_at is not None:
+        o["expires_at"] = expires_at
+    if freigegeben_am is not None:
+        o["freigegeben_am"] = freigegeben_am
     if session_id is not None:
         o["session_id"] = session_id
     return o
@@ -783,6 +788,53 @@ MCP_CASES = [
      lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 1)),
      "mcp__github__create_or_update_file", AID, 0),
 ]
+
+
+# === OVERRIDE-SELECTION (Fix 2026-07-25): juengster gewinnt, nicht hoechste Stufe ===
+# Befund: alter/vergessener L2 ueberstimmt bewusst gesetzten engen L1 = stille Eskalation.
+# Herkunft: Session mailserver-haertung, 0052/0053-Kollision. Alle Faelle Hauptsession (agent_id None).
+SELECTION_CASES = [
+    ("SEL1: alter L2 + neuer L1 -> sudo iftop BLOCKED (L1 gilt, nie L2)",
+     lambda d: (write_override(d, "system-old-l2.json",
+                    coordinator_override(2, freigegeben_am="2026-07-01T10:00:00+00:00")),
+                write_override(d, "system-new-l1.json",
+                    coordinator_override(1, additional_sudo=["htop"], freigegeben_am="2026-07-25T10:00:00+00:00"))),
+     "sudo iftop", None, 2),
+    ("SEL1b: alter L2 + neuer L1(htop) -> sudo htop ALLOWED (L1-Grant gilt)",
+     lambda d: (write_override(d, "system-old-l2.json",
+                    coordinator_override(2, freigegeben_am="2026-07-01T10:00:00+00:00")),
+                write_override(d, "system-new-l1.json",
+                    coordinator_override(1, additional_sudo=["htop"], freigegeben_am="2026-07-25T10:00:00+00:00"))),
+     "sudo htop", None, 0),
+    ("SEL2: zwei L1, juengster(iftop) gilt -> sudo iftop ALLOWED",
+     lambda d: (write_override(d, "system-a.json",
+                    coordinator_override(1, additional_sudo=["htop"], freigegeben_am="2026-07-24T10:00:00+00:00")),
+                write_override(d, "system-b.json",
+                    coordinator_override(1, additional_sudo=["iftop"], freigegeben_am="2026-07-25T10:00:00+00:00"))),
+     "sudo iftop", None, 0),
+    ("SEL2b: zwei L1, juengster(iftop) gilt -> sudo htop BLOCKED (alter A verliert)",
+     lambda d: (write_override(d, "system-a.json",
+                    coordinator_override(1, additional_sudo=["htop"], freigegeben_am="2026-07-24T10:00:00+00:00")),
+                write_override(d, "system-b.json",
+                    coordinator_override(1, additional_sudo=["iftop"], freigegeben_am="2026-07-25T10:00:00+00:00"))),
+     "sudo htop", None, 2),
+    ("SEL3-PFLICHT: kein freigegeben_am, Fallback expires_at -> L1 gilt, sudo iftop BLOCKED",
+     lambda d: (write_override(d, "system-old.json",
+                    coordinator_override(2, expires_at=(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat())),
+                write_override(d, "system-new.json",
+                    coordinator_override(1, additional_sudo=["htop"], expires_at=(datetime.now(timezone.utc)+timedelta(hours=2)).isoformat()))),
+     "sudo iftop", None, 2),
+    ("SEL3b-PFLICHT: kein freigegeben_am, Fallback expires_at -> L1-htop ALLOWED (kein Crash)",
+     lambda d: (write_override(d, "system-old.json",
+                    coordinator_override(2, expires_at=(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat())),
+                write_override(d, "system-new.json",
+                    coordinator_override(1, additional_sudo=["htop"], expires_at=(datetime.now(timezone.utc)+timedelta(hours=2)).isoformat()))),
+     "sudo htop", None, 0),
+    ("SEL4-Regression: einzelner L2 -> sudo iftop ALLOWED (unveraendert)",
+     lambda d: write_override(d, "system-test.json", coordinator_override(2)),
+     "sudo iftop", None, 0),
+]
+CASES.extend(SELECTION_CASES)
 
 
 def main() -> int:
