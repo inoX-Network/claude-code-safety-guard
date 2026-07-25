@@ -395,9 +395,31 @@ def load_override(agent_id: str | None = None, session_id: str | None = None) ->
     if not active_overrides:
         return None
 
-    # All collected overrides have a valid level (0-3); default 0 is only a
-    # theoretical fallback and consistent with main().
-    return max(active_overrides, key=lambda o: o.get("override_level", 0))
+    # Fail-closed override selection (fix 2026-07-25, finding: 0052/0053 collision):
+    # with multiple active overrides the MOST RECENT deliberately granted one wins,
+    # NOT the highest level -- otherwise a forgotten level-2 leftover silently
+    # overrides a deliberately narrow level-1 (privilege escalation via stale grants).
+    if len(active_overrides) == 1:
+        return active_overrides[0]
+
+    # Recency key: primarily freigegeben_am (grant time). Only if NOT all active
+    # overrides carry it (older overrides never wrote the field) fall back to
+    # expires_at (rises monotonically with grant time at fixed --minutes). Both are
+    # ISO-8601 strings -> lexicographic compare == chronological.
+    if all(o.get("freigegeben_am") for o in active_overrides):
+        _recency = lambda o: o.get("freigegeben_am")
+    else:
+        _recency = lambda o: o.get("expires_at") or ""
+
+    newest = max(active_overrides, key=_recency)
+    # Exact tie (several overrides with identical recency key): do not guess ->
+    # fail-closed (no override applied), with a warning.
+    _top = _recency(newest)
+    if sum(1 for o in active_overrides if _recency(o) == _top) > 1:
+        print("command-guard: ambiguous override selection (equal timestamp) "
+              "-> fail-closed, no override applied", file=sys.stderr)
+        return None
+    return newest
 
 
 def check_sudo(command: str, allowed: list[str]) -> str | None:
