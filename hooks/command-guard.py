@@ -75,6 +75,24 @@ _WRITE_VERB_RE = re.compile(r"\b(?:" + "|".join(_WRITE_VERBS) + r")\b")
 # Redirects / in-place edit carry no word boundary — matched as operators.
 _WRITE_OPS = [">", ">>", "sed -i"]
 
+# A `>` INSIDE quotes is text, not a redirect: `echo "a -> b"` writes nothing. The
+# substring test below did not know that, so any command printing an arrow in a
+# MESSAGE while naming a protected path counted as a write — which is exactly what
+# harmless one-line diagnostics look like (`echo "$f -> $(jq -r .key "$f")"`). In one
+# measured setup this produced roughly 16 denials a day, a good share of them such
+# false positives, and it blocked reading the guard's own settings for diagnosis.
+#
+# DO NOT fix this by exempting `->`. In a shell, `echo x -> file` IS a real redirect
+# (`-` is an argument, `> file` the redirection); exempting the arrow would open a
+# path to overwriting the hook file itself. The load-bearing difference is the
+# quoting, not the dash.
+#
+# Exception so the relaxation does not become a hole: if the command hands its string
+# to a shell (`eval`, `bash -c`), the text is executed after all. Then the old, strict
+# check stands — fail-closed when in doubt.
+_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_SHELL_PASSTHROUGH_RE = re.compile(r"\beval\b|\b[a-z]*sh\b[^;|&]*?\s-c\b")
+
 
 def _command_is_write(command: str) -> bool:
     """Whether a command writes/deletes, for the protected-path gate.
@@ -82,10 +100,18 @@ def _command_is_write(command: str) -> bool:
     Word-boundary verbs + redirect operators, plus tool-specific delete forms:
     find/rsync count ONLY with their delete flag (a bare find/rsync is read-only
     and would otherwise explode false positives); `git clean` removes files.
+
+    Redirect operators are matched against the line WITHOUT quoted sections (see the
+    comment at `_QUOTED_RE`); write VERBS still match against the whole line.
     """
     if _WRITE_VERB_RE.search(command):
         return True
-    if any(op in command for op in _WRITE_OPS):
+    ops_target = (
+        command
+        if _SHELL_PASSTHROUGH_RE.search(command)
+        else _QUOTED_RE.sub("", command)
+    )
+    if any(op in ops_target for op in _WRITE_OPS):
         return True
     if re.search(r"\bfind\b", command) and "-delete" in command:
         return True
@@ -265,6 +291,13 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
 
+    # Resolve traversal detours (/./, //, /seg/../) BEFORE matching, otherwise a
+    # disguised target slips past the substring match below: `cp x /tmp/../etc/passwd`
+    # never contains the literal "/etc/passwd". Command-string-wide and lexical, the
+    # same treatment the self-protect twin already applies (_collapse_path_traversal,
+    # not _norm_path -- no filesystem access here).
+    cleaned = _collapse_path_traversal(cleaned)
+
     # Detect write operations
     is_write = _command_is_write(cleaned)
     if not is_write:
@@ -395,9 +428,40 @@ def load_override(agent_id: str | None = None, session_id: str | None = None) ->
     if not active_overrides:
         return None
 
-    # All collected overrides have a valid level (0-3); default 0 is only a
-    # theoretical fallback and consistent with main().
-    return max(active_overrides, key=lambda o: o.get("override_level", 0))
+    if len(active_overrides) == 1:
+        return active_overrides[0]
+
+    # FAIL-CLOSED SELECTION AMONG SEVERAL ACTIVE OVERRIDES.
+    #
+    # This used to return the HIGHEST level. That is a privilege-escalation path via
+    # stale grants: a forgotten level-2 file that has not expired yet silently wins
+    # over a level-1 grant the owner just issued deliberately and narrowly. The owner
+    # sees "level 1 active" in the prompt and gets level 2.
+    #
+    # The most recently GRANTED override wins instead -- it is the one the owner
+    # actually meant. Recency key: `granted_at` (grant time, written by the grant
+    # tool). Only if NOT every active override carries it (files written by older
+    # versions never did) fall back to `expires_at`, which rises monotonically with
+    # grant time at a fixed --minutes. Both are ISO-8601 strings, so a lexicographic
+    # compare is chronological.
+    if all(o.get("granted_at") for o in active_overrides):
+        def _recency(o: dict) -> str:
+            return o.get("granted_at") or ""
+    else:
+        def _recency(o: dict) -> str:
+            return o.get("expires_at") or ""
+
+    newest = max(active_overrides, key=_recency)
+
+    # Exact tie (several overrides with an identical recency key): do not guess.
+    # Fail closed -- no override applied -- and say so, because silently picking one
+    # is how a stale grant sneaks back in.
+    top = _recency(newest)
+    if sum(1 for o in active_overrides if _recency(o) == top) > 1:
+        print("command-guard: ambiguous override selection (equal timestamp) "
+              "-> fail-closed, no override applied", file=sys.stderr)
+        return None
+    return newest
 
 
 def check_sudo(command: str, allowed: list[str]) -> str | None:
@@ -784,21 +848,28 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
     - (True, reason) = block with error message
     """
     protected = rules.get("protected_reads", {})
-    expanded = expand_path(file_path)
+    # _norm_path instead of expand_path: it also collapses ../ ./ // lexically, so a
+    # traversal detour cannot walk around the read guard (/etc/../etc/shadow never
+    # contains the literal "/etc/shadow"). Same hardening the self-protect path
+    # already had. Purely lexical, no filesystem access -- symlinks stay out of scope.
+    expanded = _norm_path(file_path)
 
     # 1. Always blocked (no override helps)
     for pattern in protected.get("always_blocked_reads", []):
-        pat_expanded = expand_path(pattern)
-        if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
+        pat_expanded = _norm_path(pattern)
+        # The raw `file_path.startswith(pattern)` fallback is gone on purpose: with
+        # both sides normalised it adds nothing, and it was the one comparison a
+        # detour could still slip past.
+        if expanded.startswith(pat_expanded):
             return True, f"ALWAYS BLOCKED: {pattern} — no override possible"
 
     # 2. Always allowed (public keys, config, etc.)
     for pattern in protected.get("always_allowed", []):
-        pat_expanded = expand_path(pattern)
+        pat_expanded = _norm_path(pattern)
         if "*" in pattern:
             # Glob pattern: ~/.ssh/*.pub → directory + extension
             parts = pattern.split("*")
-            dir_prefix = expand_path(parts[0])
+            dir_prefix = _norm_path(parts[0])
             extension = parts[1] if len(parts) > 1 else ""
             if expanded.startswith(dir_prefix) and expanded.endswith(extension):
                 return False, ""
@@ -807,8 +878,8 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
 
     # 3. Requires override level 1 (private keys, credentials)
     for pattern in protected.get("require_override_1", []):
-        pat_expanded = expand_path(pattern)
-        if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
+        pat_expanded = _norm_path(pattern)
+        if expanded.startswith(pat_expanded):
             override = load_override(agent_id, session_id)
             if override and override.get("override_level", 0) >= 1:
                 level = override.get("override_level", 1)
