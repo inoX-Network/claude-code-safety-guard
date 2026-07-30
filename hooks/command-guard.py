@@ -90,8 +90,35 @@ _WRITE_OPS = [">", ">>", "sed -i"]
 # Exception so the relaxation does not become a hole: if the command hands its string
 # to a shell (`eval`, `bash -c`), the text is executed after all. Then the old, strict
 # check stands — fail-closed when in doubt.
+#
+# `ssh` belongs in that list for the very same reason: the quoted string behind it is
+# not text either, it runs on a shell on the far side. Without it, `ssh host "echo x >
+# /etc/nginx.conf"` walked straight past the path gate while the identical local line
+# was blocked — the protection stopped at the remote door. It needs its own alternative
+# because the `-c` form above does not match it (ssh takes no `-c` for this).
 _QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
-_SHELL_PASSTHROUGH_RE = re.compile(r"\beval\b|\b[a-z]*sh\b[^;|&]*?\s-c\b")
+_SHELL_PASSTHROUGH_RE = re.compile(r"\beval\b|\bssh\b|\b[a-z]*sh\b[^;|&]*?\s-c\b")
+
+
+# `scp`/`rsync` write on the far side without ever naming a redirect or a write verb,
+# so the path gate never saw them — and that is the ordinary deploy route, not an edge
+# case. What decides is the POSITION, not the occurrence: `host:/path` as the LAST
+# argument is a destination and gets gated; the same form in front means fetching and
+# stays free. Matching it anywhere in the line would block every read-only pull.
+_REMOTE_DEST_RE = re.compile(r"^[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?:/\S*$")
+
+
+def _remote_copy_writes(command: str) -> bool:
+    """Whether scp/rsync pushes TO a remote path (destination = last argument)."""
+    for segment in re.split(r"&&|\|\||[;|]", command):
+        tokens = segment.split()
+        if len(tokens) < 2:
+            continue
+        if os.path.basename(tokens[0]) not in ("scp", "rsync"):
+            continue
+        if _REMOTE_DEST_RE.match(tokens[-1]):
+            return True
+    return False
 
 
 def _command_is_write(command: str) -> bool:
@@ -118,6 +145,8 @@ def _command_is_write(command: str) -> bool:
     if re.search(r"\brsync\b", command) and "--delete" in command:
         return True
     if re.search(r"\bgit\s+clean\b", command):
+        return True
+    if _remote_copy_writes(command):
         return True
     return False
 
