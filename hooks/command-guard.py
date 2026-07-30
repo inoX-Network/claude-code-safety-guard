@@ -16,13 +16,72 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import pwd                      # Unix: home directory from the password database
+except ImportError:                 # pragma: no cover — non-Unix
+    pwd = None
+
+
+def _real_home() -> Path:
+    """The home directory from the password database, not from the environment.
+
+    `Path.home()` and `~` read the HOME environment variable — and that is
+    settable. Every protected path is written as "~/…"; point HOME elsewhere and
+    every protected path points elsewhere too. Measured 2026-07-30: with HOME
+    redirected, 4 out of 4 tested protections fell away — self-protection, the
+    override directory, a write redirect and the read guard.
+
+    The password database cannot be redirected through the environment. If it is
+    unavailable, the old path remains as a last resort: a crash here would be
+    turned into a denial by the safety net and would stop all work.
+    """
+    if pwd is not None:
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (KeyError, OSError):
+            pass
+    return Path(os.path.expanduser("~"))
+
+
+_HOME = _real_home()
+
+# Where this hook lives in production. When the running file is there, EVERY
+# path-determining environment variable is ignored.
+#
+# Reason (measured 2026-07-30): these variables were meant as test switches, but
+# they are switches. Whoever sets one decides which directory the guard reads its
+# approvals from, where its rules live, and whether the dev window is open — so
+# they can grant themselves any approval, substitute their own rules, or lift
+# self-protection. They are reachable through a single line in a shell profile,
+# which every new terminal reads; the profiles are writable on every tested path.
+#
+# A copy elsewhere still honours them. That is necessary because every check here
+# runs as a dry run against a copy — and it is harmless: a copy is not the hook
+# that gates the tool calls.
+_PRODUCTION_HOOK = _HOME / ".claude" / "hooks" / "command-guard.py"
+
+
+def _is_production() -> bool:
+    """Is this file running from its production location? When in doubt: yes."""
+    try:
+        return Path(__file__).resolve() == _PRODUCTION_HOOK.resolve()
+    except OSError:
+        return True
+
+
+_ENV_ALLOWED = not _is_production()
+
+
+def _env(name: str) -> str | None:
+    """Read an environment variable — always None at the production location."""
+    return os.environ.get(name) if _ENV_ALLOWED else None
+
+
 # Path to the security rules file.
-# Override with CLAUDE_SECURITY_RULES (used by the test suite and for relocation).
+# Override with CLAUDE_SECURITY_RULES — outside the production location only.
 RULES_PATH = Path(
-    os.environ.get(
-        "CLAUDE_SECURITY_RULES",
-        Path.home() / ".claude" / "safety-guard" / "security-rules.json",
-    )
+    _env("CLAUDE_SECURITY_RULES")
+    or _HOME / ".claude" / "safety-guard" / "security-rules.json"
 )
 
 # Self-protection of the security system: these paths must NEVER be written by
@@ -253,7 +312,7 @@ def expand_path(path: str) -> str:
     User-defined variables (`D=~/.ssh; ... $D`) stay out of scope (the hook
     does not run a shell), same inherent limit as blocked_patterns.
     """
-    home = str(Path.home())
+    home = str(_HOME)
     return path.replace("~", home).replace("${HOME}", home).replace("$HOME", home)
 
 
@@ -365,8 +424,8 @@ def load_override(agent_id: str | None = None, session_id: str | None = None) ->
     With multiple matches, the highest override_level wins.
     blocked_patterns stay ALWAYS active — even at level 3.
     """
-    dir_env = os.environ.get("CLAUDE_SUDO_OVERRIDES_DIR")
-    overrides_dir = Path(dir_env) if dir_env else (Path.home() / ".claude" / ".sudo-overrides")
+    dir_env = _env("CLAUDE_SUDO_OVERRIDES_DIR")
+    overrides_dir = Path(dir_env) if dir_env else (_HOME / ".claude" / ".sudo-overrides")
     active_overrides = []
 
     def _matches_context(data: dict) -> bool:
@@ -411,7 +470,7 @@ def load_override(agent_id: str | None = None, session_id: str | None = None) ->
 
     # Backwards compatibility: old single file — applies only to the main session
     if agent_id is None:
-        legacy_path = Path.home() / ".claude" / ".sudo-override.json"
+        legacy_path = _HOME / ".claude" / ".sudo-override.json"
         if legacy_path.exists():
             try:
                 with open(legacy_path, encoding="utf-8") as f:
@@ -520,7 +579,7 @@ def dev_mode_active() -> bool:
 
     The flag file lives in SELF_PROTECT — only the owner can set it via !.
     """
-    flag_env = os.environ.get("CLAUDE_HOOK_DEV_FLAG")
+    flag_env = _env("CLAUDE_HOOK_DEV_FLAG")
     flag = Path(flag_env) if flag_env else Path(expand_path(HOOK_DEV_FLAG))
     if not flag.exists():
         return False
@@ -987,8 +1046,8 @@ def _audit(input_data: dict, tool: str, target: str, decision: str,
     Logging errors must NEVER block the guard — everything in try/except.
     """
     try:
-        dir_env = os.environ.get("CLAUDE_AUDIT_DIR")
-        audit_dir = Path(dir_env) if dir_env else (Path.home() / ".claude" / ".agent-audit")
+        dir_env = _env("CLAUDE_AUDIT_DIR")
+        audit_dir = Path(dir_env) if dir_env else (_HOME / ".claude" / ".agent-audit")
         audit_dir.mkdir(parents=True, exist_ok=True)
         agent_id = input_data.get("agent_id")
         entry = {

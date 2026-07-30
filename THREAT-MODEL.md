@@ -62,6 +62,15 @@ do, and which layer is responsible for the rest.
   closed.
 - **Fail-closed** — if the rules file is missing, unreadable, or empty, a
   hardcoded minimal ruleset takes over instead of allowing everything.
+- **The environment cannot move the walls** — at its production location the
+  hook ignores every path-determining variable (`CLAUDE_SECURITY_RULES`,
+  `CLAUDE_SUDO_OVERRIDES_DIR`, `CLAUDE_AUDIT_DIR`, `CLAUDE_HOOK_DEV_FLAG`), and
+  the home directory comes from the password database rather than `HOME`.
+  Otherwise one line in a shell profile — which every new terminal reads — would
+  be enough to point the guard at a self-written approval, substitute the rules,
+  or (via `HOME`) move every `~/…` protected path at once. A copy outside the
+  production location still honours the variables, because every check here runs
+  as a dry run against a copy.
 
 ## What the hook does NOT catch (out of scope — by design)
 
