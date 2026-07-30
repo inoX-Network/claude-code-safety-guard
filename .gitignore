@@ -23,3 +23,10 @@ actions.jsonl
 
 # Local Claude Code session state (if a clone ever lives under ~/.claude)
 session-state.json
+
+# Planungs-Graph des Guards. Er gehoert zum Hub-Projekt 0050-safety-guard und liegt
+# dort unter projekte/0050-safety-guard/graph/ -- versioniert und gesichert. Hier lag
+# er eine Zeit lang untrackt herum: nirgends gesichert, und sein Denk-Log enthaelt
+# interne Pfade und Namen, die in einem oeffentlichen Repo nichts zu suchen haben.
+# Nicht wieder hierher legen.
+graph/
