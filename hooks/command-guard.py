@@ -94,6 +94,44 @@ _QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 _SHELL_PASSTHROUGH_RE = re.compile(r"\beval\b|\b[a-z]*sh\b[^;|&]*?\s-c\b")
 
 
+# Copy commands do not modify their SOURCE — they read it. For the write guard
+# only the destination counts. `mv`, `rm`, `shred` and `truncate` are
+# deliberately absent: those do modify their source.
+#
+# The read guard is untouched and still inspects the source — copying is
+# reading. Mixing those two up turns a false positive into a hole.
+_COPY_COMMANDS = ("cp", "install")
+
+# Destination given as an option (`cp -t DEST src…`): then the destination is
+# not the last argument, and the position rule would mistake it for a source.
+# In that case the whole line is checked, as before.
+_DEST_OPTION_RE = re.compile(r"(?:^|\s)(?:-t\b|--target-directory)")
+
+
+def _without_copy_sources(command: str) -> str:
+    """Drop the source arguments of plain copy commands.
+
+    Returns the command as the write guard should see it: the command, its
+    options and the destination. Anything else is returned unchanged — so in
+    case of doubt the whole line is still checked.
+
+    Example: `cp -r ~/.config /tmp/x` becomes `cp -r /tmp/x`. The directory is
+    only read; the write goes to /tmp.
+    """
+    parts = re.split(r"(&&|\|\||[;|])", command)
+    out = []
+    for part in parts:
+        tokens = part.split()
+        if (len(tokens) >= 3
+                and os.path.basename(tokens[0]) in _COPY_COMMANDS
+                and not _DEST_OPTION_RE.search(part)):
+            options = [t for t in tokens[1:-1] if t.startswith("-")]
+            out.append(" " + " ".join([tokens[0]] + options + [tokens[-1]]) + " ")
+        else:
+            out.append(part)
+    return "".join(out)
+
+
 def _command_is_write(command: str) -> bool:
     """Whether a command writes/deletes, for the protected-path gate.
 
@@ -302,6 +340,9 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     is_write = _command_is_write(cleaned)
     if not is_write:
         return None
+
+    # A copy SOURCE is not a write target (see _without_copy_sources).
+    cleaned = _without_copy_sources(cleaned)
 
     # Check both variants: original (~) and expanded (/home/user)
     cleaned_expanded = expand_path(cleaned)
@@ -597,6 +638,10 @@ def command_hits_self_protect(command: str) -> str | None:
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
     if not _command_is_write(cleaned):
         return None
+    # A copy SOURCE is not a write target here either: taking a working copy of
+    # the guard's own file is reading, not an attack. The destination stays
+    # checked.
+    cleaned = _without_copy_sources(cleaned)
     cleaned_expanded = expand_path(cleaned)
     for prot in SELF_PROTECT_PATHS:
         p = re.escape(expand_path(prot).rstrip("/"))
