@@ -21,7 +21,11 @@ do, and which layer is responsible for the rest.
 - **Credential reads** — Read tool *and* Bash-side (`cat`, `base64`, `cp`,
   `dd if=`, `tar`/`zip`/`rsync` of key directories) against private keys,
   cloud credentials, `.npmrc`, Docker/GnuPG config, `.env` files. Override
-  level 1+ required; `/etc/shadow` always blocked.
+  level 1+ required; `/etc/shadow` always blocked. A bulk command naming a
+  *directory* that contains a protected file counts as access to that file, at
+  the same tier — otherwise `tar czf x.tgz /etc` would be the weaker door next
+  to `cat /etc/shadow`. The check asks whether the protected path lies *inside*
+  what the command touches, not whether a name appears somewhere.
 - **Interpreter inline code (literal embedding)** — `python -c`, `node -e`,
   `ruby -e`, `perl -e`, `php -r` etc. that read a protected path written
   **literally** inside the code, or write to a self-protected file. Path-like

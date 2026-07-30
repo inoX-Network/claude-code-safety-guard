@@ -1073,8 +1073,16 @@ def command_hits_protected_read(command: str, rules: dict,
     # recursive-read command is present. Pre-compute the protected key dirs so a
     # plain `ls ~/.ssh` (metadata only, no such command) stays allowed.
     req1_dirs = []
+    hard_dirs = []
     if any(os.path.basename(t) in RECURSIVE_READ_CMDS for t in tokens):
-        req1_dirs = [expand_path(p).rstrip("/") for p in protected.get("require_override_1", [])]
+        # _norm_path rather than expand_path: otherwise a traversal detour
+        # (`tar ~/.ssh/../.ssh`) walks around the directory gate, the same way it
+        # would around the direct read guard.
+        req1_dirs = [_norm_path(p).rstrip("/") for p in protected.get("require_override_1", [])]
+        # Same pre-computation for the always-blocked files. Without it the
+        # detour was weaker than the direct path: `cat /etc/shadow` was denied
+        # while `tar czf x.tgz /etc` went through — and took the file with it.
+        hard_dirs = [_norm_path(p).rstrip("/") for p in protected.get("always_blocked_reads", [])]
 
     for tok in tokens:
         if tok.startswith("-"):
@@ -1095,8 +1103,22 @@ def command_hits_protected_read(command: str, rules: dict,
         #     (e.g. `tar ~/.ssh` grabs ~/.ssh/id_*). The token is an ancestor of
         #     (or equal to) a require_override_1 path — same override gate as
         #     reading the key file directly.
+        # 2a-hard. Recursive read of a DIRECTORY that contains an always-blocked
+        #     file (e.g. `tar /etc` grabs /etc/shadow). No override lifts this —
+        #     exactly like reading that file directly. Otherwise the detour would
+        #     be the weaker door.
+        if hard_dirs:
+            tok_hard = _norm_path(tok).rstrip("/")
+            # Empty token: see the reasoning in the level-1 branch below.
+            if tok_hard and any(d == tok_hard or d.startswith(tok_hard + "/")
+                                for d in hard_dirs):
+                return True, (
+                    f"ALWAYS BLOCKED: recursively reading {tok} — the directory "
+                    f"contains an always-blocked file. No override possible."
+                ), False
+
         if req1_dirs:
-            tok_exp = expand_path(tok).rstrip("/")
+            tok_exp = _norm_path(tok).rstrip("/")
             # An empty token (a bare "/" or a regex slash) would otherwise match
             # EVERY absolute key path via startswith("/") -> over-block false
             # positive (grep/rsync/cp with a /-argument).
