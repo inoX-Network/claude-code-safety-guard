@@ -291,6 +291,13 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
 
+    # Resolve traversal detours (/./, //, /seg/../) BEFORE matching, otherwise a
+    # disguised target slips past the substring match below: `cp x /tmp/../etc/passwd`
+    # never contains the literal "/etc/passwd". Command-string-wide and lexical, the
+    # same treatment the self-protect twin already applies (_collapse_path_traversal,
+    # not _norm_path -- no filesystem access here).
+    cleaned = _collapse_path_traversal(cleaned)
+
     # Detect write operations
     is_write = _command_is_write(cleaned)
     if not is_write:
