@@ -848,21 +848,28 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
     - (True, reason) = block with error message
     """
     protected = rules.get("protected_reads", {})
-    expanded = expand_path(file_path)
+    # _norm_path instead of expand_path: it also collapses ../ ./ // lexically, so a
+    # traversal detour cannot walk around the read guard (/etc/../etc/shadow never
+    # contains the literal "/etc/shadow"). Same hardening the self-protect path
+    # already had. Purely lexical, no filesystem access -- symlinks stay out of scope.
+    expanded = _norm_path(file_path)
 
     # 1. Always blocked (no override helps)
     for pattern in protected.get("always_blocked_reads", []):
-        pat_expanded = expand_path(pattern)
-        if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
+        pat_expanded = _norm_path(pattern)
+        # The raw `file_path.startswith(pattern)` fallback is gone on purpose: with
+        # both sides normalised it adds nothing, and it was the one comparison a
+        # detour could still slip past.
+        if expanded.startswith(pat_expanded):
             return True, f"ALWAYS BLOCKED: {pattern} — no override possible"
 
     # 2. Always allowed (public keys, config, etc.)
     for pattern in protected.get("always_allowed", []):
-        pat_expanded = expand_path(pattern)
+        pat_expanded = _norm_path(pattern)
         if "*" in pattern:
             # Glob pattern: ~/.ssh/*.pub → directory + extension
             parts = pattern.split("*")
-            dir_prefix = expand_path(parts[0])
+            dir_prefix = _norm_path(parts[0])
             extension = parts[1] if len(parts) > 1 else ""
             if expanded.startswith(dir_prefix) and expanded.endswith(extension):
                 return False, ""
@@ -871,8 +878,8 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
 
     # 3. Requires override level 1 (private keys, credentials)
     for pattern in protected.get("require_override_1", []):
-        pat_expanded = expand_path(pattern)
-        if expanded.startswith(pat_expanded) or file_path.startswith(pattern):
+        pat_expanded = _norm_path(pattern)
+        if expanded.startswith(pat_expanded):
             override = load_override(agent_id, session_id)
             if override and override.get("override_level", 0) >= 1:
                 level = override.get("override_level", 1)
