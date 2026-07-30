@@ -421,9 +421,40 @@ def load_override(agent_id: str | None = None, session_id: str | None = None) ->
     if not active_overrides:
         return None
 
-    # All collected overrides have a valid level (0-3); default 0 is only a
-    # theoretical fallback and consistent with main().
-    return max(active_overrides, key=lambda o: o.get("override_level", 0))
+    if len(active_overrides) == 1:
+        return active_overrides[0]
+
+    # FAIL-CLOSED SELECTION AMONG SEVERAL ACTIVE OVERRIDES.
+    #
+    # This used to return the HIGHEST level. That is a privilege-escalation path via
+    # stale grants: a forgotten level-2 file that has not expired yet silently wins
+    # over a level-1 grant the owner just issued deliberately and narrowly. The owner
+    # sees "level 1 active" in the prompt and gets level 2.
+    #
+    # The most recently GRANTED override wins instead -- it is the one the owner
+    # actually meant. Recency key: `granted_at` (grant time, written by the grant
+    # tool). Only if NOT every active override carries it (files written by older
+    # versions never did) fall back to `expires_at`, which rises monotonically with
+    # grant time at a fixed --minutes. Both are ISO-8601 strings, so a lexicographic
+    # compare is chronological.
+    if all(o.get("granted_at") for o in active_overrides):
+        def _recency(o: dict) -> str:
+            return o.get("granted_at") or ""
+    else:
+        def _recency(o: dict) -> str:
+            return o.get("expires_at") or ""
+
+    newest = max(active_overrides, key=_recency)
+
+    # Exact tie (several overrides with an identical recency key): do not guess.
+    # Fail closed -- no override applied -- and say so, because silently picking one
+    # is how a stale grant sneaks back in.
+    top = _recency(newest)
+    if sum(1 for o in active_overrides if _recency(o) == top) > 1:
+        print("command-guard: ambiguous override selection (equal timestamp) "
+              "-> fail-closed, no override applied", file=sys.stderr)
+        return None
+    return newest
 
 
 def check_sudo(command: str, allowed: list[str]) -> str | None:
