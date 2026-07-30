@@ -75,6 +75,24 @@ _WRITE_VERB_RE = re.compile(r"\b(?:" + "|".join(_WRITE_VERBS) + r")\b")
 # Redirects / in-place edit carry no word boundary — matched as operators.
 _WRITE_OPS = [">", ">>", "sed -i"]
 
+# A `>` INSIDE quotes is text, not a redirect: `echo "a -> b"` writes nothing. The
+# substring test below did not know that, so any command printing an arrow in a
+# MESSAGE while naming a protected path counted as a write — which is exactly what
+# harmless one-line diagnostics look like (`echo "$f -> $(jq -r .key "$f")"`). In one
+# measured setup this produced roughly 16 denials a day, a good share of them such
+# false positives, and it blocked reading the guard's own settings for diagnosis.
+#
+# DO NOT fix this by exempting `->`. In a shell, `echo x -> file` IS a real redirect
+# (`-` is an argument, `> file` the redirection); exempting the arrow would open a
+# path to overwriting the hook file itself. The load-bearing difference is the
+# quoting, not the dash.
+#
+# Exception so the relaxation does not become a hole: if the command hands its string
+# to a shell (`eval`, `bash -c`), the text is executed after all. Then the old, strict
+# check stands — fail-closed when in doubt.
+_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_SHELL_PASSTHROUGH_RE = re.compile(r"\beval\b|\b[a-z]*sh\b[^;|&]*?\s-c\b")
+
 
 def _command_is_write(command: str) -> bool:
     """Whether a command writes/deletes, for the protected-path gate.
@@ -82,10 +100,18 @@ def _command_is_write(command: str) -> bool:
     Word-boundary verbs + redirect operators, plus tool-specific delete forms:
     find/rsync count ONLY with their delete flag (a bare find/rsync is read-only
     and would otherwise explode false positives); `git clean` removes files.
+
+    Redirect operators are matched against the line WITHOUT quoted sections (see the
+    comment at `_QUOTED_RE`); write VERBS still match against the whole line.
     """
     if _WRITE_VERB_RE.search(command):
         return True
-    if any(op in command for op in _WRITE_OPS):
+    ops_target = (
+        command
+        if _SHELL_PASSTHROUGH_RE.search(command)
+        else _QUOTED_RE.sub("", command)
+    )
+    if any(op in ops_target for op in _WRITE_OPS):
         return True
     if re.search(r"\bfind\b", command) and "-delete" in command:
         return True
