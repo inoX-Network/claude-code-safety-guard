@@ -559,8 +559,15 @@ DOCKER_CASES = [
      lambda d: None, "docker run --rm -v $(pwd):/work python pytest", None, 0),
     ("Docker/neg: docker build . -> allowed",
      lambda d: None, "docker build -t x .", None, 0),
-    ("Docker/neg: docker compose up -> allowed",
-     lambda d: None, "docker compose up", None, 0),
+    # This case originally checked that the FLAG hardening does not block a
+    # plain `compose up`. That purpose stands — it now runs with a level-1
+    # approval, because a SECOND rule applies since 2026-07-31: the container
+    # lifecycle needs an approval. The new rule sits as its own case below.
+    ("Docker/neg: docker compose up with level 1 -> allowed (flag check does not fire)",
+     lambda d: write_override(d, "system-test.json", coordinator_override(1)),
+     "docker compose up", None, 0),
+    ("Docker/lifecycle: docker compose up at level 0 -> blocked",
+     lambda d: None, "docker compose up", None, 2),
     ("Docker/neg: docker ps -> allowed",
      lambda d: None, "docker ps", None, 0),
     ("Docker/neg: subagent -v ./app:/app -> allowed (subagent testing is free too)",

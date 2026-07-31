@@ -11,6 +11,7 @@ License: MIT
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -767,27 +768,64 @@ _PASSTHROUGH_RE = re.compile(r"""\b(?:ssh|eval|[a-z]*sh\s+-c)\b[^"']*["']([^"']+
 # Prefixes that may sit in front of the actual command.
 _PREFIX_TOKENS = ("sudo", "doas", "command", "env", "nohup", "time")
 
+# Tools that only READ or print their arguments. With one of them in front, a
+# container word behind it is text, not a command. This list may be incomplete:
+# a missing entry costs a false alarm, never a hole. `find` and `xargs` are
+# deliberately NOT here — they execute.
+_TEXT_COMMANDS = {
+    "echo", "printf", "grep", "rg", "ag", "cat", "less", "more", "head", "tail",
+    "man", "which", "type", "whereis", "wc", "sort", "uniq", "diff", "git",
+    "ls", "sed", "awk",
+}
+
+
+def _segment_tokens(segment: str) -> list[str]:
+    """Split a segment; quoted text stays ONE token.
+
+    That alone does most of the work: a message or a search pattern becomes a
+    single token and can never match the name of a container command.
+    """
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        # Unbalanced quotes — e.g. a wrapper cut apart at a separator. Fall back
+        # to a raw split: better one token too many than one too few.
+        return [t.strip("\"'") for t in segment.split()]
+
 
 def _is_container_command(segment: str) -> str | None:
     """Return the remainder if this segment RUNS a container command.
 
-    Position is what counts: the command must be the segment's command. Sitting
-    inside an argument — a search pattern, a message, a documentation line — it
-    is text, not a command.
+    Two ways lead there:
+
+    1. The command sits at the command position — after privilege elevation,
+       environment assignments and options.
+    2. It sits behind one, and the segment's command is not a plain text tool.
+       Then it is a wrapper (`timeout`, `nice`, `xargs`, and whatever shows up
+       tomorrow), and it counts.
+
+    Way 2 is the fail-closed direction. A list of allowed wrappers would be a
+    denylist in disguise: every future one would be open. Measured, exactly
+    three holes had opened that way.
     """
-    tokens = segment.split()
+    tokens = _segment_tokens(segment)
     i = 0
     while i < len(tokens):
-        t = tokens[i].strip("\"'")
+        t = tokens[i]
         if t in _PREFIX_TOKENS or "=" in t.split("/")[0] or t.startswith("-"):
             i += 1
             continue
         break
     if i >= len(tokens):
         return None
-    if os.path.basename(tokens[i].strip("\"'")) not in ("docker", "podman"):
+    if os.path.basename(tokens[i]) in ("docker", "podman"):
+        return " ".join(tokens[i + 1:])
+    if os.path.basename(tokens[i]) in _TEXT_COMMANDS:
         return None
-    return " ".join(tokens[i + 1:])
+    for j in range(i + 1, len(tokens)):
+        if os.path.basename(tokens[j]) in ("docker", "podman"):
+            return " ".join(tokens[j + 1:])
+    return None
 
 
 def check_lifecycle(command: str) -> str | None:
