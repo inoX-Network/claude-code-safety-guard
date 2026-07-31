@@ -45,6 +45,19 @@ def _real_home() -> Path:
 
 _HOME = _real_home()
 
+def expand_path(path: str) -> str:
+    """Expand ~ and $HOME/${HOME} to the home directory.
+
+    $HOME/${HOME} are resolved too so a directory/read vector like
+    `tar "$HOME/.ssh"` is caught the same as `tar ~/.ssh` — the shell would
+    expand it before execution, but the hook sees the literal string first.
+    User-defined variables (`D=~/.ssh; ... $D`) stay out of scope (the hook
+    does not run a shell), same inherent limit as blocked_patterns.
+    """
+    home = str(_HOME)
+    return path.replace("~", home).replace("${HOME}", home).replace("$HOME", home)
+
+
 # Where this hook lives in production. When the running file is there, EVERY
 # path-determining environment variable is ignored.
 #
@@ -77,11 +90,58 @@ def _env(name: str) -> str | None:
     return os.environ.get(name) if _ENV_ALLOWED else None
 
 
+# --------------------------------------------------------------------------
+# This installation's own configuration
+#
+# Everything that depends on the machine — where the rules live, where the real
+# hook source sits, where the runtime directories are — does not belong in the
+# code. As long as it lives there, every update is a hand-merge, and that is
+# exactly how a thousand diverging lines came about in the author's own copy.
+#
+# The PATH to this file is hardcoded and is the one value that must not be
+# configurable: whoever could redirect it would have moved every wall. For the
+# same reason the file itself is self-protected (in the builtin list below, not
+# through its own contents — a file that can lift its own protection has none).
+#
+# If it is missing or unreadable, the builtin values apply. Those are the
+# stricter choice, never the laxer one.
+GUARD_CONFIG_PATH = Path(_env("CLAUDE_GUARD_CONFIG")
+                         or _HOME / ".claude" / "guard-config.json")
+
+
+def _load_config() -> dict:
+    """Read this installation's configuration. On any doubt: empty."""
+    try:
+        data = json.loads(GUARD_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+_CONFIG = _load_config()
+_INSTALLATION = _CONFIG.get("installation") or {}
+if not isinstance(_INSTALLATION, dict):
+    _INSTALLATION = {}
+
+
+def _config_path(key: str, default):
+    """An installation path from the configuration, else the default.
+
+    An empty or mistyped value falls back to the default rather than to an
+    empty path — an empty protected path would be the laxer choice.
+    """
+    value = _INSTALLATION.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default
+
+
 # Path to the security rules file.
 # Override with CLAUDE_SECURITY_RULES — outside the production location only.
 RULES_PATH = Path(
     _env("CLAUDE_SECURITY_RULES")
-    or _HOME / ".claude" / "safety-guard" / "security-rules.json"
+    or expand_path(str(_config_path(
+        "rules", _HOME / ".claude" / "safety-guard" / "security-rules.json")))
 )
 
 # Self-protection of the security system: these paths must NEVER be written by
@@ -92,31 +152,63 @@ RULES_PATH = Path(
 # (~/.claude/.sudo-overrides-pending) is DELIBERATELY NOT protected — the AI may
 # write override proposals there, but only the owner activates them into the
 # (protected) active directory.
-SELF_PROTECT_PATHS = [
+# The builtin part holds on EVERY installation: these paths look the same
+# everywhere because they belong to the tool, not to the machine. They live in
+# the code and the configuration can only EXTEND them, never shrink them — so a
+# tampered configuration file cannot switch the core off.
+_BUILTIN_SELF_PROTECT = [
     "~/.claude/.sudo-overrides",                          # active override directory
     "~/.claude/bin",                                      # approval scripts
     "~/.claude/.hook-dev-mode",                           # dev-mode flag (only owner can set it via !)
     "~/.claude/hooks",                                    # all hooks incl. command-guard symlink
-    "~/.claude/safety-guard/security-rules.json",
     "~/.claude/settings.json",
     "~/.claude/settings.local.json",
     "~/.claude/CLAUDE.md",
     "~/.claude/rules",                                    # the rules themselves
+    "~/.claude/guard-config.json",                        # this installation's own config (see above)
 ]
+
+# Installation-specific: where THIS machine keeps the real hook source and the
+# rules file. Without a configuration the previous defaults still apply, so an
+# existing install stays protected even before the file exists.
+_DEFAULT_INSTALLATION_PATHS = [
+    "~/.claude/safety-guard/security-rules.json",
+]
+
+
+def _installation_self_protect() -> list[str]:
+    """The installation-specific self-protected paths from the configuration.
+
+    Those are the install locations worth protecting: the real hook source and
+    the rules file. Without a configuration the previous defaults apply — never
+    an empty list, which would be the laxer choice.
+    """
+    from_config = [str(_config_path("hook_source", "")).strip(),
+                   str(_config_path("rules", "")).strip()]
+    # UNION, not replacement. An earlier version returned the configured paths
+    # INSTEAD of the defaults — and a configuration pointing elsewhere then
+    # silently unprotected the default location. The public test suite caught
+    # it; locally it was invisible because default and configuration named the
+    # same paths. Same principle as the builtin list: only ever extend.
+    alle = _DEFAULT_INSTALLATION_PATHS + [p for p in from_config if p]
+    # Reihenfolge erhalten, Doppelte entfernen
+    return list(dict.fromkeys(alle))
+
+
+SELF_PROTECT_PATHS = _BUILTIN_SELF_PROTECT + _installation_self_protect()
 
 # Hook development mode (Option B): the owner can lift the self-protection ONLY
 # for this subset temporarily, to allow hook changes by the AI under
 # supervision. Override directory, settings.json, bin/, CLAUDE.md and rules/
 # stay hard-protected EVEN in dev mode — otherwise the AI could write itself
 # overrides or approvals while in dev mode.
-DEV_UNLOCKABLE_PATHS = [
-    "~/.claude/hooks",
-    "~/.claude/safety-guard/security-rules.json",
-]
+# The subset follows the same installation-specific paths as above: exactly the
+# hook sources, nothing more.
+DEV_UNLOCKABLE_PATHS = ["~/.claude/hooks"] + _installation_self_protect()
 
 # Dev-mode flag file. Lives in SELF_PROTECT (see above) — the AI cannot set it
 # via Write/Bash, only the owner via !. JSON with mandatory expires_at.
-HOOK_DEV_FLAG = "~/.claude/.hook-dev-mode"
+HOOK_DEV_FLAG = _config_path("dev_window", "~/.claude/.hook-dev-mode")
 
 # Write-command detection — shared by check_blocked_paths and
 # command_hits_self_protect, so both use the same write-access gate.
@@ -186,6 +278,26 @@ def _without_copy_sources(command: str) -> str:
                 and not _DEST_OPTION_RE.search(part)):
             options = [t for t in tokens[1:-1] if t.startswith("-")]
             out.append(" " + " ".join([tokens[0]] + options + [tokens[-1]]) + " ")
+        else:
+            out.append(part)
+    return "".join(out)
+
+
+def _only_copy_sources(command: str) -> str:
+    """Counterpart to _without_copy_sources: keeps ONLY the sources.
+
+    For the READ guard the direction is reversed: a copy reads its source, the
+    destination comes into being. `cp .env.example .env` therefore reads a
+    template — that an environment file is CREATED is not a read.
+    """
+    parts = re.split(r"(&&|\|\||[;|])", command)
+    out = []
+    for part in parts:
+        tokens = part.split()
+        if (len(tokens) >= 3
+                and os.path.basename(tokens[0]) in _COPY_COMMANDS
+                and not _DEST_OPTION_RE.search(part)):
+            out.append(" " + " ".join(tokens[:-1]) + " ")
         else:
             out.append(part)
     return "".join(out)
@@ -339,19 +451,6 @@ def load_rules() -> dict:
               file=sys.stderr)
         return dict(_FALLBACK_RULES)
     return data
-
-
-def expand_path(path: str) -> str:
-    """Expand ~ and $HOME/${HOME} to the home directory.
-
-    $HOME/${HOME} are resolved too so a directory/read vector like
-    `tar "$HOME/.ssh"` is caught the same as `tar ~/.ssh` — the shell would
-    expand it before execution, but the hook sees the literal string first.
-    User-defined variables (`D=~/.ssh; ... $D`) stay out of scope (the hook
-    does not run a shell), same inherent limit as blocked_patterns.
-    """
-    home = str(_HOME)
-    return path.replace("~", home).replace("${HOME}", home).replace("$HOME", home)
 
 
 _REGEX_METACHARS = re.compile(r"[.*+?^${}()|\[\]\\]")
@@ -564,7 +663,155 @@ def load_override(agent_id: str | None = None, session_id: str | None = None) ->
     return newest
 
 
-def check_sudo(command: str, allowed: list[str]) -> str | None:
+# Lifecycle commands: reading and building yes, tearing down no.
+#
+# The allowlist only ever checked the command NAME, never the subcommand: with
+# the container tool on the list, every subcommand was allowed — on level 0,
+# which is where every agent runs without doing anything.
+#
+# The check deliberately does NOT hang off the privilege-escalation command: if
+# the user is in the container group, that command is not needed at all.
+# Measured in the author's install: 9246 of 11056 calls ran without it, so a
+# check bound to it would have missed 84 % of them.
+#
+# Scope from 107593 audit lines: the lifecycle is gated (3.6 % of calls). `exec`
+# stays free — it is the most frequent form at 58.2 %, its inner command is an
+# interpreter in ~70 % of cases (so not statically judgeable), and paths INSIDE
+# a container cannot be judged from the host anyway. That is a named boundary,
+# not an oversight.
+_CONTAINER_FREE = {
+    "ps", "logs", "inspect", "images", "stats", "top", "port", "diff",
+    "events", "history", "version", "info", "exec", "run", "build", "cp",
+    "pull", "push", "tag", "search", "wait", "attach", "df",
+}
+
+_CONTAINER_GROUP_FREE = {
+    "volume": {"ls", "inspect"},
+    "network": {"ls", "inspect"},
+    "image": {"ls", "inspect", "history"},
+    "system": {"df", "info", "events"},
+    "container": {"ls", "logs", "inspect", "port", "top", "diff", "stats"},
+    "compose": {"ps", "logs", "config", "top", "images", "version"},
+    "context": {"ls", "inspect", "show"},
+    "builder": {"ls"},
+}
+
+# Options that carry their own VALUE. Without this list the check mistakes the
+# value for the subcommand: a compose call with a file option would read the
+# file name and fail — on the single most common call there is.
+_CONTAINER_VALUE_FLAGS = {
+    "-f", "--file", "-p", "--project-name", "--env-file", "--project-directory",
+    "-H", "--host", "--context", "-c", "--profile", "-l", "--log-level",
+    "--ansi", "--parallel", "--progress", "-u", "--user", "-w", "--workdir",
+    "-e", "--env", "-v", "--volume", "--network", "--name", "--label",
+}
+
+# Read-only subcommands for tools that genuinely need elevated rights — there
+# the binding to the escalation command holds, because without it nothing runs.
+_SUDO_READONLY_SUBCOMMANDS = {
+    "systemctl": {"status", "list-units", "list-unit-files", "list-timers",
+                  "list-sockets", "is-active", "is-enabled", "is-failed",
+                  "is-system-running", "show", "cat", "show-environment"},
+    "ufw": {"status"},
+    "pacman": {"-Q", "-Qq", "-Qi", "-Qs", "-Ql", "-Qo", "-Qtdq", "-Qe", "-Qm",
+               "-Ss", "-Si", "-Sl", "-Sg", "-V", "-T"},
+}
+
+
+# Options that carry their own VALUE. Without this list the check mistakes
+# the value for the subcommand: a compose call with a file option would read
+# the file name and fail — on the most common call there is.
+_CONTAINER_VALUE_FLAGS = {
+    "-f", "--file", "-p", "--project-name", "--env-file", "--project-directory",
+    "-H", "--host", "--context", "-c", "--profile", "-l", "--log-level",
+    "--ansi", "--parallel", "--progress", "-u", "--user", "-w", "--workdir",
+    "-e", "--env", "-v", "--volume", "--network", "--name", "--label",
+}
+
+
+def _first_subcommand(tokens: list[str], flags_count: bool = False) -> str:
+    """Erster echter Unterbefehl; Optionen und ihre Werte werden uebersprungen.
+
+    flags_count=True fuer Werkzeuge, deren Operation SELBST eine Option ist.
+    """
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+            continue
+        if token.startswith("-") and not flags_count:
+            if "=" not in token and token in _CONTAINER_VALUE_FLAGS:
+                skip = True
+            continue
+        return token.strip("\"'")
+    return ""
+
+
+def _container_subcommand_free(rest: str) -> tuple[bool, str]:
+    """May this container call run without an approval?"""
+    tokens = rest.split()
+    first = _first_subcommand(tokens)
+    if not first:
+        return True, ""
+    if first in _CONTAINER_GROUP_FREE:
+        rest_tokens = tokens[tokens.index(first) + 1:] if first in tokens else []
+        second = _first_subcommand(rest_tokens)
+        return second in _CONTAINER_GROUP_FREE[first], f"{first} {second}".strip()
+    return first in _CONTAINER_FREE, first
+
+
+# Pass-through wrappers: the string behind them runs on a shell, where the
+# same rules apply. Without this branch the remote path would be a hole.
+_PASSTHROUGH_RE = re.compile(r"""\b(?:ssh|eval|[a-z]*sh\s+-c)\b[^"']*["']([^"']+)["']""")
+
+# Prefixes that may sit in front of the actual command.
+_PREFIX_TOKENS = ("sudo", "doas", "command", "env", "nohup", "time")
+
+
+def _is_container_command(segment: str) -> str | None:
+    """Return the remainder if this segment RUNS a container command.
+
+    Position is what counts: the command must be the segment's command. Sitting
+    inside an argument — a search pattern, a message, a documentation line — it
+    is text, not a command.
+    """
+    tokens = segment.split()
+    i = 0
+    while i < len(tokens):
+        t = tokens[i].strip("\"'")
+        if t in _PREFIX_TOKENS or "=" in t.split("/")[0] or t.startswith("-"):
+            i += 1
+            continue
+        break
+    if i >= len(tokens):
+        return None
+    if os.path.basename(tokens[i].strip("\"'")) not in ("docker", "podman"):
+        return None
+    return " ".join(tokens[i + 1:])
+
+
+def check_lifecycle(command: str) -> str | None:
+    """Return the subcommand that needs an approval, else None.
+
+    Every segment of the line is checked, plus the contents of every pass-through
+    wrapper, so a remote invocation cannot slip past.
+    """
+    to_check = [command]
+    for hit in _PASSTHROUGH_RE.finditer(command):
+        to_check.append(hit.group(1))
+    for text in to_check:
+        for segment in re.split(r"&&|\|\||[;|\n]", text):
+            rest = _is_container_command(segment)
+            if rest is None:
+                continue
+            free, named = _container_subcommand_free(rest)
+            if not free:
+                return named
+    return None
+
+
+def check_sudo(command: str, allowed: list[str],
+               check_subcommands: bool = True) -> str | None:
     """Return the first sudo command that is NOT in `allowed`, otherwise None.
 
     `allowed` is the already fully assembled allowlist (base + level grants).
@@ -588,6 +835,18 @@ def check_sudo(command: str, allowed: list[str]) -> str | None:
             break
         if cmd_after_sudo and cmd_after_sudo not in allowed:
             return cmd_after_sudo
+        # The command name alone is not enough: a service manager entry would
+        # otherwise cover its stop subcommand too. If the tool is in the map,
+        # the subcommand decides — and whatever is not listed as read-only needs
+        # an approval (fail-closed, no denylist).
+        table = _SUDO_READONLY_SUBCOMMANDS.get(cmd_after_sudo) \
+            if check_subcommands else None
+        if table is not None:
+            rest = tokens[tokens.index(cmd_after_sudo) + 1:] \
+                if cmd_after_sudo in tokens else []
+            sub = _first_subcommand(rest, flags_count=(cmd_after_sudo == "pacman"))
+            if sub and sub not in table:
+                return f"{cmd_after_sudo} {sub}"
     return None
 
 
@@ -1039,17 +1298,43 @@ def check_git_safety(command: str, patterns: list[str]) -> str | None:
     return None
 
 
+# Template and example files are the OPPOSITE of a secret: they show which keys
+# an application needs — with empty or made-up values — and are usually checked
+# into the repository. Measured over 8 weeks of audit log in the author's own
+# install: 29 denials on `.env.example` alone, every one of them pointless.
+#
+# The residual risk is stated plainly: whoever puts real credentials into a file
+# with one of these names loses the protection. The naming convention is
+# unambiguous enough that the trade is worth it.
+_ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist",
+                          ".defaults")
+
+# Trailing punctuation from surrounding prose or code (`"…/.env.example",`) must
+# not defeat the suffix check — that turned the exemption off exactly where it
+# was needed most.
+_TRAILING_PUNCT = "\"'`,;:)]}>"
+
+
 def check_env_file_read(file_path: str, env_patterns: list[str]) -> bool:
     """Check whether a path points to a .env file.
 
     Detects .env at the end of the filename (regardless of directory).
+    Template and example files are exempt (see above).
     """
-    basename = os.path.basename(file_path)
+    basename = os.path.basename(file_path).rstrip(_TRAILING_PUNCT)
+    if any(basename.endswith(s) for s in _ENV_TEMPLATE_SUFFIXES):
+        return False
+    # Follow the naming convention rather than any prefix match: `.env`,
+    # `.env.anything` and `.envrc` are environment files — `.env-files` is prose
+    # and `.environment` is a word.
+    is_env_file = (basename == ".env"
+                   or basename.startswith(".env.")
+                   or basename == ".envrc")
     for pattern in env_patterns:
-        # Exact filename OR .env in the suffix (.env.production)
+        # Exact filename OR following the convention (.env.production)
         if basename == pattern:
             return True
-        if pattern.startswith(".env") and basename.startswith(".env"):
+        if pattern.startswith(".env") and is_env_file:
             return True
     return False
 
@@ -1164,6 +1449,12 @@ def command_hits_protected_read(command: str, rules: dict,
     # Strip standard redirects (analogous to check_blocked_paths).
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
+
+    # A copy reads its SOURCE — the destination comes into being. For the READ
+    # guard only the source counts, mirroring the write guard (where only the
+    # destination counts). Without this the usual setup command that copies a
+    # template into place fails on the newly created destination.
+    cleaned = _only_copy_sources(cleaned)
 
     # Normalise tokens once (quotes, leading shell metachars, VAR=/if= prefixes).
     tokens = []
@@ -1570,7 +1861,7 @@ def main():
         merged = rules.get("allowed_sudo", []) + (
             additional_sudo if isinstance(additional_sudo, list) else []
         )
-        bad_sudo = check_sudo(command, merged)
+        bad_sudo = check_sudo(command, merged, check_subcommands=(level < 1))
         if bad_sudo:
             _audit(input_data, "Bash", command, "block", f"sudo_not_allowed:{bad_sudo}", level)
             extra = (f"{who} has no valid override (level 0). " if not override
@@ -1580,6 +1871,25 @@ def main():
                 f"{extra}Needed: level 2 OR an additional_sudo grant for '{bad_sudo}'. "
                 f"ESCALATION: agent asks the coordinator → coordinator decides with the owner "
                 f"about adjusting the override file.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    # 4b. Container lifecycle — INDEPENDENT of the escalation command. If the
+    #     user is in the container group, a check bound to it would miss 84 %
+    #     of the calls (measured). Free from level 1 on, because that is what
+    #     the approval is for.
+    if level < 1:
+        bad_lifecycle = check_lifecycle(command)
+        if bad_lifecycle:
+            _audit(input_data, "Bash", command, "block",
+                   f"lifecycle_needs_override:{bad_lifecycle}", level)
+            print(
+                f"BLOCKED: '{bad_lifecycle}' changes or tears down and requires "
+                f"override level 1+. Read-only forms (ps, logs, inspect, exec, "
+                f"run, build) run without an approval. ESCALATION: the agent "
+                f"writes an override proposal into the pending directory and "
+                f"asks the owner to approve it.",
                 file=sys.stderr,
             )
             sys.exit(2)
