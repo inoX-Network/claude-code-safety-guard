@@ -892,5 +892,15 @@ def main() -> int:
     return 1 if failed else 0
 
 
+def test_command_guard():
+    """pytest-Einstieg fuer die Hauptsuite.
+
+    Ohne diese Funktion sammelt pytest aus dieser Datei GAR NICHTS --
+    ein `pytest tests/` meldete gruen, waehrend die groesste Suite des
+    Projekts nie gelaufen war.
+    """
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

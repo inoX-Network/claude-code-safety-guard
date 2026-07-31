@@ -104,7 +104,7 @@ def _denied(hook, command, approval=None):
         return p.returncode == 2
 
 
-def test_copy_source_is_a_read(hook=None):
+def run_all(hook=None):
     hook = Path(hook or DEFAULT_HOOK)
     cases = [(n, c, d, None) for n, c, d in CASES] + \
             [(n, c, d, LEVEL1) for n, c, d in CASES_WITH_APPROVAL]
@@ -119,6 +119,15 @@ def test_copy_source_is_a_read(hook=None):
     return failed
 
 
+def test_copy_source_is_a_read():
+    """pytest-Einstieg: Ein Rueckgabewert wuerde hier IGNORIERT.
+
+    Ohne assert meldet pytest die Datei als bestanden, egal wie die
+    Faelle ausgehen. Genau so blieb ein echter Fehlschlag unsichtbar.
+    """
+    assert run_all() == 0
+
+
 if __name__ == "__main__":
-    sys.exit(1 if test_copy_source_is_a_read(
+    sys.exit(1 if run_all(
         sys.argv[1] if len(sys.argv) > 1 else None) else 0)
