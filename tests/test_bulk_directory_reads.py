@@ -98,7 +98,7 @@ def _denied(hook, command, override=None):
         return p.returncode == 2
 
 
-def test_bulk_directory_reads(hook=None):
+def run_all(hook=None):
     hook = Path(hook or DEFAULT_HOOK)
     failed = 0
     for name, command, want0, want1 in CASES:
@@ -115,6 +115,15 @@ def test_bulk_directory_reads(hook=None):
     return failed
 
 
+def test_bulk_directory_reads():
+    """pytest entry point: a return value would be IGNORED here.
+
+    Without the assert pytest reports the file as passed no matter how
+    the cases turn out. That is how a real failure stayed invisible.
+    """
+    assert run_all() == 0
+
+
 if __name__ == "__main__":
-    sys.exit(1 if test_bulk_directory_reads(
+    sys.exit(1 if run_all(
         sys.argv[1] if len(sys.argv) > 1 else None) else 0)

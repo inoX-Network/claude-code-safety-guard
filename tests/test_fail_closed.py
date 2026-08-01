@@ -21,7 +21,7 @@ def _run(command: str, rules_path: str) -> int:
                            capture_output=True, text=True, env=env)
         return p.returncode
 
-def test_fail_closed():
+def run_all():
     results = []
     # B1: rules file missing -> fallback active -> rm -rf / still blocked
     results.append(("B1 missing rules: rm -rf / blocked", _run("rm -rf /", "/no/such/rules.json") == 2))
@@ -51,5 +51,10 @@ def test_fail_closed():
     print(f"\nfail-closed: {passed}/{len(results)} passed")
     return 0 if passed == len(results) else 1
 
+def test_fail_closed():
+    """pytest-Einstieg: siehe Kommentar in test_copy_source_is_a_read."""
+    assert run_all() == 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(test_fail_closed())
+    raise SystemExit(run_all())
