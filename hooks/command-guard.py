@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1166,9 +1167,19 @@ def main():
     """Main function — reads tool input from stdin, checks against rules."""
     try:
         input_data = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        # No valid input — allow through
-        sys.exit(0)
+    except (json.JSONDecodeError, EOFError, UnicodeDecodeError, ValueError) as exc:
+        # Without readable input no check is possible — so the call is denied.
+        # Deliberate choice: allowing it through would be the one remaining spot
+        # where a failure switches the guard off silently. To reverse this,
+        # replace these five lines with sys.exit(0).
+        print(
+            f"BLOCKED (guard failure): the input could not be read "
+            f"({type(exc).__name__}) — the guard was unable to check anything "
+            f"and therefore lets nothing through. This is not a verdict on the "
+            f"command itself.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     tool_name = input_data.get("tool_name", "")
     # Read the session_id once up front and thread it through every override
@@ -1506,5 +1517,34 @@ def main():
     sys.exit(0)
 
 
+def _guard_stumbled(exc: BaseException) -> None:
+    """Safety net: an unexpected failure denies the call instead of allowing it.
+
+    Without this net the guard exits with code 1 on any unhandled error — and
+    only exit code 2 means "deny". Every crash would therefore be a silent way
+    past the guard: the command runs and it looks like a normal allow. A typo
+    introduced by a later change is enough to trigger this.
+
+    The message names the failure so it stays visible that the guard stumbled,
+    rather than the command being rejected on its merits.
+    """
+    print(
+        f"BLOCKED (guard failure): the check aborted with an unexpected error "
+        f"— {type(exc).__name__}: {exc}. The command was NOT allowed. This is "
+        f"not a verdict on the command itself, it is a bug in the guard.",
+        file=sys.stderr,
+    )
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(2)
+
+
 if __name__ == "__main__":
-    main()
+    # The net wraps the WHOLE run. sys.exit() raises SystemExit and must pass
+    # through untouched — otherwise every regular allow (0) would be turned
+    # into a denial.
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        _guard_stumbled(exc)
