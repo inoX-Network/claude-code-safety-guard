@@ -14,6 +14,7 @@ import re
 import shlex
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1506,8 +1507,16 @@ def command_hits_protected_read(command: str, rules: dict,
     # recursive-read command is present. Pre-compute the protected key dirs so a
     # plain `ls ~/.ssh` (metadata only, no such command) stays allowed.
     req1_dirs = []
+    hard_dirs = []
     if any(os.path.basename(t) in RECURSIVE_READ_CMDS for t in tokens):
-        req1_dirs = [expand_path(p).rstrip("/") for p in protected.get("require_override_1", [])]
+        # _norm_path rather than expand_path: otherwise a traversal detour
+        # (`tar ~/.ssh/../.ssh`) walks around the directory gate, the same way it
+        # would around the direct read guard.
+        req1_dirs = [_norm_path(p).rstrip("/") for p in protected.get("require_override_1", [])]
+        # Same pre-computation for the always-blocked files. Without it the
+        # detour was weaker than the direct path: `cat /etc/shadow` was denied
+        # while `tar czf x.tgz /etc` went through — and took the file with it.
+        hard_dirs = [_norm_path(p).rstrip("/") for p in protected.get("always_blocked_reads", [])]
 
     for tok in tokens:
         if tok.startswith("-"):
@@ -1528,8 +1537,22 @@ def command_hits_protected_read(command: str, rules: dict,
         #     (e.g. `tar ~/.ssh` grabs ~/.ssh/id_*). The token is an ancestor of
         #     (or equal to) a require_override_1 path — same override gate as
         #     reading the key file directly.
+        # 2a-hard. Recursive read of a DIRECTORY that contains an always-blocked
+        #     file (e.g. `tar /etc` grabs /etc/shadow). No override lifts this —
+        #     exactly like reading that file directly. Otherwise the detour would
+        #     be the weaker door.
+        if hard_dirs:
+            tok_hard = _norm_path(tok).rstrip("/")
+            # Empty token: see the reasoning in the level-1 branch below.
+            if tok_hard and any(d == tok_hard or d.startswith(tok_hard + "/")
+                                for d in hard_dirs):
+                return True, (
+                    f"ALWAYS BLOCKED: recursively reading {tok} — the directory "
+                    f"contains an always-blocked file. No override possible."
+                ), False
+
         if req1_dirs:
-            tok_exp = expand_path(tok).rstrip("/")
+            tok_exp = _norm_path(tok).rstrip("/")
             # An empty token (a bare "/" or a regex slash) would otherwise match
             # EVERY absolute key path via startswith("/") -> over-block false
             # positive (grep/rsync/cp with a /-argument).
@@ -1599,9 +1622,19 @@ def main():
     """Main function — reads tool input from stdin, checks against rules."""
     try:
         input_data = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        # No valid input — allow through
-        sys.exit(0)
+    except (json.JSONDecodeError, EOFError, UnicodeDecodeError, ValueError) as exc:
+        # Without readable input no check is possible — so the call is denied.
+        # Deliberate choice: allowing it through would be the one remaining spot
+        # where a failure switches the guard off silently. To reverse this,
+        # replace these five lines with sys.exit(0).
+        print(
+            f"BLOCKED (guard failure): the input could not be read "
+            f"({type(exc).__name__}) — the guard was unable to check anything "
+            f"and therefore lets nothing through. This is not a verdict on the "
+            f"command itself.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     tool_name = input_data.get("tool_name", "")
     # Read the session_id once up front and thread it through every override
@@ -1958,5 +1991,34 @@ def main():
     sys.exit(0)
 
 
+def _guard_stumbled(exc: BaseException) -> None:
+    """Safety net: an unexpected failure denies the call instead of allowing it.
+
+    Without this net the guard exits with code 1 on any unhandled error — and
+    only exit code 2 means "deny". Every crash would therefore be a silent way
+    past the guard: the command runs and it looks like a normal allow. A typo
+    introduced by a later change is enough to trigger this.
+
+    The message names the failure so it stays visible that the guard stumbled,
+    rather than the command being rejected on its merits.
+    """
+    print(
+        f"BLOCKED (guard failure): the check aborted with an unexpected error "
+        f"— {type(exc).__name__}: {exc}. The command was NOT allowed. This is "
+        f"not a verdict on the command itself, it is a bug in the guard.",
+        file=sys.stderr,
+    )
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(2)
+
+
 if __name__ == "__main__":
-    main()
+    # The net wraps the WHOLE run. sys.exit() raises SystemExit and must pass
+    # through untouched — otherwise every regular allow (0) would be turned
+    # into a denial.
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        _guard_stumbled(exc)
