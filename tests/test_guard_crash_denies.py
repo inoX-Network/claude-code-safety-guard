@@ -74,8 +74,12 @@ FAULT_SITES = [
      _payload("Bash", {"command": DANGEROUS})),
     ("check_read_protection", "read protection path",
      _payload("Read", {"file_path": "/etc/shadow"})),
+    # Target chosen on purpose: ~/.claude/rules is covered by hits_self_protect
+    # ALONE. A settings or hooks path would be stopped earlier by the
+    # project-control gate, the injected fault would never be reached, and the
+    # case would prove nothing about this function.
     ("hits_self_protect", "write path (Write/Edit)",
-     _payload("Write", {"file_path": os.path.expanduser("~/.claude/settings.json"),
+     _payload("Write", {"file_path": os.path.expanduser("~/.claude/rules/probe.md"),
                         "content": "x"})),
 ]
 
