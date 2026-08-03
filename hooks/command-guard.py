@@ -199,6 +199,103 @@ def _installation_self_protect() -> list[str]:
 
 SELF_PROTECT_PATHS = _BUILTIN_SELF_PROTECT + _installation_self_protect()
 
+# Project-local control files — a RULE, not a list of places.
+#
+# The tool chain reads control files out of EVERY project directory, not just
+# the home directory. A settings file there grants permissions and registers
+# hooks; the hook code next to it runs on every tool call. Protecting only the
+# home copies leaves the same power open one directory further along, and every
+# new project re-opens it.
+#
+# The pattern is bound to the .claude DIRECTORY, not to a file name: countless
+# foreign projects carry some settings.json, and none of them steers this tool
+# chain. The one exception is .mcp.json, whose name IS the tool chain's.
+#
+# Hard vs. gated follows measured everyday use, not gut feeling: settings, MCP
+# wiring and hooks saw zero to three AI writes in two months, so a hard block
+# costs nothing. Agents, skills and commands saw a handful — level 1.
+#
+# A project's own CLAUDE.md is deliberately absent: 70 writes in two months make
+# it everyday work, and a block there would be switched off within the week. Its
+# counterweight is traceability (version control), not a barrier — see
+# THREAT-MODEL.
+#
+# Hardcoded like _BUILTIN_SELF_PROTECT: a protection that the rules file could
+# switch off is no protection.
+_PROJECT_CONTROL_HARD = [
+    (re.compile(r"(?:^|/)\.claude/settings\.json$"), ".claude/settings.json"),
+    (re.compile(r"(?:^|/)\.claude/settings\.local\.json$"), ".claude/settings.local.json"),
+    (re.compile(r"(?:^|/)\.claude/hooks(?:/|$)"), ".claude/hooks/"),
+    (re.compile(r"(?:^|/)\.mcp\.json$"), ".mcp.json"),
+]
+_PROJECT_CONTROL_GATED = [
+    (re.compile(r"(?:^|/)\.claude/agents(?:/|$)"), ".claude/agents/"),
+    (re.compile(r"(?:^|/)\.claude/skills(?:/|$)"), ".claude/skills/"),
+    (re.compile(r"(?:^|/)\.claude/commands(?:/|$)"), ".claude/commands/"),
+]
+
+# Tools that only ever read. Everything else counts as potentially writing, so a
+# tool branch nobody has thought of yet is checked rather than skipped. A false
+# positive here is loud and fixable; the opposite would be silent.
+_READ_ONLY_TOOLS = frozenset({
+    "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
+})
+
+
+def project_control_file(file_path: str) -> tuple[str, bool] | None:
+    """Return (what was hit, hard) for a project-local control file — else None.
+
+    Works on the lexically normalised path, so detours (../, ./, //) do not walk
+    around the pattern. `hard` means no override lifts it.
+
+    Dev mode: the home hook sources stay unlockable, otherwise this rule would
+    lock the owner out of the very files the dev window exists for.
+    """
+    fp = _norm_path(file_path)
+    for rx, what in _PROJECT_CONTROL_HARD:
+        if rx.search(fp):
+            return None if _dev_unlocked(fp) else (what, True)
+    for rx, what in _PROJECT_CONTROL_GATED:
+        if rx.search(fp):
+            return None if _dev_unlocked(fp) else (what, False)
+    return None
+
+
+def _command_path_tokens(command: str):
+    """Every shell token that could be a path. Quotes and shell operators split,
+    so an interpreter one-liner (open('.../settings.json','w')) yields the path
+    as its own token."""
+    return re.findall(r"[^\s'\"|;&<>()]+", command)
+
+
+def command_hits_project_control(command: str) -> tuple[str, bool] | None:
+    """Bash counterpart: a write command aimed at a project-local control file.
+
+    Only on detected write access, so reading one's own configuration stays free.
+    A copy SOURCE is not a target — taking a working copy is reading.
+    """
+    command = _collapse_path_traversal(_normalize_obfuscation(command))
+
+    # Interpreter one-liners carry no shell write indicator. Naming a control
+    # file inside -c/-e code is enough: there is no legitimate reason to reach
+    # the tool chain's own steering that way.
+    if _interpreter_inline_code(command):
+        for tok in _command_path_tokens(command):
+            hit = project_control_file(tok)
+            if hit:
+                return hit
+
+    cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
+    cleaned = re.sub(r'\d*>&\d+', '', cleaned)
+    if not _command_is_write(cleaned):
+        return None
+    cleaned = _without_copy_sources(cleaned)
+    for tok in _command_path_tokens(cleaned):
+        hit = project_control_file(tok)
+        if hit:
+            return hit
+    return None
+
 # Hook development mode (Option B): the owner can lift the self-protection ONLY
 # for this subset temporarily, to allow hook changes by the AI under
 # supervision. Override directory, settings.json, bin/, CLAUDE.md and rules/
@@ -1690,6 +1787,46 @@ def enforce_read_protection(input_data: dict, tool_name: str, rules: dict,
             sys.exit(2)
 
 
+def enforce_project_control_files(input_data: dict, tool_name: str,
+                                  agent_id: str | None, session_id: str | None) -> None:
+    """CHOKE POINT, second gate: project-local control files. Exits on block.
+
+    Sits next to enforce_read_protection at the same single point, so it inherits
+    the same property: a tool branch nobody has written yet is covered.
+
+    Read-only tools are skipped — reading one's own configuration stays free, and
+    a Glob pattern naming a control file is a search, not a write. Anything not
+    on that list counts as potentially writing (fail-closed).
+    """
+    if tool_name in _READ_ONLY_TOOLS:
+        return
+    for candidate in _path_candidates(input_data.get("tool_input", {})):
+        hit = project_control_file(candidate)
+        if not hit:
+            continue
+        what, hard = hit
+        if hard:
+            _audit(input_data, tool_name, candidate, "block",
+                   f"project_control:{what}", "hard")
+            print(
+                f"BLOCKED: '{what}' steers the tool chain itself — writing it is "
+                f"blocked at every location. No override lifts this, only the "
+                f"owner via !.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        override = load_override(agent_id, session_id)
+        if not override or override.get("override_level", 0) < 1:
+            _audit(input_data, tool_name, candidate, "block",
+                   f"project_control:{what}", 0)
+            print(
+                f"BLOCKED: '{what}' carries instructions for future sessions — "
+                f"writing it requires override level 1+.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+
 def main():
     """Main function — reads tool input from stdin, checks against rules."""
     try:
@@ -1713,9 +1850,12 @@ def main():
     # lookup, so an override bound to a session_id only applies to that session.
     session_id = input_data.get("session_id")
 
-    # CHOKE POINT — read protection for EVERY file-touching tool, before any
-    # branch-specific logic. Bash carries its own tokenising check further down.
+    # CHOKE POINT — everything path-based that must hold for EVERY file-touching
+    # tool, before any branch-specific logic. Bash carries its own tokenising
+    # counterparts further down, because it needs to understand shell syntax.
     if tool_name != "Bash":
+        enforce_project_control_files(input_data, tool_name,
+                                      input_data.get("agent_id"), session_id)
         choke_rules = load_rules()
         if choke_rules:
             enforce_read_protection(input_data, tool_name, choke_rules,
@@ -1880,6 +2020,32 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
+
+    # 2d. Project-local control files. Same reasoning as 2c, but bound to a
+    #     pattern instead of fixed places: the tool chain reads its steering out
+    #     of every project directory, so protecting only the home copies leaves
+    #     the same power open one directory further along.
+    control_hit = command_hits_project_control(command)
+    if control_hit:
+        what, hard = control_hit
+        if hard:
+            _audit(input_data, "Bash", command, "block", f"project_control:{what}", "hard")
+            print(
+                f"BLOCKED: '{what}' steers the tool chain itself — writing it is "
+                f"blocked at every location. No override lifts this, only the "
+                f"owner via !.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        override = load_override(input_data.get("agent_id"), session_id)
+        if not override or override.get("override_level", 0) < 1:
+            _audit(input_data, "Bash", command, "block", f"project_control:{what}", 0)
+            print(
+                f"BLOCKED: '{what}' carries instructions for future sessions — "
+                f"writing it requires override level 1+.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     # 2e. Docker/Podman ALWAYS-block — catastrophic flags + encirclement mounts.
     #     Sits before the override load (like 1/2/2b/2c), so it reaches every
