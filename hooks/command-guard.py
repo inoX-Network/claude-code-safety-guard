@@ -1242,8 +1242,12 @@ def check_injection(command: str, keywords: list[str]) -> list[str]:
 
 
 def check_read_protection(file_path: str, rules: dict, agent_id: str | None = None,
-                          session_id: str | None = None) -> tuple[bool, str]:
-    """Check whether a Read access to protected files is allowed.
+                          session_id: str | None = None,
+                          access: str = "reading") -> tuple[bool, str]:
+    """Check whether an access to protected files is allowed.
+
+    `access` only shapes the wording of the message. The choke point applies this
+    check to writing tools as well, where "reading" would be a lie.
 
     Returns: (blocked, reason)
     - (False, "") = allow
@@ -1286,12 +1290,12 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
             if override and override.get("override_level", 0) >= 1:
                 level = override.get("override_level", 1)
                 print(
-                    f"READ ALLOWED (override level {level}): {file_path}",
+                    f"ACCESS ALLOWED (override level {level}): {file_path}",
                     file=sys.stderr,
                 )
                 return False, ""
             return True, (
-                f"BLOCKED: reading {pattern} requires override level 1+. "
+                f"BLOCKED: {access} {pattern} requires override level 1+. "
                 f"Ask the owner for an override."
             )
 
@@ -1618,6 +1622,74 @@ def check_mcp_policy(tool_name: str, policy: dict,
     return _gated("writing or not classified as read-only")
 
 
+_PATH_CANDIDATE_MAX_DEPTH = 6
+
+
+def _path_candidates(value, depth: int = 0):
+    """Yield every string inside a tool_input that looks like a filesystem path.
+
+    Deliberately generic: the choke point must not know what a branch calls its
+    argument (file_path, notebook_path, path, uri, ...). Whatever looks like a
+    path is checked, so a NEW tool branch is covered without anyone having to
+    remember it — that forgetting was the actual defect.
+
+    "Looks like a path" = contains a slash or starts with ~. protected_reads
+    entries are absolute paths and check_read_protection compares by prefix, so
+    prose that merely mentions a protected path mid-sentence does not match.
+    (No example path is spelled out here on purpose: the Bash read guard scans
+    command text, so a documented path turns every command carrying this file
+    into a false positive.)
+    """
+    if depth > _PATH_CANDIDATE_MAX_DEPTH:
+        return
+    if isinstance(value, str):
+        if "/" in value or value.startswith("~"):
+            yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _path_candidates(v, depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _path_candidates(v, depth + 1)
+
+
+def enforce_read_protection(input_data: dict, tool_name: str, rules: dict,
+                            agent_id: str | None, session_id: str | None) -> None:
+    """CHOKE POINT: protected_reads for every file-touching tool. Exits on block.
+
+    Before this existed, the check hung off the Read branch alone —
+    Write/Edit/MultiEdit/NotebookEdit and every MCP tool reached read-protected
+    files untouched. Wiring the call into those branches too would have preserved
+    the defect: the next new branch gets forgotten again. Here every non-Bash
+    tool passes ONE point before any branch-specific logic runs.
+
+    Writing tools are covered on purpose, not by accident: whoever can REPLACE a
+    credential file never needs to read it.
+
+    Bash is exempt — it brings its own tokenising check
+    (command_hits_protected_read) that understands shell syntax.
+    """
+    protected = rules.get("protected_reads", {})
+    env_patterns = protected.get("env_files_require_override_1", [])
+    for candidate in _path_candidates(input_data.get("tool_input", {})):
+        if env_patterns and check_env_file_read(candidate, env_patterns):
+            override = load_override(agent_id, session_id)
+            if not override or override.get("override_level", 0) < 1:
+                _audit(input_data, tool_name, candidate, "block", "env_protected", 0)
+                print(
+                    f"BLOCKED: {tool_name} touches the .env file {candidate} — "
+                    f"that requires override level 1+.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        blocked, reason = check_read_protection(candidate, rules, agent_id,
+                                                session_id, access="accessing")
+        if blocked:
+            _audit(input_data, tool_name, candidate, "block", "read_protected", 0)
+            print(f"{reason} (tool: {tool_name})", file=sys.stderr)
+            sys.exit(2)
+
+
 def main():
     """Main function — reads tool input from stdin, checks against rules."""
     try:
@@ -1641,34 +1713,19 @@ def main():
     # lookup, so an override bound to a session_id only applies to that session.
     session_id = input_data.get("session_id")
 
-    # Read tool: credential protection
+    # CHOKE POINT — read protection for EVERY file-touching tool, before any
+    # branch-specific logic. Bash carries its own tokenising check further down.
+    if tool_name != "Bash":
+        choke_rules = load_rules()
+        if choke_rules:
+            enforce_read_protection(input_data, tool_name, choke_rules,
+                                    input_data.get("agent_id"), session_id)
+
+    # Read tool: the protection itself ran in the choke point above — for every
+    # tool, not just this one. What remains here is the audit trail.
     if tool_name == "Read":
-        tool_input = input_data.get("tool_input", {})
-        file_path = tool_input.get("file_path", "")
+        file_path = input_data.get("tool_input", {}).get("file_path", "")
         if file_path:
-            agent_id = input_data.get("agent_id")
-            rules = load_rules()
-            if rules:
-                # 1. .env protection: override level 1+ required
-                env_patterns = rules.get("protected_reads", {}).get(
-                    "env_files_require_override_1", []
-                )
-                if env_patterns and check_env_file_read(file_path, env_patterns):
-                    override = load_override(agent_id, session_id)
-                    if not override or override.get("override_level", 0) < 1:
-                        _audit(input_data, "Read", file_path, "block", "env_protected", 0)
-                        print(
-                            f"BLOCKED: reading the .env file {file_path} requires "
-                            f"override level 1+.",
-                            file=sys.stderr,
-                        )
-                        sys.exit(2)
-                # 2. Further credential checks
-                blocked, reason = check_read_protection(file_path, rules, agent_id, session_id)
-                if blocked:
-                    _audit(input_data, "Read", file_path, "block", "read_protected", 0)
-                    print(reason, file=sys.stderr)
-                    sys.exit(2)
             _audit(input_data, "Read", file_path, "allow", "ok")
         sys.exit(0)
 
@@ -1697,20 +1754,8 @@ def main():
 
         rules = load_rules()
         if rules:
-            # B. .env write protection (analogous to read protection: override level 1+).
-            env_patterns = rules.get("protected_reads", {}).get(
-                "env_files_require_override_1", []
-            )
-            if env_patterns and check_env_file_read(file_path, env_patterns):
-                override = load_override(agent_id, session_id)
-                if not override or override.get("override_level", 0) < 1:
-                    _audit(input_data, tool_name, file_path, "block", "env_write_protected", 0)
-                    print(
-                        f"BLOCKED: writing to the .env file {file_path} requires "
-                        f"override level 1+.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(2)
+            # B. .env write protection now runs in the choke point (same check for
+            #    every tool). Only the path rules specific to writing remain here.
 
             # C. Protected paths — level-dependent (identical logic to Bash check 3).
             #    For Write we have the exact target path: prefix comparison with a
