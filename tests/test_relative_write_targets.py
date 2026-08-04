@@ -67,6 +67,25 @@ CASES = [
     # ...and the same spelling elsewhere stays free.
     ("selfonly-elsewhere", "/tmp", "Bash", {"command": "cp /tmp/x rules/probe.md"}, ALLOW),
 
+    # --- the cd happens INSIDE the command, so the shell is not there yet ---
+    # This is the live case: a session rarely sits in the protected directory
+    # already; it gets there with `cd X && …`. At check time that cd has not run,
+    # so the reported working directory is useless — the command itself has to be
+    # read. The guard already does this for git commits.
+    ("cd-then-cp", "/tmp", "Bash",
+     {"command": f"cd {CLAUDE} && cp /tmp/x rules/probe.md"}, BLOCK),
+    ("cd-then-redirect", "/tmp", "Bash",
+     {"command": f"cd {CLAUDE} && echo x > rules/probe.md"}, BLOCK),
+    ("cd-tilde-then-cp", "/tmp", "Bash",
+     {"command": "cd ~/.claude && cp /tmp/x rules/probe.md"}, BLOCK),
+    ("cd-then-cp-hooks", "/tmp", "Bash",
+     {"command": f"cd {CLAUDE} && cp /tmp/x hooks/command-guard.py"}, BLOCK),
+    # ...and a cd somewhere harmless keeps the same spelling free.
+    ("cd-elsewhere-then-cp", HOME, "Bash",
+     {"command": "cd /tmp && cp /tmp/x rules/probe.md"}, ALLOW),
+    ("cd-then-harmless", "/tmp", "Bash",
+     {"command": f"cd {CLAUDE} && cp /tmp/x notes/todo.md"}, ALLOW),
+
     # --- counter-probe: the SAME spelling from elsewhere is harmless ---
     # /tmp/hooks/command-guard.py is not a protected path. If this one turns red,
     # the fix blocks by name instead of by location.
