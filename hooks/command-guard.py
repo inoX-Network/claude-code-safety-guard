@@ -268,6 +268,29 @@ def _command_path_tokens(command: str):
     return re.findall(r"[^\s'\"|;&<>()]+", command)
 
 
+# Interpreters and friends: what follows directly is the PROGRAM to run, not a
+# write target. Without this exception every invocation of a tool that itself
+# lives under a control directory gets blocked -- as soon as any write word
+# appears anywhere in the command.
+_INTERPRETERS = ("python3", "python", "node", "bash", "sh", "zsh", "perl",
+                 "ruby", "uv", "uvx")
+
+
+def _without_interpreter_program(command: str) -> str:
+    """Drop the program path that follows an interpreter."""
+    parts = command.split()
+    drop = set()
+    for i, part in enumerate(parts):
+        if part.rsplit("/", 1)[-1] not in _INTERPRETERS:
+            continue
+        for j in range(i + 1, len(parts)):
+            if parts[j].startswith("-"):
+                continue                # skip switches
+            drop.add(j)                 # first non-switch word is the program
+            break
+    return " ".join(p for k, p in enumerate(parts) if k not in drop)
+
+
 def command_hits_project_control(command: str) -> tuple[str, bool] | None:
     """Bash counterpart: a write command aimed at a project-local control file.
 
@@ -290,6 +313,7 @@ def command_hits_project_control(command: str) -> tuple[str, bool] | None:
     if not _command_is_write(cleaned):
         return None
     cleaned = _without_copy_sources(cleaned)
+    cleaned = _without_interpreter_program(cleaned)
     for tok in _command_path_tokens(cleaned):
         hit = project_control_file(tok)
         if hit:
@@ -1722,6 +1746,16 @@ def check_mcp_policy(tool_name: str, policy: dict,
 _PATH_CANDIDATE_MAX_DEPTH = 6
 
 
+# Fields that carry CONTENT and are never an access target. A text being
+# written may well mention a protected path -- documentation, tests and
+# measuring tools do it constantly. Searching the content too blocks a write
+# over a word in the text instead of over an action.
+_CONTENT_FIELDS = frozenset({
+    "content", "old_string", "new_string", "new_source", "body", "text",
+    "prompt", "command", "description", "instructions", "message", "query",
+})
+
+
 def _path_candidates(value, depth: int = 0):
     """Yield every string inside a tool_input that looks like a filesystem path.
 
@@ -1743,7 +1777,9 @@ def _path_candidates(value, depth: int = 0):
         if "/" in value or value.startswith("~"):
             yield value
     elif isinstance(value, dict):
-        for v in value.values():
+        for key, v in value.items():
+            if key in _CONTENT_FIELDS:
+                continue
             yield from _path_candidates(v, depth + 1)
     elif isinstance(value, (list, tuple)):
         for v in value:
