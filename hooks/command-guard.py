@@ -242,7 +242,8 @@ _READ_ONLY_TOOLS = frozenset({
 })
 
 
-def project_control_file(file_path: str) -> tuple[str, bool] | None:
+def project_control_file(file_path: str,
+                         extra_bases: list[str] | None = None) -> tuple[str, bool] | None:
     """Return (what was hit, hard) for a project-local control file — else None.
 
     Works on the lexically normalised path, so detours (../, ./, //) do not walk
@@ -251,7 +252,7 @@ def project_control_file(file_path: str) -> tuple[str, bool] | None:
     Dev mode: the home hook sources stay unlockable, otherwise this rule would
     lock the owner out of the very files the dev window exists for.
     """
-    for fp in _norm_path_variants(file_path):
+    for fp in _norm_path_variants(file_path, extra_bases):
         for rx, what in _PROJECT_CONTROL_HARD:
             if rx.search(fp):
                 return None if _dev_unlocked(fp) else (what, True)
@@ -302,9 +303,10 @@ def command_hits_project_control(command: str) -> tuple[str, bool] | None:
     # Interpreter one-liners carry no shell write indicator. Naming a control
     # file inside -c/-e code is enough: there is no legitimate reason to reach
     # the tool chain's own steering that way.
+    cd_bases = _cd_targets(command)
     if _interpreter_inline_code(command):
         for tok in _command_path_tokens(command):
-            hit = project_control_file(tok)
+            hit = project_control_file(tok, cd_bases)
             if hit:
                 return hit
 
@@ -315,7 +317,7 @@ def command_hits_project_control(command: str) -> tuple[str, bool] | None:
     cleaned = _without_copy_sources(cleaned)
     cleaned = _without_interpreter_program(cleaned)
     for tok in _command_path_tokens(cleaned):
-        hit = project_control_file(tok)
+        hit = project_control_file(tok, cd_bases)
         if hit:
             return hit
     return None
@@ -1137,10 +1139,11 @@ def command_hits_self_protect(command: str) -> str | None:
     # Relative targets carry no protected prefix literally, so the search above
     # cannot see them. Resolve every path-ish token instead — same check, just
     # with the working directory in hand.
+    cd_bases = _cd_targets(command)
     for tok in _command_path_tokens(cleaned):
         if not _looks_relative(tok):
             continue
-        for fp in _norm_path_variants(tok):
+        for fp in _norm_path_variants(tok, cd_bases):
             for prot in SELF_PROTECT_PATHS:
                 pe = _norm_path(prot)
                 if (fp == pe or fp.startswith(pe + "/")) and not _dev_unlocked(prot):
@@ -1231,7 +1234,32 @@ def _looks_relative(p: str) -> bool:
     return bool(p) and not p.startswith(("/", "~")) and "/" in p
 
 
-def _norm_path_variants(p: str) -> list[str]:
+_CD_RE = re.compile(r"\bcd\s+([^\s;&|]+)")
+
+
+def _cd_targets(command: str) -> list[str]:
+    """Directories the command itself changes into before it writes.
+
+    At check time the cd has not run yet, so the reported working directory says
+    nothing about where `cp x rules/f` will land. The guard already reads cd this
+    way for git commits; write targets need the same.
+
+    Every cd target counts, not just the last one: taking all of them is the
+    fail-closed reading, and a wrong extra candidate can only ever cause a block
+    on a path that is protected anyway.
+    """
+    out = []
+    for raw in _CD_RE.findall(command):
+        target = expand_path(raw.strip("'\""))
+        if target.startswith("/"):
+            out.append(_norm_path(target))
+            continue
+        for base in _working_dirs():                 # relative cd
+            out.append(_norm_path(os.path.join(base, target)))
+    return out
+
+
+def _norm_path_variants(p: str, extra_bases: list[str] | None = None) -> list[str]:
     """The normalised forms a path may stand for.
 
     For an absolute path that is exactly one. For a relative one it is the
@@ -1242,7 +1270,7 @@ def _norm_path_variants(p: str) -> list[str]:
     if not _looks_relative(p):
         return [base]
     out = [base]
-    for d in _working_dirs():
+    for d in list(extra_bases or []) + _working_dirs():
         cand = _norm_path(os.path.join(d, p))
         if cand not in out:
             out.append(cand)
