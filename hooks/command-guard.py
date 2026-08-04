@@ -251,13 +251,13 @@ def project_control_file(file_path: str) -> tuple[str, bool] | None:
     Dev mode: the home hook sources stay unlockable, otherwise this rule would
     lock the owner out of the very files the dev window exists for.
     """
-    fp = _norm_path(file_path)
-    for rx, what in _PROJECT_CONTROL_HARD:
-        if rx.search(fp):
-            return None if _dev_unlocked(fp) else (what, True)
-    for rx, what in _PROJECT_CONTROL_GATED:
-        if rx.search(fp):
-            return None if _dev_unlocked(fp) else (what, False)
+    for fp in _norm_path_variants(file_path):
+        for rx, what in _PROJECT_CONTROL_HARD:
+            if rx.search(fp):
+                return None if _dev_unlocked(fp) else (what, True)
+        for rx, what in _PROJECT_CONTROL_GATED:
+            if rx.search(fp):
+                return None if _dev_unlocked(fp) else (what, False)
     return None
 
 
@@ -514,10 +514,19 @@ def _interpreter_inline_code(command: str) -> bool:
     start, so it must be scanned by substring instead of token-startswith.
     Running a script FILE (python manage.py) has no inline flag -> not flagged.
     """
-    toks = [t.strip("'\"") for t in command.split()]
-    if not any(os.path.basename(t) in _INTERPRETERS for t in toks):
-        return False
-    return any(t in _INLINE_CODE_FLAGS for t in toks)
+    # Per segment, and the switch must come AFTER the interpreter. Pairing "some
+    # interpreter appears" with "some switch appears" anywhere in the line made
+    # `mkdir -p /tmp/a && python3 tool.py` count as inline code — the -p belonged
+    # to mkdir. Text instead of action, the same defect class this guard exists
+    # to avoid.
+    for segment in re.split(r"&&|\|\||[;|\n]", command):
+        toks = [t.strip("'\"") for t in segment.split()]
+        for i, tok in enumerate(toks):
+            if os.path.basename(tok) not in _INTERPRETERS:
+                continue
+            if any(rest in _INLINE_CODE_FLAGS for rest in toks[i + 1:]):
+                return True
+    return False
 
 
 # Hardcoded minimal ruleset. Used ONLY when security-rules.json is missing,
@@ -1074,11 +1083,11 @@ def hits_self_protect(file_path: str) -> str | None:
     proposals). NO override lifts a match — only dev mode unlocks the hook
     source files (DEV_UNLOCKABLE_PATHS).
     """
-    fp = _norm_path(file_path)
-    for prot in SELF_PROTECT_PATHS:
-        p = _norm_path(prot)
-        if fp == p or fp.startswith(p + "/"):
-            return None if _dev_unlocked(prot) else prot
+    for fp in _norm_path_variants(file_path):
+        for prot in SELF_PROTECT_PATHS:
+            p = _norm_path(prot)
+            if fp == p or fp.startswith(p + "/"):
+                return None if _dev_unlocked(prot) else prot
     return None
 
 
@@ -1125,6 +1134,17 @@ def command_hits_self_protect(command: str) -> str | None:
         p = re.escape(expand_path(prot).rstrip("/"))
         if re.search(p + _PATH_BOUNDARY, cleaned_expanded) and not _dev_unlocked(prot):
             return prot
+    # Relative targets carry no protected prefix literally, so the search above
+    # cannot see them. Resolve every path-ish token instead — same check, just
+    # with the working directory in hand.
+    for tok in _command_path_tokens(cleaned):
+        if not _looks_relative(tok):
+            continue
+        for fp in _norm_path_variants(tok):
+            for prot in SELF_PROTECT_PATHS:
+                pe = _norm_path(prot)
+                if (fp == pe or fp.startswith(pe + "/")) and not _dev_unlocked(prot):
+                    return prot
     return None
 
 
@@ -1173,6 +1193,60 @@ _DOCKER_FALLBACK_FLAGS = [
     "--cap-add=SYS_ADMIN", "--cap-add SYS_ADMIN",
     "seccomp=unconfined", "apparmor=unconfined",
 ]
+
+
+# The working directory a command runs in. Set once in main() from the tool
+# input; falls back to this process's own directory, which the tool chain starts
+# in the same place. Both are checked (see _norm_path_variants) — a relative
+# target must not slip through just because one of the two is unknown.
+_WORKING_DIR = None
+
+
+def _set_working_dir(reported: str | None) -> None:
+    global _WORKING_DIR
+    _WORKING_DIR = reported
+
+
+def _working_dirs() -> list[str]:
+    """Every directory a relative path could plausibly be resolved against."""
+    out = []
+    if _WORKING_DIR:
+        out.append(_WORKING_DIR)
+    try:
+        here = os.getcwd()
+    except OSError:
+        here = ""
+    if here and here not in out:
+        out.append(here)
+    return out
+
+
+def _looks_relative(p: str) -> bool:
+    """A relative path worth resolving.
+
+    Only spellings carrying a separator: a bare word like `check` or `set` is a
+    subcommand, not a target, and resolving it would turn every command run from
+    inside a protected directory into a false positive.
+    """
+    return bool(p) and not p.startswith(("/", "~")) and "/" in p
+
+
+def _norm_path_variants(p: str) -> list[str]:
+    """The normalised forms a path may stand for.
+
+    For an absolute path that is exactly one. For a relative one it is the
+    resolution against every candidate working directory — a write target must
+    be refused if ANY of them lands on a protected path (fail-closed).
+    """
+    base = _norm_path(p)
+    if not _looks_relative(p):
+        return [base]
+    out = [base]
+    for d in _working_dirs():
+        cand = _norm_path(os.path.join(d, p))
+        if cand not in out:
+            out.append(cand)
+    return out
 
 
 def _norm_path(p: str) -> str:
@@ -1880,6 +1954,10 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
+
+    # Before ANY check: a relative target can only be judged against the
+    # directory the command runs in.
+    _set_working_dir(input_data.get("cwd"))
 
     tool_name = input_data.get("tool_name", "")
     # Read the session_id once up front and thread it through every override
