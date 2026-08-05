@@ -168,11 +168,13 @@ _MESSAGES = {
         "BLOCKED: {tool} touches the .env file {path} — that requires override "
         "level 1+."
     ),
-    "read.protected": "{reason} (tool: {tool})",
-    "read.always_blocked": "ALWAYS BLOCKED: {pattern} — no override possible",
+    "read.protected": "BLOCKED: {reason} (tool: {tool})",
+    "read.always_blocked": (
+        "{pattern} is never readable — no override lifts this"
+    ),
     "read.needs_override": (
-        "BLOCKED: {access} {pattern} requires override level 1+. Ask the owner "
-        "for an override."
+        "{access} {pattern} requires override level 1+. Ask the owner for an "
+        "override."
     ),
     "read.allowed_by_override": "ACCESS ALLOWED (override level {level}): {path}",
     # --- project-local control files ---
@@ -199,6 +201,98 @@ _MESSAGES = {
         "BLOCKED: write access (Write/Edit) to protected path '{path}'. {extra}"
         "Needed: {needed}. ESCALATION: agent asks the coordinator → coordinator "
         "decides with the owner about adjusting the override file."
+    ),
+    # --- who is asking, and which approval is in force ---
+    # These are BUILDING BLOCKS: they go into other messages. Without them in
+    # the catalogue a translated refusal stays half English.
+    "who.agent": "Agent {agent}",
+    "who.main": "main session",
+    "override.none": "{who} has no valid override (level 0).",
+    "override.current": "Current override: level {level}.",
+    "override.active": (
+        "OVERRIDE ACTIVE: level {level} ({label}) — {who} — task \"{task}\" "
+        "[{source}]"
+    ),
+    "override.ambiguous": (
+        "command-guard: ambiguous override selection (equal timestamp) -> "
+        "fail-closed, no override applied"
+    ),
+    # --- the rules file ---
+    "rules.missing": (
+        "WARNING: {path} not found — FALLBACK ruleset active (fail-closed)"
+    ),
+    "rules.unreadable": (
+        "WARNING: {path} unreadable ({error}) — FALLBACK ruleset active"
+    ),
+    "rules.invalid": "WARNING: {path} empty/invalid — FALLBACK ruleset active",
+    # --- MCP tools ---
+    "mcp.blocked": "BLOCKED: {reason}",
+    "mcp.gated": (
+        "MCP tool '{tool}' ({why}) requires override level 1+. {extra}"
+        "ESCALATION: the agent asks the coordinator -> the coordinator decides "
+        "with the owner about adjusting the override file."
+    ),
+    "mcp.why_sensitive_server": "server '{server}' is classified as sensitive",
+    "mcp.why_not_readonly": "writing or not classified as read-only",
+    # --- Bash: patterns, owner-exclusive commands, git, containers ---
+    "bash.blocked_pattern": "BLOCKED: dangerous pattern detected: {pattern}",
+    "bash.owner_only": (
+        "BLOCKED: '{command}' is an owner-exclusive command (approval channel). "
+        "The AI cannot run it — only the owner via ! (bypasses the guard). "
+        "I can write an override PROPOSAL into the pending directory."
+    ),
+    "git.force_push": (
+        "BLOCKED: force-push to main/master — ALWAYS blocked, no override "
+        "possible."
+    ),
+    "git.safety": "BLOCKED: git-safety violation — pattern: {pattern}.",
+    "docker.always_blocked": (
+        "BLOCKED: docker — {reason}. ALWAYS blocked (no override); only the "
+        "owner via ! may run this."
+    ),
+    # --- Bash: read path. The reason arrives WITHOUT a verdict of its own, the
+    #     frame adds it — otherwise a translated reason doubles the prefix.
+    "bash.read_blocked": (
+        "BLOCKED: {reason} (Bash read path). {extra}ESCALATION: agent asks the "
+        "coordinator → coordinator decides with the owner about adjusting the "
+        "override file."
+    ),
+    "bash.read_blocked_hard": "BLOCKED: {reason} (Bash read path).",
+    "read.env_file_inline": (
+        "reading a .env file via interpreter inline code requires override "
+        "level 1+"
+    ),
+    "read.env_file_bash": (
+        "reading the .env file {path} requires override level 1+"
+    ),
+    "read.dir_always_blocked": (
+        "recursively reading {path} — the directory contains a never-readable "
+        "file. No override lifts this."
+    ),
+    "read.dir_credentials": (
+        "recursively reading {path} (contains protected credentials) requires "
+        "override level 1+"
+    ),
+    # --- Bash: escalation, lifecycle, injection ---
+    "sudo.disallowed": (
+        "BLOCKED: sudo with a disallowed command: '{command}'. {extra}Needed: "
+        "level 2 OR an additional_sudo grant for '{command}'. ESCALATION: agent "
+        "asks the coordinator → coordinator decides with the owner about "
+        "adjusting the override file."
+    ),
+    "lifecycle.needs_override": (
+        "BLOCKED: '{command}' changes or tears down and requires override "
+        "level 1+. Read-only forms (ps, logs, inspect, exec, run, build) run "
+        "without an approval. ESCALATION: the agent writes an override proposal "
+        "into the pending directory and asks the owner to approve it."
+    ),
+    "injection.warning": (
+        "WARNING: possible prompt injection detected: {keywords}"
+    ),
+    "guard.stumbled": (
+        "BLOCKED (guard failure): the check aborted with an unexpected error — "
+        "{error}: {detail}. The command was NOT allowed. This is not a verdict "
+        "on the command itself, it is a bug in the guard."
     ),
 }
 
@@ -253,6 +347,22 @@ def _msg_fallback(key: str, values: dict, why: str) -> str:
     """Last resort: name the key and the values, so a refusal stays actionable."""
     detail = " ".join(f"{k}={v}" for k, v in values.items())
     return f"BLOCKED [{key}] ({why}) {detail}".rstrip()
+
+
+def _who(agent_id: str | None) -> str:
+    """Who is asking: a named agent, or the main session."""
+    return msg("who.agent", agent=agent_id) if agent_id else msg("who.main")
+
+
+def _override_note(override: dict | None, level: int, agent_id: str | None) -> str:
+    """Which approval is in force — a sentence that slots into a refusal.
+
+    The trailing blank belongs to the joint, not to the text: a language file
+    must not have to carry an invisible space at the end of a line.
+    """
+    if not override:
+        return msg("override.none", who=_who(agent_id)) + " "
+    return msg("override.current", level=level) + " "
 
 
 # Path to the security rules file.
@@ -687,19 +797,16 @@ def load_rules() -> dict:
     otherwise deleting/corrupting the rules file would silently disable the guard.
     """
     if not RULES_PATH.exists():
-        print(f"WARNING: {RULES_PATH} not found — FALLBACK ruleset active (fail-closed)",
-              file=sys.stderr)
+        print(msg("rules.missing", path=RULES_PATH), file=sys.stderr)
         return dict(_FALLBACK_RULES)
     try:
         with open(RULES_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
-        print(f"WARNING: {RULES_PATH} unreadable ({exc}) — FALLBACK ruleset active",
-              file=sys.stderr)
+        print(msg("rules.unreadable", path=RULES_PATH, error=exc), file=sys.stderr)
         return dict(_FALLBACK_RULES)
     if not isinstance(data, dict) or not data:
-        print(f"WARNING: {RULES_PATH} empty/invalid — FALLBACK ruleset active",
-              file=sys.stderr)
+        print(msg("rules.invalid", path=RULES_PATH), file=sys.stderr)
         return dict(_FALLBACK_RULES)
     return data
 
@@ -908,8 +1015,7 @@ def load_override(agent_id: str | None = None, session_id: str | None = None) ->
     # is how a stale grant sneaks back in.
     top = _recency(newest)
     if sum(1 for o in active_overrides if _recency(o) == top) > 1:
-        print("command-guard: ambiguous override selection (equal timestamp) "
-              "-> fail-closed, no override applied", file=sys.stderr)
+        print(msg("override.ambiguous"), file=sys.stderr)
         return None
     return newest
 
@@ -1583,15 +1689,20 @@ def check_injection(command: str, keywords: list[str]) -> list[str]:
 
 def check_read_protection(file_path: str, rules: dict, agent_id: str | None = None,
                           session_id: str | None = None,
-                          access: str = "reading") -> tuple[bool, str]:
+                          access: str = "reading") -> tuple[bool, str, bool]:
     """Check whether an access to protected files is allowed.
 
     `access` only shapes the wording of the message. The choke point applies this
     check to writing tools as well, where "reading" would be a lie.
 
-    Returns: (blocked, reason)
-    - (False, "") = allow
-    - (True, reason) = block with error message
+    Returns: (blocked, reason, hard)
+    - (False, "", False) = allow
+    - (True, reason, hard) = block; `hard` = no override lifts it
+
+    `hard` is returned as a FLAG on purpose. It used to be read back out of the
+    message text (startswith "ALWAYS BLOCKED"), which turned the language
+    setting into a behaviour setting: a translated refusal was mistaken for an
+    overridable one and offered an escalation that cannot exist.
     """
     protected = rules.get("protected_reads", {})
     # _norm_path instead of expand_path: it also collapses ../ ./ // lexically, so a
@@ -1607,7 +1718,7 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
         # both sides normalised it adds nothing, and it was the one comparison a
         # detour could still slip past.
         if expanded.startswith(pat_expanded):
-            return True, msg("read.always_blocked", pattern=pattern)
+            return True, msg("read.always_blocked", pattern=pattern), True
 
     # 2. Always allowed (public keys, config, etc.)
     for pattern in protected.get("always_allowed", []):
@@ -1618,9 +1729,9 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
             dir_prefix = _norm_path(parts[0])
             extension = parts[1] if len(parts) > 1 else ""
             if expanded.startswith(dir_prefix) and expanded.endswith(extension):
-                return False, ""
+                return False, "", False
         elif expanded == pat_expanded or expanded.startswith(pat_expanded + "/"):
-            return False, ""
+            return False, "", False
 
     # 3. Requires override level 1 (private keys, credentials)
     for pattern in protected.get("require_override_1", []):
@@ -1631,10 +1742,11 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
                 level = override.get("override_level", 1)
                 print(msg("read.allowed_by_override", level=level, path=file_path),
                       file=sys.stderr)
-                return False, ""
-            return True, msg("read.needs_override", access=access, pattern=pattern)
+                return False, "", False
+            return True, msg("read.needs_override", access=access,
+                             pattern=pattern), False
 
-    return False, ""
+    return False, "", False
 
 
 def check_force_push(command: str, patterns: list[str]) -> str | None:
@@ -1812,17 +1924,14 @@ def command_hits_protected_read(command: str, rules: dict,
         # tool, so always_allowed (e.g. ~/.ssh/*.pub) is honoured and we avoid the
         # false positive of blocking a public-key read.
         for cand in set(_PATHLIKE_RE.findall(command)):
-            blocked, reason = check_read_protection(cand, rules, agent_id, session_id)
+            blocked, reason, hard = check_read_protection(cand, rules, agent_id,
+                                                          session_id)
             if blocked:
-                overridable = not reason.startswith("ALWAYS BLOCKED")
-                return True, reason, overridable
+                return True, reason, not hard
         if env_patterns and _ENV_RE.search(command):
             override = load_override(agent_id, session_id)
             if not override or override.get("override_level", 0) < 1:
-                return True, (
-                    "reading a .env file via interpreter inline code "
-                    "requires override level 1+"
-                ), True
+                return True, msg("read.env_file_inline"), True
 
     # Strip standard redirects (analogous to check_blocked_paths).
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
@@ -1865,7 +1974,7 @@ def command_hits_protected_read(command: str, rules: dict,
         if env_patterns and check_env_file_read(tok, env_patterns):
             override = load_override(agent_id, session_id)
             if not override or override.get("override_level", 0) < 1:
-                return True, f"reading the .env file {tok} requires override level 1+", True
+                return True, msg("read.env_file_bash", path=tok), True
             continue
 
         # 2. Credential protection: only for path-like tokens.
@@ -1885,10 +1994,7 @@ def command_hits_protected_read(command: str, rules: dict,
             # Empty token: see the reasoning in the level-1 branch below.
             if tok_hard and any(d == tok_hard or d.startswith(tok_hard + "/")
                                 for d in hard_dirs):
-                return True, (
-                    f"ALWAYS BLOCKED: recursively reading {tok} — the directory "
-                    f"contains an always-blocked file. No override possible."
-                ), False
+                return True, msg("read.dir_always_blocked", path=tok), False
 
         if req1_dirs:
             tok_exp = _norm_path(tok).rstrip("/")
@@ -1898,18 +2004,15 @@ def command_hits_protected_read(command: str, rules: dict,
             if tok_exp and any(d == tok_exp or d.startswith(tok_exp + "/") for d in req1_dirs):
                 override = load_override(agent_id, session_id)
                 if not override or override.get("override_level", 0) < 1:
-                    return True, (
-                        f"recursively reading {tok} (contains protected "
-                        f"credentials) requires override level 1+"
-                    ), True
+                    return True, msg("read.dir_credentials", path=tok), True
                 continue
 
-        blocked, reason = check_read_protection(tok, rules, agent_id, session_id)
+        blocked, reason, hard = check_read_protection(tok, rules, agent_id,
+                                                      session_id)
         if blocked:
-            # always_blocked system files start with "ALWAYS BLOCKED" and no
-            # override lifts them -> not overridable (no escalation hint).
-            overridable = not reason.startswith("ALWAYS BLOCKED")
-            return True, reason, overridable
+            # `hard` comes from the check itself, not from the wording: a
+            # never-readable file must stay never-readable in every language.
+            return True, reason, not hard
 
     return False, "", False
 
@@ -1939,22 +2042,17 @@ def check_mcp_policy(tool_name: str, policy: dict,
         level = override.get("override_level", 0) if override else 0
         if level >= 1:
             return False, ""
-        who = f"Agent {agent_id}" if agent_id else "main session"
-        return True, (
-            f"MCP tool '{tool_name}' ({why}) requires override level 1+. "
-            f"{who} has no valid override (level 0). "
-            f"ESCALATION: the agent asks the coordinator -> the coordinator "
-            f"decides with the owner about adjusting the override file."
-        )
+        return True, msg("mcp.gated", tool=tool_name, why=why,
+                         extra=_override_note(override, level, agent_id))
 
     if server in gate_servers:
-        return _gated(f"server '{server}' is classified as sensitive")
+        return _gated(msg("mcp.why_sensitive_server", server=server))
     if server in safe_servers:
         return False, ""
     tool_l = tool.lower()
     if any(tool_l.startswith(p) for p in read_prefixes):
         return False, ""
-    return _gated("writing or not classified as read-only")
+    return _gated(msg("mcp.why_not_readonly"))
 
 
 _PATH_CANDIDATE_MAX_DEPTH = 6
@@ -2026,8 +2124,8 @@ def enforce_read_protection(input_data: dict, tool_name: str, rules: dict,
                 print(msg("read.env_file", tool=tool_name, path=candidate),
                       file=sys.stderr)
                 sys.exit(2)
-        blocked, reason = check_read_protection(candidate, rules, agent_id,
-                                                session_id, access="accessing")
+        blocked, reason, _ = check_read_protection(candidate, rules, agent_id,
+                                                  session_id, access="accessing")
         if blocked:
             _audit(input_data, tool_name, candidate, "block", "read_protected", 0)
             print(msg("read.protected", reason=reason, tool=tool_name), file=sys.stderr)
@@ -2145,13 +2243,11 @@ def main():
                 grants = override.get("grants", {}) if override else {}
                 allowed, need = path_decision(blocked_path, level, grants)
                 if not allowed:
-                    who = f"Agent {agent_id}" if agent_id else "main session"
                     _audit(input_data, tool_name, file_path, "block",
                            f"protected_path:{blocked_path}", level)
-                    extra = (f"{who} has no valid override (level 0). " if not override
-                             else f"Current override: level {level}. ")
                     print(msg("path.write_blocked", path=blocked_path,
-                              extra=extra, needed=need), file=sys.stderr)
+                              extra=_override_note(override, level, agent_id),
+                              needed=need), file=sys.stderr)
                     sys.exit(2)
 
         _audit(input_data, tool_name, file_path, "allow", "ok")
@@ -2172,7 +2268,7 @@ def main():
         mcp_blocked, mcp_reason = check_mcp_policy(tool_name, policy, agent_id, session_id)
         if mcp_blocked:
             _audit(input_data, tool_name, tool_name, "block", "mcp_policy", 0)
-            print(f"BLOCKED: {mcp_reason}", file=sys.stderr)
+            print(msg("mcp.blocked", reason=mcp_reason), file=sys.stderr)
             sys.exit(2)
         _audit(input_data, tool_name, tool_name, "allow", "mcp_ok")
         sys.exit(0)
@@ -2198,7 +2294,7 @@ def main():
     blocked = check_blocked_patterns(command, rules.get("blocked_patterns", []))
     if blocked:
         _audit(input_data, "Bash", command, "block", f"blocked_pattern:{blocked}", "hard")
-        print(f"BLOCKED: dangerous pattern detected: {blocked}", file=sys.stderr)
+        print(msg("bash.blocked_pattern", pattern=blocked), file=sys.stderr)
         sys.exit(2)
 
     # 1b. Owner-exclusive commands — ALWAYS blocked for AI Bash, no override.
@@ -2206,12 +2302,7 @@ def main():
     owner_only = check_owner_only(command, rules.get("owner_only_commands", []))
     if owner_only:
         _audit(input_data, "Bash", command, "block", f"owner_only:{owner_only}", "hard")
-        print(
-            f"BLOCKED: '{owner_only}' is an owner-exclusive command (approval channel). "
-            f"The AI cannot run it — only the owner via ! (bypasses the guard). "
-            f"I can write an override PROPOSAL into the pending directory.",
-            file=sys.stderr,
-        )
+        print(msg("bash.owner_only", command=owner_only), file=sys.stderr)
         sys.exit(2)
 
     # 2. Force-push to main/master — ALWAYS blocked, even with an override
@@ -2220,20 +2311,14 @@ def main():
     )
     if force_push:
         _audit(input_data, "Bash", command, "block", "force_push", "hard")
-        print(
-            "BLOCKED: force-push to main/master — ALWAYS blocked, no override possible.",
-            file=sys.stderr,
-        )
+        print(msg("git.force_push"), file=sys.stderr)
         sys.exit(2)
 
     # 2b. Git-safety checks — ALWAYS blocked, even with an override
     git_violation = check_git_safety(command, rules.get("blocked_git_ops", []))
     if git_violation:
         _audit(input_data, "Bash", command, "block", f"git_safety:{git_violation}", "hard")
-        print(
-            f"BLOCKED: git-safety violation — pattern: {git_violation}.",
-            file=sys.stderr,
-        )
+        print(msg("git.safety", pattern=git_violation), file=sys.stderr)
         sys.exit(2)
 
     # 2c. Self-protection of the security system — ALWAYS blocked, no override.
@@ -2269,11 +2354,7 @@ def main():
     docker_always, docker_reason = check_docker_always(command, rules)
     if docker_always:
         _audit(input_data, "Bash", command, "block", f"docker:{docker_reason}", "hard")
-        print(
-            f"BLOCKED: docker — {docker_reason}. ALWAYS blocked (no override); "
-            f"only the owner via ! may run this.",
-            file=sys.stderr,
-        )
+        print(msg("docker.always_blocked", reason=docker_reason), file=sys.stderr)
         sys.exit(2)
 
     # 2d. Credential-/.env-read protection on the Bash side (closes the Read-tool gap).
@@ -2287,26 +2368,20 @@ def main():
         command, rules, agent_id, session_id
     )
     if read_blocked:
-        # Some reasons already carry a "BLOCKED: " prefix (check_read_protection);
-        # strip it so the single prefix below does not double up.
-        reason_text = read_reason[9:] if read_reason.startswith("BLOCKED: ") else read_reason
+        # The reason arrives without a verdict of its own, so the frame here is
+        # the only place that judges. Cutting a prefix off the text was the same
+        # mistake as reading the hardness out of it: it only worked in English.
         if read_overridable:
             # Mirror the path/sudo blocks: state who/level and the escalation path.
             override = load_override(agent_id, session_id)
             level = override.get("override_level", 0) if override else 0
-            who = f"Agent {agent_id}" if agent_id else "main session"
-            extra = (f"{who} has no valid override (level 0). " if not override
-                     else f"Current override: level {level}. ")
             _audit(input_data, "Bash", command, "block", "protected_read", level)
-            print(
-                f"BLOCKED: {reason_text} (Bash read path). {extra}"
-                f"ESCALATION: agent asks the coordinator → coordinator decides with the owner "
-                f"about adjusting the override file.",
-                file=sys.stderr,
-            )
+            print(msg("bash.read_blocked", reason=read_reason,
+                      extra=_override_note(override, level, agent_id)),
+                  file=sys.stderr)
         else:
             _audit(input_data, "Bash", command, "block", "protected_read", "hard")
-            print(f"BLOCKED: {reason_text} (Bash read path).", file=sys.stderr)
+            print(msg("bash.read_blocked_hard", reason=read_reason), file=sys.stderr)
         sys.exit(2)
 
     # Load the override for the calling context (main session vs. subagent).
@@ -2316,15 +2391,12 @@ def main():
     level = override.get("override_level", 0) if override else 0
     grants = override.get("grants", {}) if override else {}
     additional_sudo = grants.get("additional_sudo", [])
-    who = f"Agent {agent_id}" if agent_id else "main session"
-
     if override:
-        print(
-            f"OVERRIDE ACTIVE: level {level} ({override.get('label', '?')}) — "
-            f"{who} — task \"{override.get('task', '?')}\" "
-            f"[{override.get('_source_file', '?')}]",
-            file=sys.stderr,
-        )
+        print(msg("override.active", level=level,
+                  label=override.get("label", "?"), who=_who(agent_id),
+                  task=override.get("task", "?"),
+                  source=override.get("_source_file", "?")),
+              file=sys.stderr)
 
     # 3. Protected paths — level-dependent.
     #    Level 0: no protected path. Level 1: only explicitly granted ones
@@ -2339,15 +2411,9 @@ def main():
         allowed, need = path_decision(blocked_path, level, grants)
         if not allowed:
             _audit(input_data, "Bash", command, "block", f"protected_path:{blocked_path}", level)
-            extra = (f"{who} has no valid override (level 0). " if not override
-                     else f"Current override: level {level}. ")
-            print(
-                f"BLOCKED: write access to protected path '{blocked_path}'. "
-                f"{extra}Needed: {need}. "
-                f"ESCALATION: agent asks the coordinator → coordinator decides with the owner "
-                f"about adjusting the override file.",
-                file=sys.stderr,
-            )
+            print(msg("path.write_blocked", path=blocked_path, needed=need,
+                      extra=_override_note(override, level, agent_id)),
+                  file=sys.stderr)
             sys.exit(2)
 
     # 4. Sudo — level-dependent.
@@ -2360,15 +2426,9 @@ def main():
         bad_sudo = check_sudo(command, merged, check_subcommands=(level < 1))
         if bad_sudo:
             _audit(input_data, "Bash", command, "block", f"sudo_not_allowed:{bad_sudo}", level)
-            extra = (f"{who} has no valid override (level 0). " if not override
-                     else f"Current override: level {level}. ")
-            print(
-                f"BLOCKED: sudo with a disallowed command: '{bad_sudo}'. "
-                f"{extra}Needed: level 2 OR an additional_sudo grant for '{bad_sudo}'. "
-                f"ESCALATION: agent asks the coordinator → coordinator decides with the owner "
-                f"about adjusting the override file.",
-                file=sys.stderr,
-            )
+            print(msg("sudo.disallowed", command=bad_sudo,
+                      extra=_override_note(override, level, agent_id)),
+                  file=sys.stderr)
             sys.exit(2)
 
     # 4b. Container lifecycle — INDEPENDENT of the escalation command. If the
@@ -2380,14 +2440,8 @@ def main():
         if bad_lifecycle:
             _audit(input_data, "Bash", command, "block",
                    f"lifecycle_needs_override:{bad_lifecycle}", level)
-            print(
-                f"BLOCKED: '{bad_lifecycle}' changes or tears down and requires "
-                f"override level 1+. Read-only forms (ps, logs, inspect, exec, "
-                f"run, build) run without an approval. ESCALATION: the agent "
-                f"writes an override proposal into the pending directory and "
-                f"asks the owner to approve it.",
-                file=sys.stderr,
-            )
+            print(msg("lifecycle.needs_override", command=bad_lifecycle),
+                  file=sys.stderr)
             sys.exit(2)
 
     # 5. Confirmation-required commands — desktop notification
@@ -2406,10 +2460,8 @@ def main():
     # 6. Prompt injection warning (no block, just a warning)
     injections = check_injection(command, rules.get("prompt_injection_keywords", []))
     if injections:
-        print(
-            f"WARNING: possible prompt injection detected: {', '.join(injections)}",
-            file=sys.stderr,
-        )
+        print(msg("injection.warning", keywords=", ".join(injections)),
+              file=sys.stderr)
 
     # All good — allow through
     _audit(input_data, "Bash", command, "allow", "ok", level)
@@ -2427,13 +2479,18 @@ def _guard_stumbled(exc: BaseException) -> None:
     The message names the failure so it stays visible that the guard stumbled,
     rather than the command being rejected on its merits.
     """
-    print(
-        f"BLOCKED (guard failure): the check aborted with an unexpected error "
-        f"— {type(exc).__name__}: {exc}. The command was NOT allowed. This is "
-        f"not a verdict on the command itself, it is a bug in the guard.",
-        file=sys.stderr,
-    )
-    traceback.print_exc(file=sys.stderr)
+    # The catalogue itself may be what broke. Whatever happens here, exit 2
+    # must be reached: any other exit code reads as "allowed".
+    try:
+        print(msg("guard.stumbled", error=type(exc).__name__, detail=exc),
+              file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+    except BaseException:                              # noqa: BLE001 — last resort
+        try:
+            print(f"BLOCKED (guard failure): {type(exc).__name__}. The command "
+                  f"was NOT allowed.", file=sys.stderr)
+        except BaseException:                          # noqa: BLE001
+            pass
     sys.exit(2)
 
 
