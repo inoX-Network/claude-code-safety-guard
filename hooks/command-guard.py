@@ -729,6 +729,49 @@ RECURSIVE_READ_CMDS = {
     "grep", "egrep", "fgrep", "rg", "ag",
 }
 
+# Words that stand IN FRONT of the actual command without being one: escalation
+# and environment wrappers. Without skipping them, `sudo tar ~/.ssh` hides its
+# reading command behind the first token.
+_COMMAND_PREFIXES = {"sudo", "doas", "env", "nice", "ionice", "nohup", "time",
+                     "stdbuf", "command", "exec"}
+
+
+def _recursive_read_targets(command: str) -> list[str]:
+    """Paths handed TO a recursive-read command — per segment, not per line.
+
+    A word is not a deed. Asking whether such a command appears ANYWHERE and a
+    protected directory appears ANYWHERE refuses this:
+
+        find ~ -maxdepth 4 -name "*.git" | grep -v cache
+
+    The grep filters find's OUTPUT and opens no file. Measured over eight weeks
+    of real work: 16 of 16 refusals of this shape were exactly that, not one of
+    them read any contents.
+
+    So each segment is asked on its own: does a reading command sit here, and is
+    the directory ITS argument? Everything after that command in the same segment
+    counts as its argument — which keeps `sudo tar czf x ~/.ssh` caught.
+    """
+    targets = []
+    for segment in re.split(r"&&|\|\||[;|\n]", command):
+        tokens = [t.strip("'\"()") for t in segment.split()]
+        tokens = [t for t in tokens if t]
+        reading = False
+        for tok in tokens:
+            name = os.path.basename(tok)
+            if not reading:
+                if name in RECURSIVE_READ_CMDS:
+                    reading = True
+                elif name in _COMMAND_PREFIXES or tok.startswith("-") \
+                        or re.match(r"^[A-Za-z_]\w*=", tok):
+                    continue          # wrapper, flag or VAR=value in front
+                else:
+                    break             # some other command leads this segment
+                continue
+            if not tok.startswith("-"):
+                targets.append(tok)
+    return targets
+
 # Path boundary for the Bash self-protection detection: the protected path must
 # be followed by a separator (/, whitespace, quote, redirect, paren) or the end
 # of the string. This prevents '~/.claude/.sudo-overrides' from wrongly matching
@@ -2067,11 +2110,13 @@ def command_hits_protected_read(command: str, rules: dict,
             tokens.append(tok)
 
     # Directory-exfiltration vector (tar/zip/rsync ~/.ssh): only relevant when a
-    # recursive-read command is present. Pre-compute the protected key dirs so a
-    # plain `ls ~/.ssh` (metadata only, no such command) stays allowed.
+    # recursive-read command actually RECEIVES such a directory. Pre-compute the
+    # protected key dirs so a plain `ls ~/.ssh` (metadata only, no such command)
+    # stays allowed.
     req1_dirs = []
     hard_dirs = []
-    if any(os.path.basename(t) in RECURSIVE_READ_CMDS for t in tokens):
+    recursive_targets = _recursive_read_targets(cleaned)
+    if recursive_targets:
         # _norm_path rather than expand_path: otherwise a traversal detour
         # (`tar ~/.ssh/../.ssh`) walks around the directory gate, the same way it
         # would around the direct read guard.
@@ -2104,23 +2149,29 @@ def command_hits_protected_read(command: str, rules: dict,
         #     file (e.g. `tar /etc` grabs /etc/shadow). No override lifts this —
         #     exactly like reading that file directly. Otherwise the detour would
         #     be the weaker door.
-        if hard_dirs:
-            tok_hard = _norm_path(tok).rstrip("/")
-            # Empty token: see the reasoning in the level-1 branch below.
-            if tok_hard and any(d == tok_hard or d.startswith(tok_hard + "/")
-                                for d in hard_dirs):
-                return True, msg("read.dir_always_blocked", path=tok), False
+        #
+        #     Only for tokens that a reading command actually RECEIVED. Checking
+        #     every token of the line meant a pipe (`find ~ … | grep -v x`) hit
+        #     the gate over a word instead of an action.
+        if tok in recursive_targets:
+            if hard_dirs:
+                tok_hard = _norm_path(tok).rstrip("/")
+                # Empty token: see the reasoning in the level-1 branch below.
+                if tok_hard and any(d == tok_hard or d.startswith(tok_hard + "/")
+                                    for d in hard_dirs):
+                    return True, msg("read.dir_always_blocked", path=tok), False
 
-        if req1_dirs:
-            tok_exp = _norm_path(tok).rstrip("/")
-            # An empty token (a bare "/" or a regex slash) would otherwise match
-            # EVERY absolute key path via startswith("/") -> over-block false
-            # positive (grep/rsync/cp with a /-argument).
-            if tok_exp and any(d == tok_exp or d.startswith(tok_exp + "/") for d in req1_dirs):
-                override = load_override(agent_id, session_id)
-                if not override or override.get("override_level", 0) < 1:
-                    return True, msg("read.dir_credentials", path=tok), True
-                continue
+            if req1_dirs:
+                tok_exp = _norm_path(tok).rstrip("/")
+                # An empty token (a bare "/" or a regex slash) would otherwise
+                # match EVERY absolute key path via startswith("/") ->
+                # over-block false positive (grep/rsync/cp with a /-argument).
+                if tok_exp and any(d == tok_exp or d.startswith(tok_exp + "/")
+                                   for d in req1_dirs):
+                    override = load_override(agent_id, session_id)
+                    if not override or override.get("override_level", 0) < 1:
+                        return True, msg("read.dir_credentials", path=tok), True
+                    continue
 
         blocked, reason, hard = check_read_protection(tok, rules, agent_id,
                                                       session_id)
