@@ -1,0 +1,19 @@
+{
+  "_comment": "Deutsche Meldungstexte. Fehlt ein Schluessel, gilt der eingebaute englische Text - eine halb uebersetzte Datei funktioniert also. Die Platzhalter in geschweiften Klammern muessen erhalten bleiben; passt einer nicht, gibt der Waechter Schluessel und Werte aus, statt stumm abzulehnen.",
+
+  "guard.unreadable_input": "BLOCKIERT (Wächter-Fehler): Die Eingabe war nicht lesbar ({error}) — der Wächter konnte nicht prüfen und lässt deshalb nichts durch. Das ist kein Urteil über den Befehl.",
+
+  "read.env_file": "BLOCKIERT: {tool} berührt die Umgebungsdatei {path} — das erfordert Override-Stufe 1+.",
+  "read.protected": "{reason} (Werkzeug: {tool})",
+  "read.always_blocked": "IMMER BLOCKIERT: {pattern} — kein Override möglich",
+  "read.needs_override": "BLOCKIERT: {access} {pattern} erfordert Override-Stufe 1+. Bitte den Eigentümer um einen Override.",
+  "read.allowed_by_override": "ZUGRIFF ERLAUBT (Override-Stufe {level}): {path}",
+
+  "control.hard": "BLOCKIERT: '{what}' steuert die Werkzeugkette selbst — das Schreiben ist an jedem Ort gesperrt. Kein Override hebt das auf, nur der Eigentümer via !.",
+  "control.gated": "BLOCKIERT: '{what}' trägt Anweisungen für künftige Sitzungen — das Schreiben erfordert Override-Stufe 1+.",
+
+  "self_protect.file": "BLOCKIERT: Selbstschutz — '{path}' gehört zum Sicherheitssystem ({hit}) und darf nur vom Eigentümer via ! geändert werden. Kein Override hebt das auf.",
+  "self_protect.command": "BLOCKIERT: Selbstschutz — Schreibzugriff auf '{hit}' (Sicherheitssystem). Kein Override möglich, nur der Eigentümer via !.",
+
+  "path.write_blocked": "BLOCKIERT: Schreibzugriff (Write/Edit) auf geschützten Pfad '{path}'. {extra}Benötigt: {needed}. ESKALATION: Der Agent fragt den Koordinator → der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei."
+}
