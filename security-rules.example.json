@@ -37,6 +37,11 @@
     "git\\s+add\\s+\\.(\\s|$)",
     "git\\s+config\\s+(?!(--get|--list|-l)\\b)"
   ],
+  "_comment_protected_git_branches": "Branches that must not receive a commit directly. Only 'git commit' is checked -- merge and pull also create commits but belong to the merge path a human drives. Reading (status, log, diff) stays untouched. Empty list = check off.",
+  "protected_git_branches": [
+    "main",
+    "master"
+  ],
   "blocked_paths_write": [
     "~/.ssh",
     "~/.gnupg",
