@@ -138,6 +138,123 @@ def _config_path(key: str, default):
     return default
 
 
+# ---------------------------------------------------------------------------
+# Message catalogue
+#
+# The code carries KEYS, the texts live beside them. English is built in and is
+# therefore always available — the hook is a single file that gets copied to its
+# place, and a guard that falls silent because a language file did not travel
+# with it would be worse than an ugly message.
+#
+# A different language is a SETTING, not a fork in the code: put
+# `lang/<code>.json` next to the hook (or point `installation.lang_dir` at it)
+# and set `language` in the configuration. Missing keys fall back to English,
+# so a half-translated file still works.
+#
+# Two failure modes are handled deliberately, because both would otherwise end
+# in a refusal without a reason:
+#   - key not in the catalogue  -> print the key plus the values
+#   - placeholder does not fit  -> same
+# A refusal nobody can act on is worse than an ugly one.
+_MESSAGES = {
+    # --- the guard itself ---
+    "guard.unreadable_input": (
+        "BLOCKED (guard failure): the input could not be read ({error}) — the "
+        "guard was unable to check anything and therefore lets nothing through. "
+        "This is not a verdict on the command itself."
+    ),
+    # --- read protection ---
+    "read.env_file": (
+        "BLOCKED: {tool} touches the .env file {path} — that requires override "
+        "level 1+."
+    ),
+    "read.protected": "{reason} (tool: {tool})",
+    "read.always_blocked": "ALWAYS BLOCKED: {pattern} — no override possible",
+    "read.needs_override": (
+        "BLOCKED: {access} {pattern} requires override level 1+. Ask the owner "
+        "for an override."
+    ),
+    "read.allowed_by_override": "ACCESS ALLOWED (override level {level}): {path}",
+    # --- project-local control files ---
+    "control.hard": (
+        "BLOCKED: '{what}' steers the tool chain itself — writing it is blocked "
+        "at every location. No override lifts this, only the owner via !."
+    ),
+    "control.gated": (
+        "BLOCKED: '{what}' carries instructions for future sessions — writing it "
+        "requires override level 1+."
+    ),
+    # --- self-protection ---
+    "self_protect.file": (
+        "BLOCKED: self-protection — '{path}' belongs to the security system "
+        "({hit}) and may only be changed by the owner via !. No override lifts "
+        "this."
+    ),
+    "self_protect.command": (
+        "BLOCKED: self-protection — write access to '{hit}' (security system). "
+        "No override possible, only the owner via !."
+    ),
+    # --- protected paths, level dependent ---
+    "path.write_blocked": (
+        "BLOCKED: write access (Write/Edit) to protected path '{path}'. {extra}"
+        "Needed: {needed}. ESCALATION: agent asks the coordinator → coordinator "
+        "decides with the owner about adjusting the override file."
+    ),
+}
+
+
+def _load_language() -> dict:
+    """Texts for the configured language, or an empty mapping.
+
+    Never raises: a broken language file must not be able to stop the guard.
+    """
+    code = _CONFIG.get("language")
+    if not isinstance(code, str) or not code.strip() or code.strip().lower() == "en":
+        return {}
+    code = code.strip().lower()
+    if not re.fullmatch(r"[a-z]{2}(-[a-z]{2})?", code):
+        return {}                                  # no path fragments as a name
+    candidates = []
+    configured = _INSTALLATION.get("lang_dir")
+    if isinstance(configured, str) and configured.strip():
+        candidates.append(Path(expand_path(configured.strip())) / f"{code}.json")
+    try:
+        candidates.append(Path(__file__).resolve().parent / "lang" / f"{code}.json")
+    except OSError:
+        pass
+    for p in candidates:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if isinstance(v, str)}
+    return {}
+
+
+_LANGUAGE = _load_language()
+
+
+def msg(key: str, **values) -> str:
+    """The text for `key`, filled with `values`.
+
+    Order: configured language, then the built-in English, then the key itself.
+    """
+    text = _LANGUAGE.get(key) or _MESSAGES.get(key)
+    if text is None:
+        return _msg_fallback(key, values, "no text for this key")
+    try:
+        return text.format(**values)
+    except (KeyError, IndexError, ValueError):
+        return _msg_fallback(key, values, "message text does not fit its values")
+
+
+def _msg_fallback(key: str, values: dict, why: str) -> str:
+    """Last resort: name the key and the values, so a refusal stays actionable."""
+    detail = " ".join(f"{k}={v}" for k, v in values.items())
+    return f"BLOCKED [{key}] ({why}) {detail}".rstrip()
+
+
 # Path to the security rules file.
 # Override with CLAUDE_SECURITY_RULES — outside the production location only.
 RULES_PATH = Path(
@@ -1490,7 +1607,7 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
         # both sides normalised it adds nothing, and it was the one comparison a
         # detour could still slip past.
         if expanded.startswith(pat_expanded):
-            return True, f"ALWAYS BLOCKED: {pattern} — no override possible"
+            return True, msg("read.always_blocked", pattern=pattern)
 
     # 2. Always allowed (public keys, config, etc.)
     for pattern in protected.get("always_allowed", []):
@@ -1512,15 +1629,10 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
             override = load_override(agent_id, session_id)
             if override and override.get("override_level", 0) >= 1:
                 level = override.get("override_level", 1)
-                print(
-                    f"ACCESS ALLOWED (override level {level}): {file_path}",
-                    file=sys.stderr,
-                )
+                print(msg("read.allowed_by_override", level=level, path=file_path),
+                      file=sys.stderr)
                 return False, ""
-            return True, (
-                f"BLOCKED: {access} {pattern} requires override level 1+. "
-                f"Ask the owner for an override."
-            )
+            return True, msg("read.needs_override", access=access, pattern=pattern)
 
     return False, ""
 
@@ -1911,17 +2023,14 @@ def enforce_read_protection(input_data: dict, tool_name: str, rules: dict,
             override = load_override(agent_id, session_id)
             if not override or override.get("override_level", 0) < 1:
                 _audit(input_data, tool_name, candidate, "block", "env_protected", 0)
-                print(
-                    f"BLOCKED: {tool_name} touches the .env file {candidate} — "
-                    f"that requires override level 1+.",
-                    file=sys.stderr,
-                )
+                print(msg("read.env_file", tool=tool_name, path=candidate),
+                      file=sys.stderr)
                 sys.exit(2)
         blocked, reason = check_read_protection(candidate, rules, agent_id,
                                                 session_id, access="accessing")
         if blocked:
             _audit(input_data, tool_name, candidate, "block", "read_protected", 0)
-            print(f"{reason} (tool: {tool_name})", file=sys.stderr)
+            print(msg("read.protected", reason=reason, tool=tool_name), file=sys.stderr)
             sys.exit(2)
 
 
@@ -1946,22 +2055,13 @@ def enforce_project_control_files(input_data: dict, tool_name: str,
         if hard:
             _audit(input_data, tool_name, candidate, "block",
                    f"project_control:{what}", "hard")
-            print(
-                f"BLOCKED: '{what}' steers the tool chain itself — writing it is "
-                f"blocked at every location. No override lifts this, only the "
-                f"owner via !.",
-                file=sys.stderr,
-            )
+            print(msg("control.hard", what=what), file=sys.stderr)
             sys.exit(2)
         override = load_override(agent_id, session_id)
         if not override or override.get("override_level", 0) < 1:
             _audit(input_data, tool_name, candidate, "block",
                    f"project_control:{what}", 0)
-            print(
-                f"BLOCKED: '{what}' carries instructions for future sessions — "
-                f"writing it requires override level 1+.",
-                file=sys.stderr,
-            )
+            print(msg("control.gated", what=what), file=sys.stderr)
             sys.exit(2)
 
 
@@ -1974,13 +2074,8 @@ def main():
         # Deliberate choice: allowing it through would be the one remaining spot
         # where a failure switches the guard off silently. To reverse this,
         # replace these five lines with sys.exit(0).
-        print(
-            f"BLOCKED (guard failure): the input could not be read "
-            f"({type(exc).__name__}) — the guard was unable to check anything "
-            f"and therefore lets nothing through. This is not a verdict on the "
-            f"command itself.",
-            file=sys.stderr,
-        )
+        print(msg("guard.unreadable_input", error=type(exc).__name__),
+              file=sys.stderr)
         sys.exit(2)
 
     # Before ANY check: a relative target can only be judged against the
@@ -2026,12 +2121,7 @@ def main():
         sp = hits_self_protect(file_path)
         if sp:
             _audit(input_data, tool_name, file_path, "block", f"self_protect:{sp}", "hard")
-            print(
-                f"BLOCKED: self-protection — '{file_path}' belongs to the security "
-                f"system ({sp}) and may only be changed by the owner via !. "
-                f"No override lifts this.",
-                file=sys.stderr,
-            )
+            print(msg("self_protect.file", path=file_path, hit=sp), file=sys.stderr)
             sys.exit(2)
 
         rules = load_rules()
@@ -2060,13 +2150,8 @@ def main():
                            f"protected_path:{blocked_path}", level)
                     extra = (f"{who} has no valid override (level 0). " if not override
                              else f"Current override: level {level}. ")
-                    print(
-                        f"BLOCKED: write access (Write/Edit) to protected path "
-                        f"'{blocked_path}'. {extra}Needed: {need}. "
-                        f"ESCALATION: agent asks the coordinator → coordinator decides "
-                        f"with the owner about adjusting the override file.",
-                        file=sys.stderr,
-                    )
+                    print(msg("path.write_blocked", path=blocked_path,
+                              extra=extra, needed=need), file=sys.stderr)
                     sys.exit(2)
 
         _audit(input_data, tool_name, file_path, "allow", "ok")
@@ -2156,11 +2241,7 @@ def main():
     self_protect_hit = command_hits_self_protect(command)
     if self_protect_hit:
         _audit(input_data, "Bash", command, "block", f"self_protect:{self_protect_hit}", "hard")
-        print(
-            f"BLOCKED: self-protection — write access to '{self_protect_hit}' "
-            f"(security system). No override possible, only the owner via !.",
-            file=sys.stderr,
-        )
+        print(msg("self_protect.command", hit=self_protect_hit), file=sys.stderr)
         sys.exit(2)
 
     # 2d. Project-local control files. Same reasoning as 2c, but bound to a
@@ -2172,21 +2253,12 @@ def main():
         what, hard = control_hit
         if hard:
             _audit(input_data, "Bash", command, "block", f"project_control:{what}", "hard")
-            print(
-                f"BLOCKED: '{what}' steers the tool chain itself — writing it is "
-                f"blocked at every location. No override lifts this, only the "
-                f"owner via !.",
-                file=sys.stderr,
-            )
+            print(msg("control.hard", what=what), file=sys.stderr)
             sys.exit(2)
         override = load_override(input_data.get("agent_id"), session_id)
         if not override or override.get("override_level", 0) < 1:
             _audit(input_data, "Bash", command, "block", f"project_control:{what}", 0)
-            print(
-                f"BLOCKED: '{what}' carries instructions for future sessions — "
-                f"writing it requires override level 1+.",
-                file=sys.stderr,
-            )
+            print(msg("control.gated", what=what), file=sys.stderr)
             sys.exit(2)
 
     # 2e. Docker/Podman ALWAYS-block — catastrophic flags + encirclement mounts.
