@@ -597,8 +597,15 @@ _WRITE_OPS = [">", ">>", "sed -i"]
 # Exception so the relaxation does not become a hole: if the command hands its string
 # to a shell (`eval`, `bash -c`), the text is executed after all. Then the old, strict
 # check stands — fail-closed when in doubt.
+#
+# `ssh` belongs in that same exception, and its absence was a hole rather than a
+# nicety: `ssh host "echo x > /etc/passwd"` had its quoted section stripped and
+# went through, while the far side is exactly where a protected path matters.
+# Measured against a copy that already carried it, the difference was one case.
+# The price is the same one eval and `sh -c` already pay: a protected path merely
+# MENTIONED inside an ssh call now counts. That is the deliberate trade.
 _QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
-_SHELL_PASSTHROUGH_RE = re.compile(r"\beval\b|\b[a-z]*sh\b[^;|&]*?\s-c\b")
+_SHELL_PASSTHROUGH_RE = re.compile(r"\beval\b|\bssh\b|\b[a-z]*sh\b[^;|&]*?\s-c\b")
 
 
 # Copy commands do not modify their SOURCE — they read it. For the write guard
@@ -1239,6 +1246,12 @@ def check_lifecycle(command: str) -> str | None:
     return None
 
 
+# Tokens that end a command instead of being one: redirections (`2>&1`, `>file`),
+# pipes, list operators, grouping, and a stray quote. Matched at the START of the
+# token, because that is where a shell would see the operator.
+_SUDO_STOP_RE = re.compile(r"[|&;()<>\"']|\d+>")
+
+
 def check_sudo(command: str, allowed: list[str],
                check_subcommands: bool = True) -> str | None:
     """Return the first sudo command that is NOT in `allowed`, otherwise None.
@@ -1260,6 +1273,16 @@ def check_sudo(command: str, allowed: list[str],
         for token in tokens:
             if token.startswith("-"):  # skip sudo flags (-S, -E, -u, -n)
                 continue
+            # A shell operator is not a command. `sudo -n -l 2>&1` lists one's own
+            # rights and changes nothing, yet `2>&1` was taken for the command and
+            # refused — measured 26 real refusals of that shape.
+            #
+            # STOP here, do not skip on: in `sudo -l | rm -rf x` the rm runs
+            # WITHOUT raised rights, so blaming it on this sudo would be a false
+            # claim. A later `sudo` in the line is a match of its own and is still
+            # examined.
+            if _SUDO_STOP_RE.match(token):
+                break
             cmd_after_sudo = token
             break
         if cmd_after_sudo and cmd_after_sudo not in allowed:
