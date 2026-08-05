@@ -45,6 +45,7 @@
 
   "git.force_push": "BLOCKIERT: force-push auf main/master — IMMER gesperrt, kein Override möglich.",
   "git.safety": "BLOCKIERT: Git-Sicherheitsverstoß — Muster: {pattern}.",
+  "git.protected_branch": "BLOCKIERT: Direkter Commit auf '{branch}' — dieser Zweig ist geschützt. Leg einen Zweig an: git switch -c feature/<kurzbeschreibung>",
 
   "docker.always_blocked": "BLOCKIERT: docker — {reason}. IMMER gesperrt (kein Override); nur der Eigentümer via ! darf das ausführen.",
 

@@ -21,7 +21,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-HOOK = REPO / "hooks" / "command-guard.py"
+# GUARD_HOOK laesst diese Faelle gegen eine ANDERE Fassung laufen -- ohne das
+# ist keine Gegenprobe moeglich, und ein Fall ohne Gegenprobe belegt nichts.
+HOOK = Path(os.environ.get("GUARD_HOOK") or (REPO / "hooks" / "command-guard.py"))
 
 _spec = importlib.util.spec_from_file_location("command_guard_under_test", HOOK)
 cg = importlib.util.module_from_spec(_spec)
@@ -96,6 +98,39 @@ def test_rueckfall_auf_expires_at_ohne_granted_at():
                   expires_at=_iso(minutes=+90))
         gewaehlt = _laden(d)
         assert gewaehlt is not None and gewaehlt["override_level"] == 1
+
+
+def test_deutscher_feldname_zaehlt_genauso():
+    """Ein Freigabe-Skript darf den Erteilungszeitpunkt 'freigegeben_am' nennen.
+
+    Wird nur 'granted_at' gelesen, faellt so eine Anlage still auf expires_at
+    zurueck. Das bleibt fail-closed, ist aber die ungenauere Regel: Hier laufen
+    beide Freigaben gleich lang, die aeltere hoehere Stufe wuerde also gewinnen —
+    genau der Eskalationsweg, den diese Auswahl schliessen soll.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        laufzeit = _iso(hours=+6)
+        _schreibe(d, "alt.json", override_level=2, task="vergessene Altfreigabe",
+                  freigegeben_am=_iso(hours=-6), expires_at=laufzeit)
+        _schreibe(d, "neu.json", override_level=1, task="gerade erteilt, eng",
+                  freigegeben_am=_iso(minutes=-1), expires_at=laufzeit)
+        gewaehlt = _laden(d)
+        assert gewaehlt is not None
+        assert gewaehlt["override_level"] == 1, (
+            "Der deutsche Feldname wurde nicht gelesen — die Auswahl fiel auf "
+            "expires_at zurueck und die alte Stufe 2 hat gewonnen."
+        )
+
+
+def test_gleichstand_auch_beim_deutschen_feldnamen():
+    """Kein Raten, egal unter welchem Namen der Zeitstempel steht."""
+    with tempfile.TemporaryDirectory() as d:
+        gleich = _iso(minutes=-3)
+        _schreibe(d, "a.json", override_level=1, freigegeben_am=gleich,
+                  expires_at=_iso(hours=+1))
+        _schreibe(d, "b.json", override_level=2, freigegeben_am=gleich,
+                  expires_at=_iso(hours=+1))
+        assert _laden(d) is None
 
 
 def test_abgelaufene_zaehlt_nicht_mit():

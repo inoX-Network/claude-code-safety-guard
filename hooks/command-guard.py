@@ -246,6 +246,10 @@ _MESSAGES = {
         "possible."
     ),
     "git.safety": "BLOCKED: git-safety violation — pattern: {pattern}.",
+    "git.protected_branch": (
+        "BLOCKED: commit straight onto '{branch}' — that branch is protected. "
+        "Start a branch instead: git switch -c feature/<short-description>"
+    ),
     "docker.always_blocked": (
         "BLOCKED: docker — {reason}. ALWAYS blocked (no override); only the "
         "owner via ! may run this."
@@ -655,6 +659,27 @@ def _only_copy_sources(command: str) -> str:
     return "".join(out)
 
 
+# `scp`/`rsync` write on the far side without ever naming a redirect or a write
+# verb, so the path guard never saw them — and that is the normal deploy path,
+# not an edge case. POSITION decides, not occurrence: `host:/path` in LAST place
+# is a destination and gets checked; the same shape in front means fetching and
+# stays free. A match anywhere in the line would block every read-only fetch.
+_REMOTE_DEST_RE = re.compile(r"^[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?:/\S*$")
+
+
+def _remote_copy_writes(command: str) -> bool:
+    """Whether scp/rsync writes to a remote path (destination = last argument)."""
+    for segment in re.split(r"&&|\|\||[;|]", command):
+        tokens = segment.split()
+        if len(tokens) < 2:
+            continue
+        if os.path.basename(tokens[0]) not in ("scp", "rsync"):
+            continue
+        if _REMOTE_DEST_RE.match(tokens[-1]):
+            return True
+    return False
+
+
 def _command_is_write(command: str) -> bool:
     """Whether a command writes/deletes, for the protected-path gate.
 
@@ -679,6 +704,8 @@ def _command_is_write(command: str) -> bool:
     if re.search(r"\brsync\b", command) and "--delete" in command:
         return True
     if re.search(r"\bgit\s+clean\b", command):
+        return True
+    if _remote_copy_writes(command):
         return True
     return False
 
@@ -1001,9 +1028,17 @@ def load_override(agent_id: str | None = None, session_id: str | None = None) ->
     # versions never did) fall back to `expires_at`, which rises monotonically with
     # grant time at a fixed --minutes. Both are ISO-8601 strings, so a lexicographic
     # compare is chronological.
-    if all(o.get("granted_at") for o in active_overrides):
+    # Two names for the same field: an approval script may write either
+    # `granted_at` or `freigegeben_am`. Reading only one of them means an
+    # installation whose script uses the other silently falls back to the
+    # weaker rule below — still fail-closed, but two grants of different age
+    # with the same runtime then count as simultaneous.
+    def _grant_time(o: dict) -> str:
+        return o.get("granted_at") or o.get("freigegeben_am") or ""
+
+    if all(_grant_time(o) for o in active_overrides):
         def _recency(o: dict) -> str:
-            return o.get("granted_at") or ""
+            return _grant_time(o)
     else:
         def _recency(o: dict) -> str:
             return o.get("expires_at") or ""
@@ -1775,6 +1810,63 @@ def check_owner_only(command: str, names: list[str]) -> str | None:
     return None
 
 
+# 'git commit' — including leading -C/-c flags (git -C /path commit). Does NOT
+# match 'git log --grep=commit' (there 'log' sits between git and commit).
+_GIT_COMMIT_RE = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-c\s+\S+\s+)*commit\b")
+
+
+def _git_working_dir(command: str, cwd: str | None) -> str:
+    """Where the commit will actually land.
+
+    Order: 'git -C <path>' outranks everything. Otherwise the last 'cd <path>'
+    BEFORE the commit (because 'cd repo && git commit' moves the target).
+    Otherwise the cwd the tool chain reported.
+    """
+    hit = _GIT_COMMIT_RE.search(command)
+    prefix = command[: hit.start()] if hit else command
+
+    by_flag = re.search(r"\bgit\s+-C\s+(\S+)", command)
+    if by_flag:
+        return expand_path(by_flag.group(1).strip("'\""))
+
+    cd_targets = re.findall(r"\bcd\s+([^\s;&|]+)", prefix)
+    if cd_targets:
+        return expand_path(cd_targets[-1].strip("'\""))
+
+    return cwd or os.getcwd()
+
+
+def check_git_commit_on_protected_branch(
+    command: str, cwd: str | None, protected: list[str]
+) -> str | None:
+    """Return the branch if a commit would land on it directly.
+
+    "Never work on main directly" is a prompt rule, and a prompt rule is a
+    tendency, not a barrier: a small local model tried exactly this with the rule
+    sitting in its own instructions.
+
+    Only 'git commit' is checked. 'git merge' and 'git pull' also create commits
+    but belong to the merge path a human drives. Reading commands (status, log,
+    diff) stay untouched.
+    """
+    if not protected or not _GIT_COMMIT_RE.search(command):
+        return None
+
+    directory = _git_working_dir(command, cwd)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=directory, capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None       # git not callable / path gone -> no repo, nothing to guard
+    if result.returncode != 0:
+        return None       # no repo -> no branch -> no false alarm
+
+    branch = result.stdout.strip()
+    return branch if branch in protected else None
+
+
 def check_git_safety(command: str, patterns: list[str]) -> str | None:
     """Check whether the command violates git-safety rules.
 
@@ -2319,6 +2411,17 @@ def main():
     if git_violation:
         _audit(input_data, "Bash", command, "block", f"git_safety:{git_violation}", "hard")
         print(msg("git.safety", pattern=git_violation), file=sys.stderr)
+        sys.exit(2)
+
+    # 2b3. A commit straight onto a protected branch — ALWAYS blocked, no override.
+    #      Enforces technically what was a prompt rule before.
+    protected_branch = check_git_commit_on_protected_branch(
+        command, input_data.get("cwd"), rules.get("protected_git_branches", [])
+    )
+    if protected_branch:
+        _audit(input_data, "Bash", command, "block",
+               f"git_branch:{protected_branch}", "hard")
+        print(msg("git.protected_branch", branch=protected_branch), file=sys.stderr)
         sys.exit(2)
 
     # 2c. Self-protection of the security system — ALWAYS blocked, no override.
