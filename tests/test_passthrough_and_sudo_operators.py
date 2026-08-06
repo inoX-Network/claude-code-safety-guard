@@ -37,7 +37,7 @@ WRITE_ETC = f"echo x {_REDIR} /etc/passwd"
 
 RULES = {
     "blocked_paths_write": ["/etc/passwd", "/etc/sudoers"],
-    "allowed_sudo": ["systemctl", "docker"],
+    "allowed_sudo": ["systemctl", "docker", "true"],
     "blocked_patterns": [], "blocked_git_ops": [], "protected_git_branches": [],
     "blocked_bash_patterns_force_push": [], "owner_only_commands": [],
     "protected_reads": {}, "require_confirmation": [],
@@ -123,6 +123,48 @@ def check_subcommand_gate_still_works():
     return _blocks("sudo systemctl stop nginx")
 
 
+# --- 3. an operator STUCK to the name ---------------------------------------
+#
+# Found live, one command after the read-only entries were added to the shipped
+# allowlist: `sudo -n true; echo done` arrives as the token `true;` and matches
+# no entry, however complete the list is. The list was right, the comparison was
+# wrong. A test list would not have found this — the shape only shows up when a
+# person actually chains a command.
+
+def check_allowed_command_with_trailing_semicolon():
+    blocked, detail = _blocks("sudo -n true; echo done")
+    return not blocked, detail
+
+
+def check_allowed_command_with_glued_pipe():
+    """No blank in front of the operator — the worst case for a name comparison."""
+    blocked, detail = _blocks("sudo -n true|head -1")
+    return not blocked, detail
+
+
+def check_disallowed_command_with_trailing_semicolon_still_blocked():
+    """The load-bearing counter-case: an operator must not launder a command."""
+    return _blocks("sudo rm -rf /var/tmp/x; echo done")
+
+
+def check_subcommand_gate_survives_a_trailing_operator():
+    """Stripping the operator must not switch the subcommand gate off."""
+    return _blocks("sudo systemctl stop nginx; echo done")
+
+
+def check_glued_operator_does_not_donate_a_subcommand():
+    """What follows a glued operator belongs to the NEXT command.
+
+    `sudo systemctl;stop nginx` runs `sudo systemctl` (which does nothing without
+    a subcommand) and then `stop nginx` — no service is touched, and `stop` is
+    not systemctl's subcommand here. Reading it as one would be the same false
+    claim as skipping the operator. systemctl on purpose: it is one of the tools
+    that HAS a subcommand table, so the case can fail at all.
+    """
+    blocked, detail = _blocks("sudo systemctl;stop nginx")
+    return not blocked, detail
+
+
 CASES = [
     ("remote write to a protected path is blocked", check_remote_write_to_protected_path),
     ("remote write via interpreter is blocked", check_remote_write_via_interpreter),
@@ -136,6 +178,16 @@ CASES = [
     ("disallowed sudo command still blocked", check_disallowed_sudo_command_still_blocked),
     ("a later sudo in the same line is found", check_later_sudo_in_the_same_line_is_found),
     ("subcommand gate still works", check_subcommand_gate_still_works),
+    ("allowed command with trailing semicolon stays free",
+     check_allowed_command_with_trailing_semicolon),
+    ("allowed command with a glued pipe stays free",
+     check_allowed_command_with_glued_pipe),
+    ("disallowed command with trailing semicolon still blocked",
+     check_disallowed_command_with_trailing_semicolon_still_blocked),
+    ("subcommand gate survives a trailing operator",
+     check_subcommand_gate_survives_a_trailing_operator),
+    ("a glued operator donates no subcommand",
+     check_glued_operator_does_not_donate_a_subcommand),
 ]
 
 try:

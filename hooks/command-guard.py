@@ -1313,20 +1313,33 @@ def check_sudo(command: str, allowed: list[str],
     for m in matches:
         tokens = command[m.end():].split()
         cmd_after_sudo = ""
-        for token in tokens:
+        rest_tokens: list[str] = []
+        for idx, token in enumerate(tokens):
             if token.startswith("-"):  # skip sudo flags (-S, -E, -u, -n)
                 continue
             # A shell operator is not a command. `sudo -n -l 2>&1` lists one's own
             # rights and changes nothing, yet `2>&1` was taken for the command and
             # refused — measured 26 real refusals of that shape.
             #
-            # STOP here, do not skip on: in `sudo -l | rm -rf x` the rm runs
-            # WITHOUT raised rights, so blaming it on this sudo would be a false
-            # claim. A later `sudo` in the line is a match of its own and is still
-            # examined.
-            if _SUDO_STOP_RE.match(token):
+            # An operator also STICKS to the name: `sudo true; echo done` arrives
+            # as the token `true;`, which matches no allowlist entry however
+            # complete that list is. So the name is the part in FRONT of the
+            # operator. Found live, one command after the read-only entries were
+            # added — the list was right and the comparison still failed.
+            #
+            # Nothing left in front means the operator leads: STOP, do not skip
+            # on. In `sudo -l | rm -rf x` the rm runs WITHOUT raised rights, so
+            # blaming it on this sudo would be a false claim. A later `sudo` in
+            # the line is a match of its own and is still examined.
+            name = _SUDO_STOP_RE.split(token, 1)[0]
+            if not name:
                 break
-            cmd_after_sudo = token
+            cmd_after_sudo = name
+            # Trug das Token selbst einen Operator (`docker;rm -f x`), endet der
+            # Befehl dort: Was dahinter steht, gehoert zum NAECHSTEN Befehl und
+            # laeuft nicht mit erhoehten Rechten. Es ihm zuzurechnen waere
+            # dieselbe Falschaussage wie beim Ueberspringen des Operators.
+            rest_tokens = tokens[idx + 1:] if name == token else []
             break
         if cmd_after_sudo and cmd_after_sudo not in allowed:
             return cmd_after_sudo
@@ -1337,8 +1350,11 @@ def check_sudo(command: str, allowed: list[str],
         table = _SUDO_READONLY_SUBCOMMANDS.get(cmd_after_sudo) \
             if check_subcommands else None
         if table is not None:
-            rest = tokens[tokens.index(cmd_after_sudo) + 1:] \
-                if cmd_after_sudo in tokens else []
+            # By POSITION, not by searching for the value: with the operator
+            # stripped, the name no longer appears in the token list, and a
+            # value search silently found nothing — which switched the
+            # subcommand gate off exactly where a command carried an operator.
+            rest = rest_tokens
             sub = _first_subcommand(rest, flags_count=(cmd_after_sudo == "pacman"))
             if sub and sub not in table:
                 return f"{cmd_after_sudo} {sub}"
