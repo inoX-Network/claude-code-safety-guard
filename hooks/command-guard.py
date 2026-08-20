@@ -1822,12 +1822,75 @@ def docker_mount_blocked_path(command: str, blocked_paths_write: list[str]) -> s
     return None
 
 
+# Notification id reused for every install notice, so they replace one another
+# instead of stacking up.
+_NOTIFY_REPLACE_ID = "20500050"
+
+
 def check_confirmation(command: str, patterns: list[str]) -> bool:
-    """Check whether the command requires confirmation (desktop notification)."""
-    for pattern in patterns:
-        if pattern in command:
-            return True
+    """Whether the command actually INSTALLS something (desktop notification).
+
+    The patterns are two words (`pip install`, `pacman -S`), and they used to be
+    matched as a plain substring against the whole line. So the notification
+    fired whenever the words appeared as TEXT — in a grep expression, a comment,
+    a commit message, a file path. Measured over 86049 logged commands: 455
+    notifications, 341 of them with the words merely inside some other word.
+
+    Now the words have to appear as CONSECUTIVE TOKENS. That keeps
+    `$VENV/bin/python -m pip install …` recognised (basename comparison), while
+    `echo "pip install x"` no longer fires.
+
+    Passed-through content is checked too, and that is not a nicety: of those
+    341, a measured 180 were REAL installations sitting inside
+    `docker exec … sh -c "pip install …"`. A token rule that ignored quotes
+    would not have removed false alarms, it would have silenced exactly the
+    container installs — which are the majority of real ones on this machine.
+    """
+    texts = [command]
+    if _SHELL_PASSTHROUGH_RE.search(command):
+        # Behind a pass-through the quotes are not a fence, they are packaging:
+        # the install runs on the far side. Extracting the quoted section fails
+        # on nesting — measured, `sh -c 'printf "x" && pip install y'` yields
+        # only `printf `, and 13 real container installs were missed that way.
+        #
+        # So instead of parsing quotes, they are dropped and the words are read
+        # as tokens. That is deliberately COARSER than a shell, and coarse in
+        # the safe direction: at worst `ssh host "echo 'pip install'"` notifies
+        # once too often. A notification too many costs a glance; a missing one
+        # defeats the purpose.
+        texts.append(command.replace('"', " ").replace("'", " "))
+
+    for text in texts:
+        for segment in split_segments(text):
+            tokens = [os.path.basename(t) for t in segment.split()]
+            for pattern in patterns:
+                words = pattern.split()
+                if not words:
+                    continue
+                for i in range(len(tokens) - len(words) + 1):
+                    if all(_word_matches(tok, word) for tok, word
+                           in zip(tokens[i:i + len(words)], words)):
+                        return True
     return False
+
+
+def _word_matches(token: str, word: str) -> bool:
+    """Compare one token against one word of a pattern.
+
+    Exact, with one exception: short flags bundle. `pacman -Syu` is an install
+    and must match the pattern `pacman -S`, the same way `-Rns` is a removal.
+    Measured — a strictly exact comparison silenced real system upgrades that
+    the old substring rule still caught by accident.
+
+    The trade is deliberate: `pacman -Si` merely queries and now notifies too.
+    A surplus notification costs a glance, a missing one costs the point of
+    having it. Long options (--sync) stay exact; only single-dash bundles are
+    expanded.
+    """
+    if (len(word) == 2 and word.startswith("-") and word[1].isalpha()
+            and token.startswith("-") and not token.startswith("--")):
+        return word[1] in token[1:]
+    return token == word
 
 
 def check_injection(command: str, keywords: list[str]) -> list[str]:
@@ -2678,6 +2741,12 @@ def main():
         try:
             subprocess.Popen(
                 ["notify-send", "-u", "normal", "-t", "5000",
+                 # A fixed replace-id, so a run of installs updates ONE
+                 # notification instead of stacking. Without it a single
+                 # measurement run produced 316 popups in a row. The id is
+                 # deliberately far above what a session's counter reaches,
+                 # so this cannot replace another application's notification.
+                 "-r", _NOTIFY_REPLACE_ID,
                  "Claude Code — Package Installation",
                  f"Command being executed:\n{command[:200]}"],
                 stdout=subprocess.DEVNULL,
