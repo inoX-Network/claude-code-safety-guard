@@ -253,6 +253,21 @@ Every decision (allow or block, by Bash/Read/Write/Edit/… or by the owner scri
 
 Fields: `ts`, `session_id`, `actor` (the `agent_id`, or `main` for the main session), `agent_type`, `tool`, `target`, `decision`, `reason`, `level`. Before the `target` (the command or file path) is logged it runs through **secret redaction** — passwords, tokens, `key=value` secrets, `--password`/`--token` flags and `Authorization:` headers become `[REDACTED]`, and the field is truncated to 600 characters. Logging failures never block the guard.
 
+### Reading it
+
+A log nobody reads is a log nobody has. [`tools/guard-audit.py`](tools/README.md) turns the JSONL into three views — which overrides were granted and for what, which actions were blocked and why (grouped by reason), and blocks/overrides per day. Read-only, standard library only, no access to protected directories.
+
+```bash
+python3 tools/guard-audit.py                 # all views, terminal, English
+python3 tools/guard-audit.py --lang de       # German
+python3 tools/guard-audit.py --blocks        # blocks only
+python3 tools/guard-audit.py --html          # HTML report, ~/.cache/guard-audit/report.html
+```
+
+The HTML report is **sanitized by default** — commands, paths and task descriptions are reduced to their shape, so a report can be shared or filed without leaking what you were working on. `--full` keeps the real values; that file belongs nowhere near a repository.
+
+The block report is the interesting one, and not only for security: **the false alarms are the more valuable half.** They show where the guard's model of legitimate work does not match reality — the only feedback that calibrates limits nobody knew about when the rules were written. See [tools/README.md](tools/README.md) for all options.
+
 ---
 
 ## Credential & `.env` read protection
@@ -290,9 +305,45 @@ No override unlocks any of these:
 
 ---
 
+## Installation settings & language
+
+Two files, two jobs. **`security-rules.json`** says *what* is allowed — the section below covers it. **`~/.claude/guard-config.json`** says where this machine keeps things, and in which language the guard speaks. It is entirely optional: without it the guard runs on its defaults, in English. See [guard-config.example.json](guard-config.example.json).
+
+```json
+{
+  "version": 1,
+  "language": "de",
+  "installation": {
+    "rules": "~/.claude/safety-guard/security-rules.json",
+    "hook_source": "~/.claude/hooks"
+  }
+}
+```
+
+| Key | Effect |
+|-----|--------|
+| `language` | Message language. Omit it and everything is English. |
+| `installation.rules` | Where the rules file lives — the hook **loads** from here, and the path is added to self-protection. |
+| `installation.hook_source` | Where the hook's own sources live. Does not change what runs; adds the directory to self-protection, and dev mode opens exactly it. Set it when the installed hook is a symlink into a checkout. |
+| `installation.dev_window` | Flag file for dev mode. Default `~/.claude/.hook-dev-mode`. |
+| `installation.lang_dir` | Where the language files live, if not next to the hook. |
+
+### A different language
+
+English is **built into** the hook and always available — a single file gets copied to its place, and a guard falling silent because a language file did not travel with it would be worse than an ugly message. Another language is a setting, not a fork:
+
+1. put `lang/<code>.json` next to the hook (`de.json` ships with this repo), or point `installation.lang_dir` at the directory
+2. set `"language": "<code>"` in `guard-config.json`
+
+Missing keys fall back to English, so a half-finished translation still works. A key that is not in the catalogue at all prints the key plus its values rather than nothing — a refusal nobody can act on is worse than an ugly one.
+
+**The wording never decides anything.** Messages carry no verdict of their own; the guard's behaviour is identical in every language. That is worth stating because it once was not: an earlier version read its own English message text back to decide whether a refusal could be overridden, which silently changed behaviour for anyone running a translation.
+
+---
+
 ## Configuration reference
 
-The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see [security-rules.example.json](security-rules.example.json) for a complete starting point). Top-level keys:
+The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see [security-rules.example.json](security-rules.example.json) for a complete starting point), or from wherever `installation.rules` points. Top-level keys:
 
 | Key | Type | Description |
 |-----|------|-------------|
