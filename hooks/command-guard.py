@@ -622,6 +622,31 @@ _COPY_COMMANDS = ("cp", "install")
 _DEST_OPTION_RE = re.compile(r"(?:^|\s)(?:-t\b|--target-directory)")
 
 
+# One split, not six. Every place that cut a command line into segments used to
+# carry its own copy of this pattern, and on 2026-08-20 three of the six did not
+# know the NEWLINE. The consequences ran in both directions: transfers onto a
+# protected server path walked through 39 times because the wrong word sat in
+# tokens[0], while copy commands after a line break were refused for the mirror
+# reason. Six copies of one rule is how that drift happens; the seventh copy is
+# what this function exists to prevent.
+#
+# `keep` is not convenience. Two callers reassemble the line afterwards and need
+# the separators back in the result — a shared helper that could not do both
+# would be wrong at the first call site that puts the line together again.
+_SEGMENT_RE = re.compile(r"&&|\|\||[;|\n]")
+_SEGMENT_KEEP_RE = re.compile(r"(&&|\|\||[;|\n])")
+
+
+def split_segments(command: str, keep: bool = False) -> list[str]:
+    """Cut a command line into the parts a shell would run as separate commands.
+
+    Separators: `&&`, `||`, `;`, `|` and the newline. With `keep=True` the
+    separators stay in the result, so the caller can join the parts back into a
+    line without losing what sat between them.
+    """
+    return (_SEGMENT_KEEP_RE if keep else _SEGMENT_RE).split(command)
+
+
 def _without_copy_sources(command: str) -> str:
     """Drop the source arguments of plain copy commands.
 
@@ -632,7 +657,7 @@ def _without_copy_sources(command: str) -> str:
     Example: `cp -r ~/.config /tmp/x` becomes `cp -r /tmp/x`. The directory is
     only read; the write goes to /tmp.
     """
-    parts = re.split(r"(&&|\|\||[;|\n])", command)
+    parts = split_segments(command, keep=True)
     out = []
     for part in parts:
         tokens = part.split()
@@ -653,7 +678,7 @@ def _only_copy_sources(command: str) -> str:
     destination comes into being. `cp .env.example .env` therefore reads a
     template — that an environment file is CREATED is not a read.
     """
-    parts = re.split(r"(&&|\|\||[;|\n])", command)
+    parts = split_segments(command, keep=True)
     out = []
     for part in parts:
         tokens = part.split()
@@ -687,7 +712,7 @@ def _remote_copy_writes(command: str) -> bool:
     The same gap sat in both copy-source helpers, where it worked the other way
     round and produced false alarms: a copy SOURCE counted as a write target as
     soon as any command preceded it on its own line."""
-    for segment in re.split(r"&&|\|\||[;|\n]", command):
+    for segment in split_segments(command):
         tokens = segment.split()
         if len(tokens) < 2:
             continue
@@ -764,7 +789,7 @@ def _recursive_read_targets(command: str) -> list[str]:
     counts as its argument — which keeps `sudo tar czf x ~/.ssh` caught.
     """
     targets = []
-    for segment in re.split(r"&&|\|\||[;|\n]", command):
+    for segment in split_segments(command):
         tokens = [t.strip("'\"()") for t in segment.split()]
         tokens = [t for t in tokens if t]
         reading = False
@@ -836,7 +861,7 @@ def _interpreter_inline_code(command: str) -> bool:
     # `mkdir -p /tmp/a && python3 tool.py` count as inline code — the -p belonged
     # to mkdir. Text instead of action, the same defect class this guard exists
     # to avoid.
-    for segment in re.split(r"&&|\|\||[;|\n]", command):
+    for segment in split_segments(command):
         toks = [t.strip("'\"") for t in segment.split()]
         for i, tok in enumerate(toks):
             if os.path.basename(tok) not in _INTERPRETERS:
@@ -1290,7 +1315,7 @@ def check_lifecycle(command: str) -> str | None:
     for hit in _PASSTHROUGH_RE.finditer(command):
         to_check.append(hit.group(1))
     for text in to_check:
-        for segment in re.split(r"&&|\|\||[;|\n]", text):
+        for segment in split_segments(text):
             rest = _is_container_command(segment)
             if rest is None:
                 continue
