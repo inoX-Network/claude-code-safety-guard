@@ -582,6 +582,42 @@ _WRITE_VERB_RE = re.compile(r"\b(?:" + "|".join(_WRITE_VERBS) + r")\b")
 # Redirects / in-place edit carry no word boundary — matched as operators.
 _WRITE_OPS = [">", ">>", "sed -i"]
 
+# awk runs its first argument as a PROGRAM, not as text. A redirect inside it
+# (`print "x" > "/path"`) is a real write — but it sits inside quotes, and the
+# operator search below strips quoted sections before looking. Measured
+# 2026-08-20: this walked past EVERY protected path, self-protection included,
+# while echo/perl/python/tee/dd were all refused there.
+#
+# Same failure class as the ssh hole fixed earlier: what sits inside the quotes
+# is code, not prose.
+#
+# Why not simply feed the whole line to the operator search (i.e. add awk to
+# _SHELL_PASSTHROUGH_RE): awk uses `>` as a COMPARISON too. Measured against
+# eight weeks of real commands: of 708 awk calls containing `>`, 688 were
+# comparisons (`$1 > 5`, `NR>=2730`) and only 20 were redirects. The blunt fix
+# would have cost roughly nine false alarms a day.
+#
+# The distinction is the TARGET: a redirect writes to a string expression
+# (`> "file"`), a comparison sits in front of a number, a field or a variable.
+# The `>` must also sit OUTSIDE a string — without that, `awk '{print $2, "->",
+# $1}'` reports a write, because in the text "->" a `>` stands right before a
+# quote. So string literals are masked first.
+_AWK_RE = re.compile(r"\b(?:g|m|n)?awk\b")
+_AWK_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+_AWK_REDIRECT_MASKED_RE = re.compile(r">>?\s*\x00")
+
+
+def _awk_writes(command: str) -> bool:
+    """True when an awk program in this line redirects into a file."""
+    if not _AWK_RE.search(command):
+        return False
+    # Only the awk program matters: the single-quoted argument. A line may
+    # carry more than one awk call.
+    for program in re.findall(r"'([^']*)'", command):
+        if _AWK_REDIRECT_MASKED_RE.search(_AWK_STRING_RE.sub("\x00", program)):
+            return True
+    return False
+
 # A `>` INSIDE quotes is text, not a redirect: `echo "a -> b"` writes nothing. The
 # substring test below did not know that, so any command printing an arrow in a
 # MESSAGE while naming a protected path counted as a write — which is exactly what
@@ -706,6 +742,9 @@ def _command_is_write(command: str) -> bool:
     )
     if any(op in ops_target for op in _WRITE_OPS):
         return True
+    # awk program text: a redirect onto a string target (see _AWK_RE).
+    if _awk_writes(command):
+        return True
     if re.search(r"\bfind\b", command) and "-delete" in command:
         return True
     if re.search(r"\brsync\b", command) and "--delete" in command:
@@ -728,6 +767,10 @@ RECURSIVE_READ_CMDS = {
     "gpg", "gzip", "bzip2", "xz", "cpio", "pax", "cp",
     "grep", "egrep", "fgrep", "rg", "ag",
 }
+
+# `find … -exec CMD` hands every match to a command (see the comment where this
+# is used). `-ok`/`-okdir` prompt first but execute just the same.
+_FIND_EXEC_RE = re.compile(r"\bfind\b[^|;&]*?\s-(?:exec|execdir|ok|okdir)\b")
 
 # Words that stand IN FRONT of the actual command without being one: escalation
 # and environment wrappers. Without skipping them, `sudo tar ~/.ssh` hides its
@@ -761,6 +804,15 @@ def _recursive_read_targets(command: str) -> list[str]:
             name = os.path.basename(tok)
             if not reading:
                 if name in RECURSIVE_READ_CMDS:
+                    reading = True
+                elif name == "find" and _FIND_EXEC_RE.search(segment):
+                    # `find` is deliberately NOT in RECURSIVE_READ_CMDS: listing a
+                    # protected directory stays allowed. With `-exec` it is no
+                    # longer listing — every file found is handed to a command,
+                    # which reads the search path recursively. Measured
+                    # 2026-08-20: `find /etc -name shadow -exec cat {} \;` ran
+                    # free while `cat /etc/shadow` was refused, so the detour was
+                    # the weaker door — exactly as directory packing once was.
                     reading = True
                 elif name in _COMMAND_PREFIXES or tok.startswith("-") \
                         or re.match(r"^[A-Za-z_]\w*=", tok):
