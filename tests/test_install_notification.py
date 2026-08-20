@@ -182,7 +182,10 @@ def check_grep_for_the_phrase():
 
 
 def check_docker_volume_named_after_pip():
-    """48 logged cases: a cache volume is not an installation."""
+    """A cache volume is not an installation. Constructed, not measured: the
+    logged commands that mount such a volume DO install further along the line
+    and rightly notify — an earlier reading of the grouping suggested otherwise
+    and was wrong."""
     return _stays_quiet(
         "docker run --rm -v cockpit-pip-cache:/root/.cache/pip -w /app img true")
 
@@ -224,8 +227,11 @@ def check_repeated_notifications_share_the_id():
     if not first or not second:
         return False, "notification missing"
     a, b = first[0], second[0]
-    id_a = a[a.index("-r") + 1] if "-r" in a else None
-    id_b = b[b.index("-r") + 1] if "-r" in b else None
+    # Both must HAVE an id. Comparing two absent ids would call them equal and
+    # let a missing replace id pass — the first version of this check did.
+    if "-r" not in a or "-r" not in b:
+        return False, "at least one notification carries no replace id"
+    id_a, id_b = a[a.index("-r") + 1], b[b.index("-r") + 1]
     if id_a != id_b:
         return False, f"ids differ: {id_a} vs {id_b}"
     return True, ""
