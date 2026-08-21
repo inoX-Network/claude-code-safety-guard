@@ -545,12 +545,20 @@ def command_hits_project_control(command: str) -> tuple[str, bool] | None:
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
     if not _command_is_write(cleaned):
         return None
-    cleaned = _without_copy_sources(cleaned)
-    cleaned = _without_interpreter_program(cleaned)
-    for tok in _command_path_tokens(cleaned):
-        hit = project_control_file(tok, cd_bases)
-        if hit:
-            return hit
+    # Same segment boundary as in check_blocked_paths and
+    # command_hits_self_protect: only writing parts can carry a target.
+    cleaned = _join_line_continuations(cleaned)
+    writing = [s for s in split_segments(cleaned)
+               if _command_is_write(s) or _CD_RE.search(s)]
+    if not writing:
+        writing = [cleaned]
+    for segment in writing:
+        segment = _without_interpreter_program(
+            _without_copy_sources(_with_assignments(segment, cleaned)))
+        for tok in _command_path_tokens(segment):
+            hit = project_control_file(tok, cd_bases)
+            if hit:
+                return hit
     return None
 
 # Hook development mode (Option B): the owner can lift the self-protection ONLY
@@ -733,6 +741,42 @@ def _only_copy_sources(command: str) -> str:
 # is a destination and gets checked; the same shape in front means fetching and
 # stays free. A match anywhere in the line would block every read-only fetch.
 _REMOTE_DEST_RE = re.compile(r"^[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?:/\S*$")
+
+
+_ASSIGNMENT_RE = re.compile(r"(?:^|[\s;&|])([A-Za-z_][A-Za-z_0-9]*)=([^\s;&|]+)")
+_VARIABLE_RE = re.compile(r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)")
+
+
+def _join_line_continuations(command: str) -> str:
+    """Turn a continued line back into ONE line.
+
+    A shell joins a line continuation BEFORE it splits anything. Splitting at
+    newlines first cuts a single command in two and loses the link between verb
+    and target -- measured with a create command whose target sat behind the
+    continuation: it ran free as soon as the segment boundary applied.
+    """
+    return re.sub(r"\\\s*\n", " ", command)
+
+
+def _with_assignments(segment: str, command: str) -> str:
+    """Substitute values from assignments anywhere in the line into a segment.
+
+    An assignment carries the path while the writing segment names only the
+    variable. Without substitution the path falls between the segments.
+
+    The assignment is deliberately NOT added to the checked text instead: an
+    interpreter path in an assignment next to a write somewhere else would then
+    be a false positive. Only where the variable is USED does its value count.
+    """
+    values = dict(_ASSIGNMENT_RE.findall(command))
+    if not values or "$" not in segment:
+        return segment
+
+    def substitute(match):
+        name = match.group(1) or match.group(2)
+        return values.get(name, match.group(0))
+
+    return _VARIABLE_RE.sub(substitute, segment)
 
 
 def _remote_copy_writes(command: str) -> bool:
@@ -1022,16 +1066,41 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     if not is_write:
         return None
 
-    # A copy SOURCE is not a write target (see _without_copy_sources).
-    cleaned = _without_copy_sources(cleaned)
+    # Segment boundary: a write in ONE part of the line does not turn a protected
+    # path in ANOTHER part into its target. `ls -la /etc/hostname && rm -rf /tmp/x`
+    # deletes in the scratch area, not in the system directory. The read guard has
+    # drawn this line since the recursive-read work; the write guard had not --
+    # measured against a real audit log: 11 rejections from 11 different sessions,
+    # every one of them harmless.
+    #
+    # A DIRECTORY CHANGE counts as part of the write context: `cd <protected> &&
+    # echo x > file` carries the protected path only in the cd segment, and the
+    # target is a bare filename. Relative-target resolution deliberately ignores
+    # bare words (otherwise every subcommand would look like a target), so without
+    # keeping cd segments this narrowing would open a hole -- a test case that
+    # states exactly this case found it.
+    #
+    # If NO single segment reads as a write although the whole line does, the old
+    # coarse check on the entire line stays: a false positive beats a hole.
+    cleaned = _join_line_continuations(cleaned)
+    to_check = [s for s in split_segments(cleaned)
+                if _command_is_write(s) or _CD_RE.search(s)]
+    if not to_check:
+        to_check = [cleaned]
+    # Substitute assignment values, then drop copy SOURCES (in that order: only
+    # once the variable is resolved can you tell whether it was a source).
+    to_check = [_without_copy_sources(_with_assignments(s, cleaned))
+                for s in to_check]
 
-    # Check both variants: original (~) and expanded (/home/user)
-    cleaned_expanded = expand_path(cleaned)
+    # Path order stays outermost: a command touching several protected paths
+    # still reports the same one as before.
     for path in paths:
         expanded = expand_path(path)
-        if (_names_path(cleaned, path) or _names_path(cleaned, expanded)
-                or _names_path(cleaned_expanded, expanded)):
-            return path
+        for segment in to_check:
+            # Check both variants: original (~) and expanded (/home/user)
+            if (_names_path(segment, path) or _names_path(segment, expanded)
+                    or _names_path(expand_path(segment), expanded)):
+                return path
     return None
 
 
@@ -1593,15 +1662,26 @@ def command_hits_self_protect(command: str) -> str | None:
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
     if not _command_is_write(cleaned):
         return None
+    # Same segment boundary as in check_blocked_paths: only the parts of the line
+    # that write can carry a target. A checksum over the hook file next to a write
+    # into the scratch area is not an attack on the hook. cd segments stay in (see
+    # there); if no single segment writes, the whole line stays (fail-closed).
+    cleaned = _join_line_continuations(cleaned)
+    writing = [s for s in split_segments(cleaned)
+               if _command_is_write(s) or _CD_RE.search(s)]
+    if not writing:
+        writing = [cleaned]
     # A copy SOURCE is not a write target here either: taking a working copy of
     # the guard's own file is reading, not an attack. The destination stays
     # checked.
-    cleaned = _without_copy_sources(cleaned)
-    cleaned_expanded = expand_path(cleaned)
+    writing = [_without_copy_sources(_with_assignments(s, cleaned))
+               for s in writing]
+    cleaned = " ".join(writing)
     for prot in SELF_PROTECT_PATHS:
         p = re.escape(expand_path(prot).rstrip("/"))
-        if re.search(p + _PATH_BOUNDARY, cleaned_expanded) and not _dev_unlocked(prot):
-            return prot
+        for segment in writing:
+            if re.search(p + _PATH_BOUNDARY, expand_path(segment)) and not _dev_unlocked(prot):
+                return prot
     # Relative targets carry no protected prefix literally, so the search above
     # cannot see them. Resolve every path-ish token instead — same check, just
     # with the working directory in hand.

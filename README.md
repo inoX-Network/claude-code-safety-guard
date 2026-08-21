@@ -57,6 +57,7 @@ If you used the earlier version, here is what changed:
 - **Audit log** — Every allow/block decision is logged (JSONL) with secret redaction.
 - **Desktop notifications** — Optional heads-up on package installs.
 - **Prompt injection detection** — Warns (doesn't block) when suspicious keywords appear in a command.
+- **Update check** — Optional, off by default: one line at session start when a newer version has been published. Reads and compares, nothing else.
 
 ---
 
@@ -150,8 +151,13 @@ delete". Knowing this contract avoids surprise:
   deliberate trade-off: resolving symlinks touches the filesystem and opens
   TOCTOU, performance, and existence questions. Tracked in
   `BEFUND-guard-scope-symlink-2026-07-24.md` (columns 3/4 of the test matrix).
-- The write-verb gate is a coarse *(some write verb) AND (protected path present)*
-  test, not a strict verb→path binding.
+- The write-verb gate is not a strict verb→path binding. It is *(a write verb)
+  AND (a protected path)* **within the same segment** of the line: a write in one
+  segment no longer makes a protected path in another its target, and a directory
+  change, an assignment value or a line continuation still counts as part of the
+  write context. Inside a single segment the coarseness remains — `sha256sum
+  <protected file> > /tmp/sum.txt` is refused although only the redirect target
+  is written.
 
 ---
 
@@ -341,6 +347,56 @@ Missing keys fall back to English, so a half-finished translation still works. A
 
 ---
 
+## Update check
+
+A guard that cannot be updated goes stale, and a stale guard does not know the
+bypasses that have since become known. The hook ships with a second, tiny hook
+that answers one question at session start: is there a newer published version
+than the one installed here?
+
+It is **off by default** and it says so exactly once, so the feature is
+discoverable without nagging. Turn it on in `guard-config.json`:
+
+```json
+{
+  "update_check": {
+    "enabled": true,
+    "interval_hours": 24,
+    "source": "https://raw.githubusercontent.com/inoX-Network/claude-code-safety-guard/main/VERSION"
+  }
+}
+```
+
+| Key | Effect |
+|-----|--------|
+| `update_check.enabled` | Off unless this is exactly `true`. While off, the guard mentions the feature once and then stays quiet. |
+| `update_check.interval_hours` | How often to ask at most. Default 24. A second session start inside the window stays silent. |
+| `update_check.source` | Where the published version is read from. **Must be `https://`** — an unencrypted answer could be tampered with in transit, and this one decides what you are told about your security tooling. A plain-http value falls back to the default. |
+
+Register it as a **SessionStart** hook — it is a different hook from the guard
+itself, and forgetting this is the easy mistake: the setting sits in the config,
+nothing runs, and nothing complains.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/update-check.py" } ] }
+    ]
+  }
+}
+```
+
+What it does: compares the `VERSION` file next to the hook against the published
+one (both are dates — `2026.08.21` — so string order is date order) and prints
+one line if the published one is newer. What it does not do: download anything,
+change anything, or run with elevated rights. It reads, compares, and speaks.
+
+Without a `VERSION` file next to the hook there is nothing to compare, and it
+stays silent rather than guessing.
+
+---
+
 ## Configuration reference
 
 The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see [security-rules.example.json](security-rules.example.json) for a complete starting point), or from wherever `installation.rules` points. Top-level keys:
@@ -359,6 +415,10 @@ The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see 
 | `protected_reads.env_files_require_override_1` | `string[]` | `.env` filenames whose read **and** write need level 1+. |
 | `blocked_bash_patterns_force_push` | `string[]` | Regexes blocking force-push on `main`/`master`. |
 | `prompt_injection_keywords` | `string[]` | Keywords that emit a stderr warning (no block). |
+| `protected_git_branches` | `string[]` | Branches on which `git commit` is refused outright. The hook asks git for the real branch (`rev-parse`), so `git -C <path>` and `cd <path> && git commit` are covered. Merge and pull stay free. |
+| `mcp_policy.gate_servers` | `string[]` | MCP servers whose every tool call needs a level-1+ override. |
+| `mcp_policy.safe_servers` | `string[]` | MCP servers whose calls are free. |
+| `mcp_policy.read_verb_prefixes` | `string[]` | For any other server: a tool whose name starts with one of these is treated as reading and stays free; everything else needs level 1+ (default-deny for writes). |
 
 > The self-protection path list is **not** in this file — it is hardcoded in the hook so it cannot be edited through itself.
 
