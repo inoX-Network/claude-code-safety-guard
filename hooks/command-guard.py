@@ -668,7 +668,7 @@ def _without_copy_sources(command: str) -> str:
     Example: `cp -r ~/.config /tmp/x` becomes `cp -r /tmp/x`. The directory is
     only read; the write goes to /tmp.
     """
-    parts = re.split(r"(&&|\|\||[;|])", command)
+    parts = re.split(r"(&&|\|\||[;|\n])", command)
     out = []
     for part in parts:
         tokens = part.split()
@@ -689,7 +689,7 @@ def _only_copy_sources(command: str) -> str:
     destination comes into being. `cp .env.example .env` therefore reads a
     template — that an environment file is CREATED is not a read.
     """
-    parts = re.split(r"(&&|\|\||[;|])", command)
+    parts = re.split(r"(&&|\|\||[;|\n])", command)
     out = []
     for part in parts:
         tokens = part.split()
@@ -711,8 +711,19 @@ _REMOTE_DEST_RE = re.compile(r"^[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?:/\S*$")
 
 
 def _remote_copy_writes(command: str) -> bool:
-    """Whether scp/rsync writes to a remote path (destination = last argument)."""
-    for segment in re.split(r"&&|\|\||[;|]", command):
+    """Whether scp/rsync writes to a remote path (destination = last argument).
+
+    The segment split knows the NEWLINE. Without it, a multi-line command put
+    the wrong word in tokens[0] -- `echo` instead of the transfer command -- and
+    the check ran into nothing. Measured 2026-08-20: a transfer onto a protected
+    server path was refused after `;` and after `&&`, but ran FREE after a
+    newline. That is the deploy path this function exists to cover, and the log
+    held a real deployment that had walked straight through it.
+
+    The same gap sat in both copy-source helpers, where it worked the other way
+    round and produced false alarms: a copy SOURCE counted as a write target as
+    soon as any command preceded it on its own line."""
+    for segment in re.split(r"&&|\|\||[;|\n]", command):
         tokens = segment.split()
         if len(tokens) < 2:
             continue
