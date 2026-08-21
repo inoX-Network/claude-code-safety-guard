@@ -124,6 +124,17 @@ Only after those does the hook load the override for the calling context and run
 
 ## Protection scope
 
+**Built for a session with no other brakes.** Everyday work here — and every
+test run in this repo — happens with Claude Code's permission prompts turned
+off (`bypass permissions`). That is deliberate, not sloppy: an agent that stops
+every few minutes to ask is not autonomous, and a human who clicks "allow"
+fifty times a day stops reading what they are allowing. This guard **replaces**
+those prompts rather than adding to them. Read the scope below with that in
+mind — what it does not cover, nothing else covers either.
+
+That is also why the refusals are hard by default and the override needs the
+owner: the guard is not one opinion among several, it is the only one asked.
+
 The guard protects **zones and catastrophic patterns**, not "every write or
 delete". Knowing this contract avoids surprise:
 
