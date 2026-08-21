@@ -59,6 +59,40 @@ FETCH_TIMEOUT_SECONDS = 5
 VERSION_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
 MAX_RESPONSE_BYTES = 64
 
+# Built-in English, same arrangement as the guard: the configured language wins,
+# English is always there as the floor. The texts live here rather than in the
+# guard's catalogue so this script stays standalone — it must run even where the
+# guard itself is not installed yet.
+_MESSAGES = {
+    "update.available":
+        "A newer version of the guard is published: {published} (installed: "
+        "{installed}). Its changes are almost always security fixes. Say the "
+        "word if you want to see what changed.",
+    "update.feature_exists":
+        "The guard can check once a day whether a newer version is published. "
+        "That is TURNED OFF and contacts nothing. To enable it, set "
+        "update_check.enabled to true in ~/.claude/guard-config.json.",
+}
+
+
+def _texts(config: dict) -> dict:
+    """Built-in English, overlaid with the configured language if one exists."""
+    texts = dict(_MESSAGES)
+    code = config.get("language")
+    # A code is a code, not a path: without this, '../../etc/passwd' would turn
+    # a language setting into a file lookup.
+    if not isinstance(code, str) or not re.fullmatch(r"[a-z]{2}(-[A-Z]{2})?", code):
+        return texts
+    lang_dir = (config.get("installation") or {}).get("lang_dir")
+    folder = Path(os.path.expanduser(lang_dir)) if isinstance(lang_dir, str) \
+        else HERE / "lang"
+    catalogue = _read_json(folder / f"{code}.json")
+    for key in texts:
+        value = catalogue.get(key)
+        if isinstance(value, str) and value:
+            texts[key] = value
+    return texts
+
 
 def _read_json(path: Path) -> dict:
     try:
@@ -140,16 +174,15 @@ def main() -> int:
     config = _read_json(CONFIG_PATH)
     enabled, interval, source = _settings(config)
 
+    texts = _texts(config)
+
     if not enabled:
         # Off. Say so ONCE, so the feature is discoverable without nagging.
         state = _read_json(STATE_PATH)
         if not state.get("informed_about_feature"):
             state["informed_about_feature"] = True
             _save_state(state)
-            print("Der Waechter kann einmal taeglich pruefen, ob eine neuere "
-                  "Fassung veroeffentlicht ist. Das ist ABGESCHALTET und "
-                  "kontaktiert nichts. Einschalten: update_check.enabled auf "
-                  "true in ~/.claude/guard-config.json.")
+            print(texts["update.feature_exists"])
         return 0
 
     if installed is None:
@@ -169,10 +202,13 @@ def main() -> int:
     _save_state(state)
 
     if published > installed:
-        print(f"Eine neuere Fassung des Waechters ist veroeffentlicht: "
-              f"{published} (eingesetzt: {installed}). Die Aenderungen sind fast "
-              f"immer Sicherheitskorrekturen. Sag Bescheid, wenn ich zeigen "
-              f"soll, was sich geaendert hat.")
+        try:
+            print(texts["update.available"].format(published=published,
+                                                   installed=installed))
+        except (KeyError, IndexError, ValueError):
+            # A broken translation must not swallow the notice itself.
+            print(_MESSAGES["update.available"].format(published=published,
+                                                       installed=installed))
     return 0
 
 

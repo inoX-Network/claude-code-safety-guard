@@ -259,7 +259,43 @@ def check_overlong_answer_is_refused():
         "overlong answer accepted"
 
 
-# --- 7. end to end, without a network --------------------------------------
+# --- 7. language changes the words, never the behaviour ---------------------
+
+def check_default_language_is_english():
+    out, _, _ = _run(ON, "2026.09.01")
+    return "newer version" in out, f"not English by default: {out!r}"
+
+
+def check_configured_language_is_used():
+    config = {"language": "de", "update_check": {"enabled": True}}
+    out, _, _ = _run(config, "2026.09.01")
+    return "Fassung" in out, f"German catalogue not used: {out!r}"
+
+
+def check_unknown_language_falls_back_to_english():
+    config = {"language": "zz", "update_check": {"enabled": True}}
+    out, _, _ = _run(config, "2026.09.01")
+    return "newer version" in out, f"no fallback: {out!r}"
+
+
+def check_language_does_not_change_whether_it_reports():
+    """The point of this one: a translated build must make the SAME decisions.
+    Same input, same silence — only the wording may differ."""
+    english, _, _ = _run(ON, "2026.08.21")
+    german, _, _ = _run({"language": "de", "update_check": {"enabled": True}},
+                        "2026.08.21")
+    return english == "" and german == "", \
+        f"language changed the decision: {english!r} vs {german!r}"
+
+
+def check_absurd_language_code_is_ignored():
+    """A code is a code, not a path. '../../etc' must not become a lookup."""
+    config = {"language": "../../etc/passwd", "update_check": {"enabled": True}}
+    out, _, _ = _run(config, "2026.09.01")
+    return "newer version" in out, f"odd code was not ignored: {out!r}"
+
+
+# --- 8. end to end, without a network --------------------------------------
 
 def check_script_runs_and_exits_zero():
     """Called the way the session start calls it. Off by default, so no network."""
@@ -298,6 +334,11 @@ CASES = [
     ("non-ascii answer is refused", check_non_ascii_answer_is_refused),
     ("empty answer is refused", check_empty_answer_is_refused),
     ("overlong answer is refused", check_overlong_answer_is_refused),
+    ("default language is english", check_default_language_is_english),
+    ("configured language is used", check_configured_language_is_used),
+    ("unknown language falls back", check_unknown_language_falls_back_to_english),
+    ("language does not change the decision", check_language_does_not_change_whether_it_reports),
+    ("absurd language code is ignored", check_absurd_language_code_is_ignored),
     ("script runs and exits zero", check_script_runs_and_exits_zero),
 ]
 
