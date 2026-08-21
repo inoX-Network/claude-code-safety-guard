@@ -1029,9 +1029,47 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     cleaned_expanded = expand_path(cleaned)
     for path in paths:
         expanded = expand_path(path)
-        if path in cleaned or expanded in cleaned or expanded in cleaned_expanded:
+        if (_names_path(cleaned, path) or _names_path(cleaned, expanded)
+                or _names_path(cleaned_expanded, expanded)):
             return path
     return None
+
+
+# What may sit directly BEFORE a path: nothing (start of line), whitespace, a
+# quote, an operator, or one of the characters that introduce a value —
+# `VAR=/bin/sh`, `host:/opt/x`. Anything else means the characters are the tail
+# of a longer path, not a path of their own.
+#
+# The comma is in here because it was MISSING and that was a hole, found by
+# asking where else a path can begin: `cp datei {/tmp/a,/bin/b}` slipped through
+# without it. When in doubt this list errs on the LONG side — an extra character
+# means the guard looks in one more place, which is the safe direction. A
+# missing one is a way past it.
+_PATH_START = r"(?:^|[\s;|&(){}\[\],=:'\"<>!])"
+
+
+def _names_path(text: str, path: str) -> bool:
+    """Whether `text` names `path` — as a path, not as the tail of another one.
+
+    The write guard used to ask `path in text`, so the entry `/bin` matched
+    `~/Projekte/.../in-progress/bin`, `$BASE/bin/name` and `/tmp/sync/bin`. None
+    of those writes to /bin. Measured over the audit log, that shape accounted
+    for 72 refusals across 49 sessions once a test run was excluded — the
+    largest single cause of false refusals in the write guard.
+
+    The self-protection gate already required a boundary AFTER the path
+    (_PATH_BOUNDARY). What was missing is the one in front, and that is exactly
+    where `in-progress/bin` ends in `/bin`.
+
+    Deliberately still coarse: this asks where the characters sit in the TEXT,
+    not which token a shell would build. Coarse in the safe direction — a path
+    that appears at a plausible start is treated as named, even if a shell might
+    disagree.
+    """
+    if not path:
+        return False
+    return re.search(_PATH_START + re.escape(path.rstrip("/")) + _PATH_BOUNDARY,
+                     text) is not None
 
 
 def _expiry_ok(data: dict, require_expiry: bool) -> bool:
