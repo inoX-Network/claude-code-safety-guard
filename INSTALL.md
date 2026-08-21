@@ -122,6 +122,23 @@ Two ways to provide it:
 A minimal, generic `CLAUDE.md` block:
 
 ```markdown
+### Optional: the update check
+
+`hooks/update-check.py` is a **separate** hook and needs its own entry, as
+`SessionStart`, pointing at wherever you put it:
+
+```json
+"SessionStart": [
+  { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/update-check.py" } ] }
+]
+```
+
+Two halves belong together here and the second one is easy to forget: the entry
+in `settings.json` AND the file at that path. If the setting points somewhere
+the file is not, nothing runs and nothing says so — the check is only "armed"
+once both halves match. It stays off until `update_check.enabled` is `true` in
+`guard-config.json` (see the README section).
+
 ## Safety guard is armed
 
 A PreToolUse hook (`command-guard.py`) enforces the security rules technically
