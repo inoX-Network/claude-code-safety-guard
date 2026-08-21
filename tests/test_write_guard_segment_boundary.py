@@ -12,8 +12,10 @@
 #
 # Measured against a real audit log of 1066 write-guard refusals: 11 have this
 # shape, spread over 11 DIFFERENT sessions — no single test run inflating the
-# number. Replaying every distinct refused command through both versions: 57 run
-# free afterwards, 0 become newly blocked.
+# number. Replaying every distinct refused command through both versions: 53 run
+# free afterwards, 0 become newly blocked. (An earlier run said 57 -- that was
+# before the two holes below were closed; four of those commands are refused
+# again, and rightly so.)
 #
 # THIS LOOSENS A GUARD, so the first half of this file is the important one.
 # Three shapes must survive, and each of them was a real hole during the work:
