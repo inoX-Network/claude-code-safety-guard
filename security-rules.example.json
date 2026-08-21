@@ -22,7 +22,7 @@
     "chmod -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
     "chgrp -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)"
   ],
-  "_comment_owner_only_commands": "Commands that ONLY the owner may run via ! (which bypasses the guard). AI bash calls are hard-blocked here -- otherwise the AI could grant itself overrides (grant-override) or lift the hook self-protection (hook-dev-mode). Matched as a whole word.",
+  "_comment_owner_only_commands": "Commands that ONLY the owner may run via ! (which bypasses the guard). AI bash calls are hard-blocked here -- otherwise the AI could grant itself overrides (grant-override) or lift the hook self-protection (hook-dev-mode). Matched at the COMMAND POSITION, not anywhere in the line -- so the same name stays usable as text (search pattern, note, file name). Wrappers like bash -c, timeout or xargs still count as a call.",
   "owner_only_commands": [
     "grant-override",
     "hook-dev-mode"

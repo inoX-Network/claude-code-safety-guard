@@ -2326,21 +2326,83 @@ def check_force_push(command: str, patterns: list[str]) -> str | None:
     return None
 
 
+# Tools that only PRINT or READ their arguments. When one of these sits at the
+# command position, an owner-only name behind it is text, not a call.
+#
+# This list is deliberately NARROWER than _TEXT_COMMANDS. A gap there costs a
+# container call; a gap here costs the AI approving itself. Three entries are
+# therefore missing on purpose:
+#   awk  — can execute via system()
+#   sed  — can execute via the e flag
+#   git  — can execute via -c alias.x='!command' or the pager
+# Writing a commit message that mentions such a name works the recommended way
+# anyway: put the message in a FILE and commit that.
+_OWNER_TEXT_COMMANDS = {
+    "echo", "printf", "cat", "less", "more", "head", "tail", "wc",
+    "ls", "stat", "file", "grep", "rg", "ag", "diff", "sort", "uniq",
+    "man", "which", "type", "whereis",
+}
+
+
 def check_owner_only(command: str, names: list[str]) -> str | None:
     """Return the first owner-exclusive command the AI calls via Bash.
 
-    Commands like the grant-override or hook-dev-mode tools activate overrides
-    or lift the hook self-protection. If the AI called them via the normal Bash
-    tool, they would pass through the guard (no dangerous pattern in the string)
-    and the AI could approve itself. Therefore hard-blocked — only the owner's
-    !-invocation bypasses the guard entirely and reaches the script.
+    Commands like the grant-override or dev-window tools activate overrides or
+    lift the hook self-protection. If the AI called them via the normal Bash
+    tool, they would pass through the guard (no dangerous pattern in the
+    string) and the AI could approve itself. Therefore hard-blocked — only the
+    owner's !-invocation bypasses the guard entirely.
 
-    Checked as a whole word (word boundaries) to avoid partial matches inside
-    other words.
+    POSITION IS CHECKED, NOT TEXT. The previous version searched for the name
+    anywhere in the line. Measured 2026-08-21: eight out of nine harmless forms
+    were rejected — including every read of the identically named flag FILE.
+    The block therefore did not prevent the call, it prevented checking whether
+    an approval exists at all.
+
+    Per segment:
+
+    1. If the name sits at the command position (after privilege elevation,
+       environment assignments and options), it is a call. Compared by base
+       name so a full path hits just the same.
+    2. Otherwise WHAT sits at the command position decides. A pure print or
+       read tool executes nothing — behind it, the name is text.
+    3. Everything else counts as executing, and there the name is searched
+       anywhere in the segment. That catches wrappers like `bash -c`,
+       `timeout`, `watch` or `xargs`, even when the call hides in quotes.
+
+    Point 3 is the fail-closed direction: NO allowlist of wrappers, because
+    every future one would then be open. Exactly that had already opened three
+    holes elsewhere in this guard.
+
+    The word boundary also considers dot and hyphen. A plain \\b is not enough
+    for hyphenated names: there the word ends before the suffix, which made
+    `<name>-extra` match by mistake.
     """
-    for name in names:
-        if re.search(r"\b" + re.escape(name) + r"\b", command):
-            return name
+    if not names:
+        return None
+    for segment in split_segments(command):
+        tokens = _segment_tokens(segment)
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if t in _PREFIX_TOKENS or "=" in t.split("/")[0] or t.startswith("-"):
+                i += 1
+                continue
+            break
+        if i >= len(tokens):
+            continue
+        head = os.path.basename(tokens[i])
+        for name in names:
+            # Not redundant with the search below: a user may name their own
+            # script like a read tool. Without this, the tool exemption would
+            # silently let it through.
+            if head == name:
+                return name
+        if head in _OWNER_TEXT_COMMANDS:
+            continue
+        for name in names:
+            if re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", segment):
+                return name
     return None
 
 
