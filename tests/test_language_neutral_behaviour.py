@@ -155,18 +155,35 @@ def check_building_blocks_are_translated():
     return ok, out[:200]
 
 
-def _builtin_catalogue() -> dict:
-    """The built-in English texts, read out of the hook without running it."""
+def _messages_of(path: Path) -> dict:
+    """The _MESSAGES literal of a script, read without running it."""
     import ast
 
-    tree = ast.parse(HOOK.read_text(encoding="utf-8"))
-    node = next(n for n in tree.body
-                if isinstance(n, ast.Assign)
-                and getattr(n.targets[0], "id", "") == "_MESSAGES")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    node = next((n for n in tree.body
+                 if isinstance(n, ast.Assign)
+                 and getattr(n.targets[0], "id", "") == "_MESSAGES"), None)
+    if node is None:
+        return {}
     scope: dict = {}
     exec(compile(ast.Module(body=[node], type_ignores=[]), "<catalogue>", "exec"),
          scope)
     return scope["_MESSAGES"]
+
+
+def _builtin_catalogue() -> dict:
+    """The built-in English texts of everything that reads the shared catalogue.
+
+    The language files belong to the INSTALLATION, not to a single script: the
+    session-start update check reads the same lang/<code>.json. Leaving it out
+    made its keys look like leftovers with no counterpart in the code — which is
+    exactly what this check is meant to catch, just aimed at the wrong file.
+    """
+    catalogue = dict(_messages_of(HOOK))
+    sibling = HOOK.parent / "update-check.py"
+    if sibling.exists():
+        catalogue.update(_messages_of(sibling))
+    return catalogue
 
 
 def check_shipped_language_files_are_complete():
