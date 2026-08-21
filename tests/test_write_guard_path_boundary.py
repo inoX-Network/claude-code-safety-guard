@@ -165,8 +165,18 @@ def check_project_directory_ending_in_etc_stays_free():
 
 
 def check_similar_name_stays_free():
-    """`/binary` is not `/bin` — the boundary has to hold on both ends."""
-    return _stays_free("touch /tmp/binary-datei")
+    """`/binary` is not `/bin` — the boundary has to hold on both ends.
+
+    Deliberately at the START of the path: an earlier version of this case used
+    `/tmp/binary-datei`, where `/bin` never sits at a start position anyway. It
+    was green with and without the trailing boundary and therefore proved
+    nothing — a mutation removing that boundary survived it.
+    """
+    return _stays_free("touch /binary")
+
+
+def check_longer_name_under_a_protected_root_stays_free():
+    return _stays_free("touch /etcetera/datei")
 
 
 def check_word_containing_bin_stays_free():
@@ -197,6 +207,7 @@ CASES = [
     ("download below a bin segment stays free", check_download_target_below_a_bin_segment_stays_free),
     ("project directory ending in etc stays free", check_project_directory_ending_in_etc_stays_free),
     ("similar name stays free", check_similar_name_stays_free),
+    ("longer name under a protected root stays free", check_longer_name_under_a_protected_root_stays_free),
     ("word containing bin stays free", check_word_containing_bin_stays_free),
 ]
 
