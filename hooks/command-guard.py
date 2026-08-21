@@ -631,6 +631,54 @@ _WRITE_VERBS = [
     "chmod", "chown", "mkdir", "ln", "dd", "install", "truncate", "tee",
 ]
 _WRITE_VERB_RE = re.compile(r"\b(?:" + "|".join(_WRITE_VERBS) + r")\b")
+
+# Deleting is not the same as writing, and that distinction was missing.
+#
+# "This data is valuable" almost always means DON'T THROW IT AWAY, not DON'T
+# TOUCH IT. Putting ~/.claude/projects into blocked_paths_write also blocks
+# writing a single memory entry -- measured 2026-08-21, four of four
+# maintenance paths blocked. Such a barrier gets switched off within the week,
+# the same arithmetic that keeps CLAUDE.md free.
+#
+# Hence a second list, blocked_paths_delete, with its own verb detection. It is
+# a RULES entry, not core self-protection: transcripts and memory are user
+# data, not the security system itself. What the guard is made of stays in
+# _BUILTIN_SELF_PROTECT and cannot be switched off.
+#
+# `mv` belongs here because nothing remains at the origin -- a move is a delete
+# as far as the source is concerned. That needs no special handling: the
+# copy-source stripping only touches cp and install, and neither is a delete
+# verb. A switch for it was built and a mutation probe exposed it as having no
+# effect at all; it was removed again.
+_DELETE_VERBS = ["rm", "rmdir", "unlink", "shred", "truncate", "mv", "dd"]
+_DELETE_VERB_RE = re.compile(r"\b(?:" + "|".join(_DELETE_VERBS) + r")\b")
+
+# Interpreter forms: a one-liner carries no shell verb but deletes just the
+# same. Deliberately coarse -- a false positive here is loud and fixable.
+_DELETE_INLINE_RE = re.compile(
+    r"\b(?:rmtree|os\.remove|os\.unlink|os\.rmdir|shutil\.rmtree|"
+    r"unlink\(|rm\(|removeSync|rmSync|fs\.unlink)")
+
+# Tools that delete only WITH their delete flag. Without it they are harmless,
+# and blocking them would be a pure false positive -- the same trade-off
+# _command_is_write already makes for find/rsync.
+_DELETE_FLAG_RE = re.compile(
+    r"\bfind\b[^|;&]*(?:-delete\b|-exec\s+rm\b)"
+    r"|\brsync\b[^|;&]*--delete\b"
+    r"|\bgit\s+clean\b"
+    r"|\bshred\b")
+
+
+def _command_deletes(command: str) -> bool:
+    """Whether the command DESTROYS data (rather than merely changing it).
+
+    Counterpart to _command_is_write. Redirects deliberately do NOT count here:
+    `echo x > file` does overwrite, but it is the ordinary maintenance path --
+    blocking it blocks the maintenance.
+    """
+    return bool(_DELETE_VERB_RE.search(command)
+                or _DELETE_INLINE_RE.search(command)
+                or _DELETE_FLAG_RE.search(command))
 # Redirects / in-place edit carry no word boundary — matched as operators.
 _WRITE_OPS = [">", ">>", "sed -i"]
 
@@ -1165,8 +1213,15 @@ def check_blocked_patterns(command: str, patterns: list[str]) -> str | None:
     return None
 
 
-def check_blocked_paths(command: str, paths: list[str]) -> str | None:
-    """Check whether the command writes to a protected path."""
+def check_blocked_paths(command: str, paths: list[str],
+                        detector=None) -> str | None:
+    """Check whether the command touches a protected path.
+
+    `detector` decides WHAT counts as touching -- _command_is_write by default
+    (write protection), _command_deletes for delete protection. Everything else
+    the delete protection inherits unchanged: segment boundary, traversal
+    collapsing, assignments, boundary-exact path matching. A second copy of
+    that machinery would be the safe road to divergence."""
     # Remove standard redirects (>/dev/null, 2>/dev/null are harmless)
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
@@ -1178,9 +1233,9 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     # not _norm_path -- no filesystem access here).
     cleaned = _collapse_path_traversal(cleaned)
 
-    # Detect write operations
-    is_write = _command_is_write(cleaned)
-    if not is_write:
+    # Detect write resp. delete operations
+    touches = detector or _command_is_write
+    if not touches(cleaned):
         return None
 
     # Segment boundary: a write in ONE part of the line does not turn a protected
@@ -1201,7 +1256,7 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
     # coarse check on the entire line stays: a false positive beats a hole.
     cleaned = _join_line_continuations(cleaned)
     to_check = [s for s in split_segments(cleaned)
-                if _command_is_write(s) or _CD_RE.search(s)]
+                if touches(s) or _CD_RE.search(s)]
     if not to_check:
         to_check = [cleaned]
     # Substitute assignment values, then drop copy SOURCES (in that order: only
@@ -2983,6 +3038,13 @@ def main():
     #    (allowed_paths). Level 2+: all protected paths (single ops;
     #    recursive-system stays hard-blocked via blocked_patterns).
     blocked_path = check_blocked_paths(command, rules.get("blocked_paths_write", []))
+    if not blocked_path:
+        # Delete protection: same machinery, different verbs, its own path list.
+        # After the write check, so a path that appears in BOTH lists still
+        # produces the message it always did.
+        blocked_path = check_blocked_paths(
+            command, rules.get("blocked_paths_delete", []),
+            detector=_command_deletes)
     if not blocked_path:
         # A docker bind-mount onto a blocked_paths_write entry is, security-wise,
         # a write to that path — same level behaviour as `echo x > /etc/passwd`.

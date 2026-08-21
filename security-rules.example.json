@@ -56,6 +56,10 @@
     "/sbin",
     "/bin"
   ],
+  "_comment_blocked_paths_delete": "Paths that may be CHANGED but not DESTROYED. Deleting is not the same as writing: 'this data is valuable' almost always means don't throw it away, not don't touch it. Putting ~/.claude/projects into blocked_paths_write would also block writing a single memory entry -- and a barrier that blocks everyday maintenance gets switched off within the week. Covered verbs: rm, rmdir, unlink, shred, truncate, mv, dd, plus find -delete / rsync --delete / git clean and interpreter one-liners (shutil.rmtree and friends). Redirects deliberately do NOT count -- 'echo x > file' is the ordinary maintenance path. Level 1 lifts it for explicitly named paths.",
+  "blocked_paths_delete": [
+    "~/.claude/projects"
+  ],
   "_comment_allowed_sudo": "Commands allowed with raised rights on level 0. The read-only ones at the end are NOT a relaxation of the read guard: protected_reads applies regardless of this list, so `sudo cat /etc/shadow` stays refused while `sudo cat /var/log/syslog` runs. Measured -- tests/test_readonly_sudo_allowlist.py pins it down. Their absence caused 47 of 910 real refusals without protecting anything.",
   "allowed_sudo": [
     "ls",
@@ -138,22 +142,47 @@
   ],
   "_comment_mcp_policy": "MCP tool protection (tool_name = mcp__<server>__<tool>). gate_servers: always require override 1+. safe_servers: allowed. Otherwise: tool verb starting with a read_verb_prefix = allowed (read-only), everything else requires override 1+ (default-deny for writes). Override level 1+ lifts the gate.",
   "mcp_policy": {
-    "gate_servers": ["postgres"],
-    "safe_servers": ["context7", "sequential-thinking"],
-    "read_verb_prefixes": ["get", "list", "search", "read", "view", "status", "preview", "describe", "fetch"]
+    "gate_servers": [
+      "postgres"
+    ],
+    "safe_servers": [
+      "context7",
+      "sequential-thinking"
+    ],
+    "read_verb_prefixes": [
+      "get",
+      "list",
+      "search",
+      "read",
+      "view",
+      "status",
+      "preview",
+      "describe",
+      "fetch"
+    ]
   },
   "_comment_docker": "Docker/Podman catastrophic flags -- ALWAYS blocked (no override), like blocked_patterns. The hook unions these onto a hardcoded fallback, so they fire even with a missing rules file. Bind-mounts onto self-protected or blocked_paths_write paths are handled by the hook directly (it reuses SELF_PROTECT_PATHS / blocked_paths_write), so no path config is needed here.",
   "docker": {
     "blocked_flags": [
       "--privileged",
-      "/var/run/docker.sock", "/run/docker.sock",
-      "--pid=host", "--pid host",
-      "--network=host", "--network host", "--net=host", "--net host",
-      "--ipc=host", "--ipc host",
-      "--uts=host", "--uts host",
-      "--cap-add=ALL", "--cap-add ALL",
-      "--cap-add=SYS_ADMIN", "--cap-add SYS_ADMIN",
-      "--security-opt=seccomp=unconfined", "seccomp=unconfined",
+      "/var/run/docker.sock",
+      "/run/docker.sock",
+      "--pid=host",
+      "--pid host",
+      "--network=host",
+      "--network host",
+      "--net=host",
+      "--net host",
+      "--ipc=host",
+      "--ipc host",
+      "--uts=host",
+      "--uts host",
+      "--cap-add=ALL",
+      "--cap-add ALL",
+      "--cap-add=SYS_ADMIN",
+      "--cap-add SYS_ADMIN",
+      "--security-opt=seccomp=unconfined",
+      "seccomp=unconfined",
       "apparmor=unconfined"
     ]
   }
