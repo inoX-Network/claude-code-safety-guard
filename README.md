@@ -460,6 +460,7 @@ The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see 
 | `owner_only_commands` | `string[]` | Commands only the owner may run via `!`; hard-blocked for AI Bash. |
 | `blocked_git_ops` | `string[]` | Always-blocked git operations (regex). |
 | `blocked_paths_write` | `string[]` | Paths protected from writes (supports `~`); level-dependent. |
+| `blocked_paths_delete` | `string[]` | Paths that may be **changed but not destroyed** (supports `~`); level-dependent. See below. |
 | `allowed_sudo` | `string[]` | Base allowlist of commands permitted after `sudo`. |
 | `require_confirmation` | `string[]` | Substrings that trigger a desktop notification. |
 | `protected_reads.always_allowed` | `string[]` | Read tool may always access (supports `*` globs). |
@@ -522,6 +523,32 @@ A: Not without an explicit level-1+ override. Public keys (`*.pub`) and `~/.ssh/
 
 **Q: Does prompt-injection detection block anything?**
 A: No — it only writes a warning to stderr. It's a heads-up, not a hard block.
+
+### Changed, but not destroyed
+
+`blocked_paths_write` is all-or-nothing: protect a directory and you also lose
+the ability to write a single file inside it. For data you keep *and* maintain
+— a memory store, a notes directory, an archive you append to — that is the
+wrong trade, and it is the trade that gets the barrier switched off within the
+week.
+
+`blocked_paths_delete` covers the other half. It blocks the verbs that destroy
+(`rm`, `rmdir`, `unlink`, `shred`, `truncate`, `mv`, `dd`, plus `find -delete`,
+`rsync --delete`, `git clean`, and interpreter one-liners like
+`shutil.rmtree`), while writing, editing and appending stay free. Redirects
+deliberately do **not** count: `echo x > file` overwrites, but it is the
+ordinary maintenance path.
+
+`mv` counts as destroying because nothing remains at the origin — a move is a
+delete as far as the source is concerned.
+
+Measured on a real machine before shipping this: with `~/.claude/projects` in
+`blocked_paths_write`, four of four maintenance paths were blocked. With it in
+`blocked_paths_delete`, replaying 963 real audit-log calls, **4 became blocked
+and none became allowed** — two genuine deletions and two false positives from
+a `cd` prefix that shares its line with a delete verb.
+
+Level 1 lifts it for explicitly named paths, like the write list.
 
 ---
 
