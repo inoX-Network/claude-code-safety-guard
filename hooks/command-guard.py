@@ -535,8 +535,8 @@ def command_hits_project_control(command: str) -> tuple[str, bool] | None:
     # file inside -c/-e code is enough: there is no legitimate reason to reach
     # the tool chain's own steering that way.
     cd_bases = _cd_targets(command)
-    if _interpreter_inline_code(command):
-        for tok in _command_path_tokens(command):
+    for block in _inline_code_segments(command):
+        for tok in _command_path_tokens(block):
             hit = project_control_file(tok, cd_bases)
             if hit:
                 return hit
@@ -943,6 +943,43 @@ _ENV_RE = re.compile(r"""(?:^|[/\s='"])\.env(rc|\.[\w.\-]+)?(?=$|[\s'":])""")
 def _normalize_obfuscation(command: str) -> str:
     """Replace IFS-style word-split obfuscation with a real space."""
     return _IFS_RE.sub(" ", command)
+
+
+def _inline_code_segments(command: str) -> list[str]:
+    """The parts of the line that actually CARRY inline interpreter code.
+
+    Why at all: once an inline one-liner was detected anywhere, the guard used
+    to check the WHOLE command against the protected paths. A path that merely
+    sits in an echo next to it brought the line down -- measured against a real
+    audit log: 47 such refusals across 33 sessions, nearly all of them status
+    questions ("is the override active?").
+
+    THE TRAP: split_segments also splits INSIDE quotes. `python3 -c "import os;
+    os.remove(path)"` breaks apart at the semicolon -- the first piece carries
+    the one-liner without the path, the second the path without a recognisable
+    one-liner. Checking each segment naively would let exactly that through.
+    So from a one-liner segment onwards, segments are appended until the quotes
+    balance again.
+
+    No fallback to the whole command is needed: _interpreter_inline_code
+    iterates over the segments itself, so it is true for the whole line exactly
+    when it is true for one segment. A fallback would be dead code -- it was
+    written, and the mutation test exposed it as having no effect.
+    """
+    segments = split_segments(command)
+    hits = []
+    i = 0
+    while i < len(segments):
+        if _interpreter_inline_code(segments[i]):
+            block = segments[i]
+            # Odd quote count means the code continues in the next segment.
+            while ((block.count('"') % 2) or (block.count("'") % 2)) \
+                    and i + 1 < len(segments):
+                i += 1
+                block += " " + segments[i]
+            hits.append(block)
+        i += 1
+    return hits
 
 
 def _interpreter_inline_code(command: str) -> bool:
@@ -1651,8 +1688,8 @@ def command_hits_self_protect(command: str) -> str | None:
     # below misses them. When inline interpreter code references a self-protect
     # path AT ALL, block it: there is no legitimate reason for an AI to touch the
     # guard's own files through -c/-e (reading them is possible via cat/grep).
-    if _interpreter_inline_code(command):
-        ce = expand_path(command)
+    for block in _inline_code_segments(command):
+        ce = expand_path(block)
         for prot in SELF_PROTECT_PATHS:
             p = expand_path(prot).rstrip("/")
             if p in ce and not _dev_unlocked(prot):
@@ -2360,13 +2397,14 @@ def command_hits_protected_read(command: str, rules: dict,
     # below never sees a token that STARTS with the protected path. Scan the full
     # expanded command by substring instead. Only fires for inline interpreters,
     # so a plain `python manage.py` is unaffected.
-    if _interpreter_inline_code(command):
+    inline = " ".join(_inline_code_segments(command))
+    if inline:
         # Reuse the tier logic (always_blocked -> always_allowed -> require_override_1)
         # by extracting path-like substrings from the opaque inline code and running
         # each through check_read_protection — the SAME source of truth as the Read
         # tool, so always_allowed (e.g. ~/.ssh/*.pub) is honoured and we avoid the
         # false positive of blocking a public-key read.
-        for cand in set(_PATHLIKE_RE.findall(command)):
+        for cand in set(_PATHLIKE_RE.findall(inline)):
             blocked, reason, hard = check_read_protection(cand, rules, agent_id,
                                                           session_id)
             if blocked:
