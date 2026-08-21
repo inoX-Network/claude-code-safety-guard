@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy to ~/.claude/guard-config.json. Every key is OPTIONAL — without this file the guard runs on its defaults, in English. Point CLAUDE_GUARD_CONFIG elsewhere to use a different path (test setups only; the production hook ignores environment variables).",
+
+  "version": 1,
+
+  "_comment_language": "Message language. Omit it, or leave it out entirely, and every message is English — English is built into the hook and always available. Set a code and the hook looks for lang/<code>.json next to itself. Missing keys fall back to English, so a half-finished translation still works. Shipped: de.",
+  "language": "de",
+
+  "installation": {
+    "_comment_installation": "Where this machine keeps things. Every entry is optional; omitted ones use the default. Paths may start with ~.",
+
+    "_comment_rules": "Where the rules file lives. Default: ~/.claude/safety-guard/security-rules.json. Set this when you keep your rules in a checkout you version-control. It does two things at once: the hook LOADS from here, and the path is added to self-protection — so pointing it somewhere else does not leave that file writable.",
+    "rules": "~/.claude/safety-guard/security-rules.json",
+
+    "_comment_hook_source": "Where the hook's own sources live. This does NOT change what runs — it adds the directory to self-protection, and dev mode opens exactly it. Set it when the installed hook is a symlink into a checkout, so the protection follows the real files instead of the link.",
+    "hook_source": "~/.claude/hooks",
+
+    "_comment_dev_window": "Flag file for dev mode. Default: ~/.claude/.hook-dev-mode. Its presence and expiry decide whether the owner has opened the supervised window.",
+    "dev_window": "~/.claude/.hook-dev-mode",
+
+    "_comment_lang_dir": "Where the language files live, if not next to the hook. Only needed when the hook is a single file somewhere the lang/ directory could not follow.",
+    "lang_dir": "~/.claude/hooks/lang"
+  }
+}
