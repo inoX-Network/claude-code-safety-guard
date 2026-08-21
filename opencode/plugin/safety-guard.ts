@@ -26,7 +26,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -206,6 +206,23 @@ export const SafetyGuardPlugin = async (ctx: unknown) => {
         return;
       }
 
+      // Eine LEERE Guard-Datei ist der eine Fehlzustand, den der Rueckgabewert
+      // nicht verraet: Python beendet sie mit 0, und 0 heisst "erlaubt". Ein
+      // abgebrochener Kopiervorgang schaltet den Schutz so lautlos ab.
+      // Vorhanden-aber-leer ist etwas anderes als gar nicht installiert --
+      // deshalb blockiert es, statt wie oben zu warnen und durchzulassen.
+      //
+      // BENANNTE GRENZE: Das faengt die kaputte Datei, nicht die manipulierte.
+      // Ein Guard, der zu `pass` zusammengestrichen wurde, liefert ebenfalls 0
+      // und ist von aussen nicht zu unterscheiden. Wogegen das hilft, ist der
+      // Selbstschutz auf die Guard-Quelle -- nicht dieser Adapter.
+      if (statSync(guardPath).size === 0) {
+        throw new Error(
+          `[safety-guard] command-guard.py unter "${guardPath}" ist LEER. ` +
+            `Tool-Call vorsorglich blockiert — ein leerer Guard erlaubt alles.`,
+        );
+      }
+
       // --- Sonderfall apply_patch: n Ziel-Pfade, jeder einzeln durch den Guard ---
       if (toolName === "apply_patch") {
         const patchText = args.patchText;
@@ -240,7 +257,9 @@ export const SafetyGuardPlugin = async (ctx: unknown) => {
             );
           }
 
-          if (r.status === 2) {
+          // ALLES ausser 0 blockiert -- nicht nur die 2. Siehe Begruendung
+          // an der zweiten Auswertung weiter unten.
+          if (r.status !== 0) {
             throw new Error(
               `[safety-guard] apply_patch blockiert — Ziel-Pfad "${pfad}" ` +
                 `ist nicht erlaubt.\n${r.stderr || "Vom Safety-Guard blockiert."}`,
@@ -285,14 +304,33 @@ export const SafetyGuardPlugin = async (ctx: unknown) => {
         );
       }
 
-      if (r.status === 2) {
+      // NUR die 0 erlaubt. Jeder andere Rueckgabewert blockiert.
+      //
+      // Frueher stand hier `r.status === 2`, mit der Begruendung, der Guard
+      // liefere bei echten Blocks immer exakt 2. Das stimmt -- solange der
+      // Guard laeuft. Gemessen an einer beschaedigten Kopie:
+      //
+      //   heile Datei, blockt      exit 2   -> blockiert
+      //   Syntaxfehler in Zeile 1  exit 1   -> lief durch
+      //   leere Datei              exit 0   -> lief durch
+      //   Prozess per Signal tot   status null -> lief durch
+      //
+      // Der Syntaxfehler ist der gefaehrlichste: Er beendet Python, BEVOR eine
+      // einzige Zeile laeuft -- der eingebaute Fail-closed-Fang des Guards
+      // kommt gar nicht erst dran. Ein abgebrochener Kopiervorgang schaltet
+      // den Schutz so lautlos ab.
+      //
+      // Die Gegenrichtung kostet nichts: Der Kern kennt genau zwei Ausgaenge,
+      // sys.exit(0) und sys.exit(2). Ein dritter Wert bedeutet immer einen
+      // Fehlzustand, nie ein legitimes "erlaubt".
+      if (r.status !== 0) {
         // Block: stderr des Guards als Begruendung weiterreichen.
-        throw new Error(r.stderr || "Tool-Call vom Safety-Guard blockiert.");
+        throw new Error(
+          r.stderr ||
+            `Tool-Call vom Safety-Guard blockiert (Rueckgabewert ${r.status}).`,
+        );
       }
 
-      // Exit 0 (oder alles ausser 2) -> erlauben. Der Guard selbst entscheidet
-      // deterministisch; ein unerwarteter Nicht-2-Code wird wie "erlaubt"
-      // behandelt, weil der Guard bei echten Blocks immer exakt 2 liefert.
       return;
     },
   };

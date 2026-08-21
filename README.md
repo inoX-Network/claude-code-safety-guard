@@ -483,6 +483,120 @@ A: No — it only writes a warning to stderr. It's a heads-up, not a hard block.
 
 ---
 
+## Wiring up another CLI — the integration contract
+
+Today, anyone writing an adapter for a third CLI has to read the core to find
+out what it wants. This section is that answer, so the next one is clerical
+work rather than surgery.
+
+The shape is fixed: **the core decides, the adapter translates.** An adapter
+maps tool names and turns a return code into whatever "blocked" means in its
+protocol. It never decides whether something is safe.
+
+Why not teach the core a second protocol instead? Because the risk is
+asymmetric. A broken adapter blocks, and the caller sees the error. A broken
+format detector *inside* the core lets things through: a payload of format A
+mistaken for format B comes back as exit 0 — a denial silently turned into
+permission. The core keeps exactly one exit for that reason.
+
+### What the core expects on stdin
+
+One JSON object:
+
+```json
+{
+  "tool_name": "Bash",
+  "tool_input": { "command": "rm -rf /etc" },
+  "session_id": "optional",
+  "agent_id": "optional"
+}
+```
+
+- `tool_name` — one of the tool names the core knows: `Bash`, `Read`, `Write`,
+  `Edit`, `MultiEdit`, `NotebookEdit`, and the `mcp__*` family. Map your CLI's
+  names onto these.
+- `tool_input` — the payload. `command` for `Bash`, `file_path` for everything
+  that touches a file.
+- `session_id` / `agent_id` — optional, and they matter: overrides are bound to
+  them. Omitting `agent_id` is the safe choice, because the call is then
+  treated as a main session at level 0 and inherits nothing.
+
+**Resolve paths to absolute before the core sees them.** A relative
+`../../.claude/settings.json` cannot be matched against the self-protect list,
+and the core would wave it through. Resolving is the adapter's job because only
+the adapter knows the working directory.
+
+### What it answers
+
+| exit | meaning |
+|---|---|
+| `0` | allowed — run the tool call |
+| `2` | blocked — the reason is on stderr, verbatim, for the user |
+
+There is no third value. `sys.exit(0)` and `sys.exit(2)` are the only exits in
+the core, so **anything else is a failure state, never a quiet yes.**
+
+### The four duties of an adapter
+
+**1. Make no security decision.** Map names, translate return codes. No "this
+one looks harmless, I'll skip it". The moment an adapter starts judging, there
+are two policies to keep in sync, and the weaker one wins.
+
+**2. Block on anything that is not 0.** Not just on 2. Measured against damaged
+copies of the guard:
+
+| state of the guard file | exit | an adapter checking `== 2` |
+|---|---|---|
+| intact, blocks | 2 | blocks — correct |
+| syntax error on line 1 | 1 | **lets it through** |
+| empty file | 0 | **lets it through** |
+| killed by a signal | `null` | **lets it through** |
+
+The syntax error is the worst: it ends Python *before a single line runs*, so
+the core's own fail-closed handler never gets a turn. An interrupted copy
+switches the protection off in silence.
+
+The empty file is the one failure a return code cannot reveal, since 0 means
+allowed. Check the file's size instead. **Named limit:** that catches the broken
+guard, not the tampered one — a guard trimmed down to `pass` also returns 0 and
+looks identical from outside. What answers that is self-protection on the guard
+source, not the adapter.
+
+**3. Catch your own errors into a deny.** If the host CLI is not fail-closed —
+a crashing hook, unreadable output, a timeout — the adapter must turn its own
+failure into a block instead of dying. Measure this before you assume it: how
+the host behaves when its hook misbehaves decides how much the adapter has to
+carry.
+
+**4. Know which tools you are *not* checking, and why.** "Block unknown tools"
+is too blunt: a CLI has tools the core has no rules for, and blocking `glob`
+would make every session useless. The core solves it the other way round, and
+an adapter should copy that: keep a list of the tools that **only read**
+(`_READ_ONLY_TOOLS` in the core), and treat everything else as potentially
+writing. A tool that is not on the harmless list must either be mapped or
+blocked — never skipped by default. That way a tool nobody has thought of yet
+gets checked instead of waved through.
+
+There is one deliberate fail-open: if no guard is installed at all, the adapter
+warns and passes. Blocking there would make the CLI unusable for anyone who
+hasn't set the guard up, and it is not a hole an attacker can create — they
+would have to delete the guard first, which self-protection already covers.
+
+### Worked example
+
+`opencode/plugin/safety-guard.ts` is a complete adapter in 337 lines, and
+the core was never touched for it. It maps four tools onto the core's names,
+handles the multi-file `apply_patch` by sending every target path through
+separately, resolves relative paths against the project directory first, and
+blocks on every non-zero return.
+
+Its tests are the more useful part to copy:
+`opencode/test_broken_guard_denies.mjs` drives the **real** plugin function
+against deliberately damaged guard copies. A rebuilt call path would not have
+found any of the holes above, because the hole was in the real one.
+
+---
+
 ## Contributing
 
 Issues and PRs welcome. If you've been bitten by a similar incident and have patterns to add to the blocklist, please share them.
