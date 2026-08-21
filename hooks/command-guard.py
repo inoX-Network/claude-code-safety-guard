@@ -554,7 +554,7 @@ def command_hits_project_control(command: str) -> tuple[str, bool] | None:
         writing = [cleaned]
     for segment in writing:
         segment = _without_interpreter_program(
-            _without_copy_sources(_with_assignments(segment, cleaned)))
+            _write_target_text(_with_assignments(segment, cleaned)))
         for tok in _command_path_tokens(segment):
             hit = project_control_file(tok, cd_bases)
             if hit:
@@ -745,6 +745,42 @@ _REMOTE_DEST_RE = re.compile(r"^[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?:/\S*$")
 
 _ASSIGNMENT_RE = re.compile(r"(?:^|[\s;&|])([A-Za-z_][A-Za-z_0-9]*)=([^\s;&|]+)")
 _VARIABLE_RE = re.compile(r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)")
+
+
+_REDIRECT_TARGET_RE = re.compile(r"\d*>>?(?![&\d])\s*([^\s;&|]+)")
+
+
+def _write_target_text(segment: str) -> str:
+    """The part of a segment that can CARRY a write target.
+
+    A redirect writes exactly where the arrow points. What stands before it is
+    read -- unless a real write verb sits there, in which case the front half
+    has a target too.
+
+    This closes two things at once, because both hang on the same question:
+
+    A HOLE (measured 2026-08-21): `cp <source> <protected> > log.txt` ran free.
+    Source/target separation goes by position, and with a redirect the last
+    argument is the log file -- so the protected path slid into the source
+    role, i.e. into a read. The redirect is now split off first, which puts the
+    copy target back at the end.
+
+    A FALSE POSITIVE: `sha256sum <protected> > /tmp/sum.txt` was refused even
+    though only the scratch area is written. With no write verb before the
+    arrow, only the redirect target counts.
+
+    Without a redirect NOTHING changes -- that line was missing in the first
+    attempt, a cd segment collapsed to an empty string, and two holes closed
+    earlier the same day stood open again. The refusal half of a DIFFERENT test
+    list caught it.
+    """
+    targets = " ".join(_REDIRECT_TARGET_RE.findall(segment))
+    if not targets:
+        return _without_copy_sources(segment)
+    before = _REDIRECT_TARGET_RE.sub(" ", segment)
+    if _command_is_write(before):
+        return _without_copy_sources(before) + " " + targets
+    return targets
 
 
 def _join_line_continuations(command: str) -> str:
@@ -1126,7 +1162,7 @@ def check_blocked_paths(command: str, paths: list[str]) -> str | None:
         to_check = [cleaned]
     # Substitute assignment values, then drop copy SOURCES (in that order: only
     # once the variable is resolved can you tell whether it was a source).
-    to_check = [_without_copy_sources(_with_assignments(s, cleaned))
+    to_check = [_write_target_text(_with_assignments(s, cleaned))
                 for s in to_check]
 
     # Path order stays outermost: a command touching several protected paths
@@ -1711,7 +1747,7 @@ def command_hits_self_protect(command: str) -> str | None:
     # A copy SOURCE is not a write target here either: taking a working copy of
     # the guard's own file is reading, not an attack. The destination stays
     # checked.
-    writing = [_without_copy_sources(_with_assignments(s, cleaned))
+    writing = [_write_target_text(_with_assignments(s, cleaned))
                for s in writing]
     cleaned = " ".join(writing)
     for prot in SELF_PROTECT_PATHS:
