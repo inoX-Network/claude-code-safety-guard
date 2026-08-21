@@ -16,6 +16,7 @@
   "self_protect.file": "BLOCKIERT: Selbstschutz — '{path}' gehört zum Sicherheitssystem ({hit}) und darf nur vom Eigentümer via ! geändert werden. Kein Override hebt das auf.",
   "self_protect.command": "BLOCKIERT: Selbstschutz — Schreibzugriff auf '{hit}' (Sicherheitssystem). Kein Override möglich, nur der Eigentümer via !.",
   "path.write_blocked": "BLOCKIERT: Schreibzugriff (Write/Edit) auf geschützten Pfad '{path}'. {extra}Benötigt: {needed}. ESKALATION: Der Agent fragt den Koordinator → der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei.",
+  "path.delete_blocked": "BLOCKIERT: Löschen in geschütztem Pfad '{path}' — Ändern und Schreiben bleiben dort erlaubt. {extra}Benötigt: {needed}. ESKALATION: Der Agent fragt den Koordinator → der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei.",
   "who.agent": "Agent {agent}",
   "who.main": "Hauptsitzung",
   "override.none": "{who} hat keinen gültigen Override (Stufe 0).",

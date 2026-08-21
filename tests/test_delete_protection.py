@@ -137,6 +137,68 @@ def _run(tool: str, text: str, rules_path: str,
         return p.returncode
 
 
+def _stderr(tool: str, text: str, rules_path: str) -> str:
+    """Wie _run, aber liefert die Meldung statt des Codes."""
+    payload = {"tool_name": "Bash", "tool_input": {"command": text},
+               "session_id": "delete-protection-test", "hook_event_name": "PreToolUse"}
+    with tempfile.TemporaryDirectory() as ov:
+        env = dict(os.environ)
+        env["CLAUDE_SECURITY_RULES"] = rules_path
+        env["CLAUDE_SUDO_OVERRIDES_DIR"] = ov
+        env["CLAUDE_AUDIT_DIR"] = ov
+        env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
+        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+                           capture_output=True, text=True, env=env)
+        return p.stderr
+
+
+# The message has to name the right thing. Reusing the write wording would tell
+# the user that WRITING is blocked -- while here it is expressly allowed, and
+# they would fetch an override they do not need. Found in a live test; the case
+# list above cannot see it, because it only reads exit codes.
+#
+# Checked LANGUAGE-NEUTRALLY: not against a wording, but against the two
+# messages being distinguishable at all. A test pinned to English wording
+# passes or fails depending on which language pack the installation loads --
+# it would measure the catalogue, not the behaviour.
+# Die zwei Meldungen muessen UNTERSCHEIDBAR sein -- sonst liest der Anwender
+# "Schreibzugriff blockiert", waehrend Schreiben dort erlaubt ist, und holt
+# sich eine Freigabe, die er nicht braucht.
+#
+# Zwei Fallen stecken in diesem Vergleich, beide beim Bauen hineingetappt:
+#
+#   1. Verschiedene Pfade vergleichen beweist nichts -- die Meldungen ENTHALTEN
+#      den Pfad, unterscheiden sich also immer. Der erste Anlauf bestand
+#      deshalb auch gegen eine Fassung ohne den Meldungs-Schluessel.
+#   2. DENSELBEN Pfad in beide Listen zu setzen geht auch nicht: Der
+#      Schreibschutz greift zuerst (absichtlich, damit ein Pfad in beiden
+#      Listen die gewohnte Meldung behaelt), die Loeschmeldung erscheint gar
+#      nicht.
+#
+# Also zwei Pfade, und der Pfad wird vor dem Vergleich herausgerechnet.
+DELETE_ONLY = f"{HOME}/.claude/projects"
+WRITE_ONLY = f"{HOME}/.ssh"
+
+
+def _normalise(message: str, path: str) -> str:
+    """Meldung ohne den Pfad -- damit nur der WORTLAUT verglichen wird."""
+    return (message.replace(path, "<PATH>")
+                   .replace(path.replace(HOME, "~"), "<PATH>").strip())
+
+
+def _messages_differ() -> tuple[str, str]:
+    rules_path = _make_rules()          # WRITE_ONLY steckt schon in den Beispielregeln
+    try:
+        delete_msg = _stderr("Bash", f"rm -rf {DELETE_ONLY}", rules_path)
+        write_msg = _stderr("Bash", f"echo x > {WRITE_ONLY}/config", rules_path)
+    finally:
+        try:
+            os.unlink(rules_path)
+        except OSError:
+            pass
+    return (_normalise(delete_msg, DELETE_ONLY), _normalise(write_msg, WRITE_ONLY))
+
+
 def run_all():
     rules = _make_rules()
     results = []
@@ -148,6 +210,14 @@ def run_all():
         for cid, level, scope, expected in GATING:
             rc = _run("Bash", f"rm -rf {PROTECTED}", rules, level, scope)
             results.append((cid, expected, rc, rc == expected))
+        delete_msg, write_msg = _messages_differ()
+        for cid, ok in [
+            ("delete message differs from write message",
+             bool(delete_msg.strip()) and delete_msg.strip() != write_msg.strip()),
+            ("delete message mentions the path slot", "<PATH>" in delete_msg),
+            ("write message still produced", bool(write_msg.strip())),
+        ]:
+            results.append((cid, "distinct", "ok" if ok else "same/empty", ok))
     finally:
         try:
             os.unlink(rules)
@@ -168,6 +238,15 @@ try:
     @pytest.mark.parametrize("cid,level,scope,expected", GATING)
     def test_delete_protection_gating(cid, level, scope, expected):
         assert _run("Bash", f"rm -rf {PROTECTED}", _RULES, level, scope) == expected, cid
+
+    def test_delete_message_is_distinguishable():
+        delete_msg, write_msg = _messages_differ()
+        assert delete_msg.strip(), "delete produced no message"
+        assert write_msg.strip(), "write produced no message"
+        assert delete_msg.strip() != write_msg.strip(), (
+            "deleting and writing produce the SAME message — the user cannot "
+            "tell that writing is still allowed")
+        assert "<PATH>" in delete_msg, delete_msg[:150]
 
 except ImportError:
     pass

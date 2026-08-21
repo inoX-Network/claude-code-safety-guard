@@ -202,6 +202,17 @@ _MESSAGES = {
         "Needed: {needed}. ESCALATION: agent asks the coordinator → coordinator "
         "decides with the owner about adjusting the override file."
     ),
+    # Deleting needs its own wording. Reusing path.write_blocked would tell the
+    # user that WRITING is blocked -- while in a blocked_paths_delete directory
+    # writing is expressly allowed. Whoever reads that goes and fetches an
+    # override they do not need, and the whole point of the second list is lost.
+    # Found in a live test, invisible to the test list.
+    "path.delete_blocked": (
+        "BLOCKED: deleting inside protected path '{path}' — changing and "
+        "writing there stay allowed. {extra}"
+        "Needed: {needed}. ESCALATION: agent asks the coordinator → coordinator "
+        "decides with the owner about adjusting the override file."
+    ),
     # --- who is asking, and which approval is in force ---
     # These are BUILDING BLOCKS: they go into other messages. Without them in
     # the catalogue a translated refusal stays half English.
@@ -3037,6 +3048,7 @@ def main():
     #    Level 0: no protected path. Level 1: only explicitly granted ones
     #    (allowed_paths). Level 2+: all protected paths (single ops;
     #    recursive-system stays hard-blocked via blocked_patterns).
+    delete_only = False
     blocked_path = check_blocked_paths(command, rules.get("blocked_paths_write", []))
     if not blocked_path:
         # Delete protection: same machinery, different verbs, its own path list.
@@ -3045,6 +3057,8 @@ def main():
         blocked_path = check_blocked_paths(
             command, rules.get("blocked_paths_delete", []),
             detector=_command_deletes)
+        # Remember WHICH list matched, so the message can say the right thing.
+        delete_only = bool(blocked_path)
     if not blocked_path:
         # A docker bind-mount onto a blocked_paths_write entry is, security-wise,
         # a write to that path — same level behaviour as `echo x > /etc/passwd`.
@@ -3053,7 +3067,8 @@ def main():
         allowed, need = path_decision(blocked_path, level, grants)
         if not allowed:
             _audit(input_data, "Bash", command, "block", f"protected_path:{blocked_path}", level)
-            print(msg("path.write_blocked", path=blocked_path, needed=need,
+            print(msg("path.delete_blocked" if delete_only else "path.write_blocked",
+                      path=blocked_path, needed=need,
                       extra=_override_note(override, level, agent_id)),
                   file=sys.stderr)
             sys.exit(2)
