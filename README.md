@@ -258,6 +258,48 @@ These paths can never be written by AI tool calls — neither via Bash nor via W
 
 The list is hardcoded in the hook (not in the JSON rules) on purpose: if it lived in the rules file, the protection list could be edited through itself. The pending directory `~/.claude/.sudo-overrides-pending` is **deliberately not** protected — the AI must be able to drop proposals there.
 
+### Control files, wherever they lie
+
+The list above is anchored to the home directory. The tool chain reads control
+files out of **every project directory** as well, and a settings file there
+grants permissions and registers hooks just the same. So this part is a rule,
+not a list of places — a project created tomorrow is covered without anyone
+adding it:
+
+| Pattern | Strength |
+|---|---|
+| `.claude/settings.json`, `.claude/settings.local.json` | hard |
+| `.claude/hooks/` | hard |
+| `.mcp.json` | hard |
+| `.claude/agents/`, `.claude/skills/`, `.claude/commands/` | level 1 |
+
+A project's own `CLAUDE.md` is deliberately **not** here. 70 writes in two
+months make it everyday work, and a barrier would be switched off within the
+week; its counterweight is version control — see THREAT-MODEL.
+
+### The second tool chain
+
+If another agent CLI runs on the same machine, its control files are a way
+around this guard too — crosswise: Claude Code writes, the other CLI executes.
+For opencode that is not theoretical, because this project ships the adapter
+itself, and `~/.config/opencode/plugin/safety-guard.ts` is what establishes the
+protection over there:
+
+| Pattern (project-local `.opencode/` and global `~/.config/opencode/`) | Strength |
+|---|---|
+| `plugin/`, `plugins/`, `tools/` | hard |
+| `opencode.json`, `opencode.jsonc` (matched by name, like `.mcp.json`) | level 1 |
+| `agent(s)/`, `command(s)/`, `skills/` | level 1 |
+
+`AGENTS.md` stays free, for the same reason as `CLAUDE.md`. `themes/` and the
+runtime data under `~/.local/share/opencode/` are not control and stay free
+too.
+
+**What this costs you:** installing or updating the opencode adapter is now an
+owner action — `!` or dev mode — because it writes into a hard-protected
+directory. That is the point rather than a side effect: nothing else should be
+able to replace the file that does the guarding.
+
 ---
 
 ## Audit log
