@@ -20,5 +20,17 @@
 
     "_comment_lang_dir": "Where the language files live, if not next to the hook. Only needed when the hook is a single file somewhere the lang/ directory could not follow.",
     "lang_dir": "~/.claude/hooks/lang"
+  },
+
+  "_comment_update_check": "Check once a day whether a newer guard is published, and say so at session start. OFF by default and it is the ONLY part of this tool that contacts anything: a security tool that phones home uninvited spends the trust it needs, so this is your decision, not the default. Turn it on and one plain-text request per interval goes to the source below; the answer must look like a date or it is ignored, and nothing fetched is ever executed. It only REPORTS — installing an update stays a separate, deliberate step. Any failure (no network, bad answer, unreadable file) ends in silence rather than a daily complaint.",
+  "update_check": {
+    "_comment_enabled": "true turns the daily check on. Left out or false, nothing leaves this machine.",
+    "enabled": false,
+
+    "_comment_interval_hours": "Hours between two real checks. Default 24. Session starts in between only read a timestamp.",
+    "interval_hours": 24,
+
+    "_comment_source": "Where the published version is read from. Must be https — an unencrypted answer could be tampered with in transit, and this one decides what you get told about security. Point it at your own fork if you track one.",
+    "source": "https://raw.githubusercontent.com/inoX-Network/claude-code-safety-guard/main/VERSION"
   }
 }
