@@ -453,16 +453,60 @@ SELF_PROTECT_PATHS = _BUILTIN_SELF_PROTECT + _installation_self_protect()
 #
 # Hardcoded like _BUILTIN_SELF_PROTECT: a protection that the rules file could
 # switch off is no protection.
+#
+# The same holds one tool chain further along. On a machine that runs a second
+# agent CLI beside Claude Code, that CLI's control files are just as much a way
+# around this guard -- only crosswise: Claude Code writes, the other CLI
+# executes. For opencode the case is not theoretical, because this project
+# ships the adapter itself: ~/.config/opencode/plugin/safety-guard.ts is what
+# establishes the protection under opencode -- and was freely writable until
+# here. One line, and opencode runs unguarded.
+#
+# The cut follows measured everyday use again (145,104 audit lines, minus this
+# project's own test runs):
+#   plugin/, plugins/, tools/  ->  5 writes, all from installing the adapter
+#       itself. Executable code: hard, like .claude/hooks/.
+#   opencode.json / .jsonc     ->  25 writes (setup, pinning, provider swap).
+#       Too important to be free (it registers plugins and grants permissions),
+#       too frequent to be hard -- a barrier that blocks setup gets switched
+#       off. So level 1.
+#   agent(s)/, command(s)/, skills/ -> 8 writes. Level 1, like .claude/agents/.
+#   AGENTS.md                  ->  9 writes, an instruction file. Stays free,
+#       for the same reason as CLAUDE.md: the counterweight is version control,
+#       not a barrier.
+#
+# opencode.json carries no dot-directory and is therefore matched by NAME --
+# admissible for the same reason as .mcp.json: the name belongs to the tool
+# chain, unlike an everyday name such as settings.json. opencode looks for its
+# configuration from the starting directory, so a file of that name is control
+# in a subdirectory too.
+#
+# NOT included: .opencode/bin. What lives there and who writes it could not be
+# established from the binary -- a protection on suspicion would be exactly the
+# too-broad pattern the paragraph above warns about.
 _PROJECT_CONTROL_HARD = [
     (re.compile(r"(?:^|/)\.claude/settings\.json$"), ".claude/settings.json"),
     (re.compile(r"(?:^|/)\.claude/settings\.local\.json$"), ".claude/settings.local.json"),
     (re.compile(r"(?:^|/)\.claude/hooks(?:/|$)"), ".claude/hooks/"),
     (re.compile(r"(?:^|/)\.mcp\.json$"), ".mcp.json"),
+    # opencode: executable code of the second tool chain
+    (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/plugins?(?:/|$)"),
+     ".opencode/plugin/"),
+    (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/tools(?:/|$)"),
+     ".opencode/tools/"),
 ]
 _PROJECT_CONTROL_GATED = [
     (re.compile(r"(?:^|/)\.claude/agents(?:/|$)"), ".claude/agents/"),
     (re.compile(r"(?:^|/)\.claude/skills(?:/|$)"), ".claude/skills/"),
     (re.compile(r"(?:^|/)\.claude/commands(?:/|$)"), ".claude/commands/"),
+    # opencode: configuration and instructions of the second tool chain
+    (re.compile(r"(?:^|/)opencode\.jsonc?$"), "opencode.json"),
+    (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/agents?(?:/|$)"),
+     ".opencode/agent/"),
+    (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/commands?(?:/|$)"),
+     ".opencode/command/"),
+    (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/skills(?:/|$)"),
+     ".opencode/skills/"),
 ]
 
 # Tools that only ever read. Everything else counts as potentially writing, so a
