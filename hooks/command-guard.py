@@ -658,6 +658,31 @@ _COPY_COMMANDS = ("cp", "install")
 _DEST_OPTION_RE = re.compile(r"(?:^|\s)(?:-t\b|--target-directory)")
 
 
+# One split, not six. Every place that cut a command line into segments used to
+# carry its own copy of this pattern, and on 2026-08-20 three of the six did not
+# know the NEWLINE. The consequences ran in both directions: transfers onto a
+# protected server path walked through 39 times because the wrong word sat in
+# tokens[0], while copy commands after a line break were refused for the mirror
+# reason. Six copies of one rule is how that drift happens; the seventh copy is
+# what this function exists to prevent.
+#
+# `keep` is not convenience. Two callers reassemble the line afterwards and need
+# the separators back in the result — a shared helper that could not do both
+# would be wrong at the first call site that puts the line together again.
+_SEGMENT_RE = re.compile(r"&&|\|\||[;|\n]")
+_SEGMENT_KEEP_RE = re.compile(r"(&&|\|\||[;|\n])")
+
+
+def split_segments(command: str, keep: bool = False) -> list[str]:
+    """Cut a command line into the parts a shell would run as separate commands.
+
+    Separators: `&&`, `||`, `;`, `|` and the newline. With `keep=True` the
+    separators stay in the result, so the caller can join the parts back into a
+    line without losing what sat between them.
+    """
+    return (_SEGMENT_KEEP_RE if keep else _SEGMENT_RE).split(command)
+
+
 def _without_copy_sources(command: str) -> str:
     """Drop the source arguments of plain copy commands.
 
@@ -668,7 +693,7 @@ def _without_copy_sources(command: str) -> str:
     Example: `cp -r ~/.config /tmp/x` becomes `cp -r /tmp/x`. The directory is
     only read; the write goes to /tmp.
     """
-    parts = re.split(r"(&&|\|\||[;|\n])", command)
+    parts = split_segments(command, keep=True)
     out = []
     for part in parts:
         tokens = part.split()
@@ -689,7 +714,7 @@ def _only_copy_sources(command: str) -> str:
     destination comes into being. `cp .env.example .env` therefore reads a
     template — that an environment file is CREATED is not a read.
     """
-    parts = re.split(r"(&&|\|\||[;|\n])", command)
+    parts = split_segments(command, keep=True)
     out = []
     for part in parts:
         tokens = part.split()
@@ -723,7 +748,7 @@ def _remote_copy_writes(command: str) -> bool:
     The same gap sat in both copy-source helpers, where it worked the other way
     round and produced false alarms: a copy SOURCE counted as a write target as
     soon as any command preceded it on its own line."""
-    for segment in re.split(r"&&|\|\||[;|\n]", command):
+    for segment in split_segments(command):
         tokens = segment.split()
         if len(tokens) < 2:
             continue
@@ -807,7 +832,7 @@ def _recursive_read_targets(command: str) -> list[str]:
     counts as its argument — which keeps `sudo tar czf x ~/.ssh` caught.
     """
     targets = []
-    for segment in re.split(r"&&|\|\||[;|\n]", command):
+    for segment in split_segments(command):
         tokens = [t.strip("'\"()") for t in segment.split()]
         tokens = [t for t in tokens if t]
         reading = False
@@ -888,7 +913,7 @@ def _interpreter_inline_code(command: str) -> bool:
     # `mkdir -p /tmp/a && python3 tool.py` count as inline code — the -p belonged
     # to mkdir. Text instead of action, the same defect class this guard exists
     # to avoid.
-    for segment in re.split(r"&&|\|\||[;|\n]", command):
+    for segment in split_segments(command):
         toks = [t.strip("'\"") for t in segment.split()]
         for i, tok in enumerate(toks):
             if os.path.basename(tok) not in _INTERPRETERS:
@@ -1342,7 +1367,7 @@ def check_lifecycle(command: str) -> str | None:
     for hit in _PASSTHROUGH_RE.finditer(command):
         to_check.append(hit.group(1))
     for text in to_check:
-        for segment in re.split(r"&&|\|\||[;|\n]", text):
+        for segment in split_segments(text):
             rest = _is_container_command(segment)
             if rest is None:
                 continue
@@ -1849,12 +1874,75 @@ def docker_mount_blocked_path(command: str, blocked_paths_write: list[str]) -> s
     return None
 
 
+# Notification id reused for every install notice, so they replace one another
+# instead of stacking up.
+_NOTIFY_REPLACE_ID = "20500050"
+
+
 def check_confirmation(command: str, patterns: list[str]) -> bool:
-    """Check whether the command requires confirmation (desktop notification)."""
-    for pattern in patterns:
-        if pattern in command:
-            return True
+    """Whether the command actually INSTALLS something (desktop notification).
+
+    The patterns are two words (`pip install`, `pacman -S`), and they used to be
+    matched as a plain substring against the whole line. So the notification
+    fired whenever the words appeared as TEXT — in a grep expression, a comment,
+    a commit message, a file path. Measured over 86049 logged commands: 455
+    notifications, 341 of them with the words merely inside some other word.
+
+    Now the words have to appear as CONSECUTIVE TOKENS. That keeps
+    `$VENV/bin/python -m pip install …` recognised (basename comparison), while
+    `echo "pip install x"` no longer fires.
+
+    Passed-through content is checked too, and that is not a nicety: of those
+    341, a measured 180 were REAL installations sitting inside
+    `docker exec … sh -c "pip install …"`. A token rule that ignored quotes
+    would not have removed false alarms, it would have silenced exactly the
+    container installs — which are the majority of real ones on this machine.
+    """
+    texts = [command]
+    if _SHELL_PASSTHROUGH_RE.search(command):
+        # Behind a pass-through the quotes are not a fence, they are packaging:
+        # the install runs on the far side. Extracting the quoted section fails
+        # on nesting — measured, `sh -c 'printf "x" && pip install y'` yields
+        # only `printf `, and 13 real container installs were missed that way.
+        #
+        # So instead of parsing quotes, they are dropped and the words are read
+        # as tokens. That is deliberately COARSER than a shell, and coarse in
+        # the safe direction: at worst `ssh host "echo 'pip install'"` notifies
+        # once too often. A notification too many costs a glance; a missing one
+        # defeats the purpose.
+        texts.append(command.replace('"', " ").replace("'", " "))
+
+    for text in texts:
+        for segment in split_segments(text):
+            tokens = [os.path.basename(t) for t in segment.split()]
+            for pattern in patterns:
+                words = pattern.split()
+                if not words:
+                    continue
+                for i in range(len(tokens) - len(words) + 1):
+                    if all(_word_matches(tok, word) for tok, word
+                           in zip(tokens[i:i + len(words)], words)):
+                        return True
     return False
+
+
+def _word_matches(token: str, word: str) -> bool:
+    """Compare one token against one word of a pattern.
+
+    Exact, with one exception: short flags bundle. `pacman -Syu` is an install
+    and must match the pattern `pacman -S`, the same way `-Rns` is a removal.
+    Measured — a strictly exact comparison silenced real system upgrades that
+    the old substring rule still caught by accident.
+
+    The trade is deliberate: `pacman -Si` merely queries and now notifies too.
+    A surplus notification costs a glance, a missing one costs the point of
+    having it. Long options (--sync) stay exact; only single-dash bundles are
+    expanded.
+    """
+    if (len(word) == 2 and word.startswith("-") and word[1].isalpha()
+            and token.startswith("-") and not token.startswith("--")):
+        return word[1] in token[1:]
+    return token == word
 
 
 def check_injection(command: str, keywords: list[str]) -> list[str]:
@@ -2705,6 +2793,12 @@ def main():
         try:
             subprocess.Popen(
                 ["notify-send", "-u", "normal", "-t", "5000",
+                 # A fixed replace-id, so a run of installs updates ONE
+                 # notification instead of stacking. Without it a single
+                 # measurement run produced 316 popups in a row. The id is
+                 # deliberately far above what a session's counter reaches,
+                 # so this cannot replace another application's notification.
+                 "-r", _NOTIFY_REPLACE_ID,
                  "Claude Code — Package Installation",
                  f"Command being executed:\n{command[:200]}"],
                 stdout=subprocess.DEVNULL,
