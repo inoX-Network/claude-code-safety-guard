@@ -457,7 +457,7 @@ The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see 
 | Key | Type | Description |
 |-----|------|-------------|
 | `blocked_patterns` | `string[]` | Always-blocked patterns. Each entry is treated as a regex if it contains regex metacharacters, otherwise as a literal substring. A literal pipe must be written `\|`. |
-| `owner_only_commands` | `string[]` | Commands only the owner may run via `!`; hard-blocked for AI Bash. |
+| `owner_only_commands` | `string[]` | Commands only the owner may run via `!`; hard-blocked for AI Bash. Matched at the **command position**, so the same name stays usable as text — in a search pattern, a note, or a file name. See below. |
 | `blocked_git_ops` | `string[]` | Always-blocked git operations (regex). |
 | `blocked_paths_write` | `string[]` | Paths protected from writes (supports `~`); level-dependent. |
 | `blocked_paths_delete` | `string[]` | Paths that may be **changed but not destroyed** (supports `~`); level-dependent. See below. |
@@ -549,6 +549,37 @@ and none became allowed** — two genuine deletions and two false positives from
 a `cd` prefix that shares its line with a delete verb.
 
 Level 1 lifts it for explicitly named paths, like the write list.
+
+### A name is not a call
+
+`owner_only_commands` protects the approval channel itself: the AI must never
+run the grant-override script or the dev-window switch, or it could approve
+itself. That part is not negotiable and has no override.
+
+What *is* negotiable is how the name is recognised. Searching the whole line
+for it turns every mention into a rejection — and the mentions are constant,
+because the flag file is usually named after the command. Measured on a real
+machine: of nine harmless forms, eight were rejected. Reading the flag file,
+`ls` on it, the name in a note, the name as a search pattern. The block did
+not prevent the call; it prevented *checking whether an approval exists*.
+
+The name is therefore matched at the **command position** of each segment,
+after privilege elevation, environment assignments and options, and compared
+by base name so a full path hits the same. If something else holds that
+position, what it is decides: a pure print or read tool (`cat`, `ls`, `grep`,
+`echo`, `head`, …) executes nothing, so the name behind it is text. Anything
+else counts as executing, and there the name is searched throughout the
+segment — which catches `bash -c`, `timeout`, `watch`, `xargs` and every
+wrapper that has yet to be invented. There is deliberately **no allowlist of
+wrappers**; that direction fails open.
+
+Three tools that look like text tools are excluded on purpose: `awk` (can
+execute via `system()`), `sed` (via the `e` flag) and `git` (via
+`-c alias.x='!cmd'` or the pager). Writing a commit message that mentions such
+a name works the recommended way anyway — put the message in a file.
+
+Replaying 77718 distinct logged commands: **20 previously rejected commands now
+pass, across 18 sessions, and none is newly blocked.**
 
 ---
 
