@@ -1937,7 +1937,15 @@ def command_hits_self_protect(command: str) -> str | None:
         ce = expand_path(block)
         for prot in SELF_PROTECT_PATHS:
             p = expand_path(prot).rstrip("/")
-            if p in ce and not _dev_unlocked(prot):
+            # Path boundary as in the write branch below. Without it a plain
+            # substring match drags in every NEIGHBOUR: the directory holding
+            # override PROPOSALS carries the name of the active one as its
+            # prefix, and so does a backup copy of a shell startup file.
+            # Measured against a real audit log: anyone checking their own
+            # override proposal for valid JSON was refused by self-protection --
+            # the guard blocked the use of its own escalation path.
+            if (re.search(re.escape(p) + _PATH_BOUNDARY, ce)
+                    and not _dev_unlocked(prot)):
                 return prot
 
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
