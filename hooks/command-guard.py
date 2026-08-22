@@ -505,6 +505,35 @@ _PROJECT_CONTROL_HARD = [
      ".opencode/plugin/"),
     (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/tools(?:/|$)"),
      ".opencode/tools/"),
+    # Antigravity (agy): code execution of the third tool chain.
+    # hooks.json is the counterpart to .claude/hooks/ -- the documentation
+    # embedded in the binary names "pre-tool execution" as its example.
+    # Two locations, because the CLI reads both: config/ is the shared one,
+    # antigravity-cli/ the legacy one (still read, per its changelog).
+    (re.compile(r"(?:^|/)\.gemini/(?:config|antigravity-cli)/hooks\.json$"),
+     "~/.gemini/hooks.json"),
+    (re.compile(r"(?:^|/)\.gemini/config/mcp_config\.json$"),
+     "~/.gemini/config/mcp_config.json"),
+    (re.compile(r"(?:^|/)\.gemini/config/plugins(?:\.json|/|$)"),
+     "~/.gemini/config/plugins/"),
+    # Per-project permissions -- these take PRECEDENCE over the global
+    # setting, so they are the stronger lever of the two.
+    (re.compile(r"(?:^|/)\.gemini/config/projects(?:/|$)"),
+     "~/.gemini/config/projects/"),
+    # config.json carries the list of active plugins ("plugins map keyed by
+    # the plugin's directory name"). Writing it enables a plugin that shipped
+    # with "disabled": true.
+    (re.compile(r"(?:^|/)\.gemini/config/config\.json$"),
+     "~/.gemini/config/config.json"),
+    (re.compile(r"(?:^|/)\.gemini/antigravity-cli/settings\.json$"),
+     "~/.gemini/antigravity-cli/settings.json"),
+    (re.compile(r"(?:^|/)\.gemini/(?:settings|trustedFolders)\.json$"),
+     "~/.gemini/settings.json"),
+    # Workspace-local. FOUR spellings, all four documented:
+    # .agents/, .agent/, _agents/, _agent/.
+    (re.compile(r"(?:^|/)[._]agents?/hooks\.json$"), ".agents/hooks.json"),
+    (re.compile(r"(?:^|/)[._]agents?/mcp_config\.json$"), ".agents/mcp_config.json"),
+    (re.compile(r"(?:^|/)[._]agents?/plugins(?:\.json|/|$)"), ".agents/plugins/"),
 ]
 _PROJECT_CONTROL_GATED = [
     (re.compile(r"(?:^|/)\.claude/agents(?:/|$)"), ".claude/agents/"),
@@ -518,6 +547,25 @@ _PROJECT_CONTROL_GATED = [
      ".opencode/command/"),
     (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/skills(?:/|$)"),
      ".opencode/skills/"),
+    # Antigravity: instructions for future runs. They do not execute anything
+    # themselves, but they can tell the model to do anything -- so tier 1,
+    # like .claude/agents/.
+    #
+    # Globally ONE pattern is enough: ~/.gemini/config/ is documented as the
+    # global customization root ("Global Configuration (Machine-Local)"); no
+    # runtime data lives there. This also covers skills/, workflows/ and
+    # global_workflows/ -- and whatever a future release puts there. That gap
+    # has cost us once already: new version, new files, old pattern.
+    (re.compile(r"(?:^|/)\.gemini/config(?:/|$)"), "~/.gemini/config/"),
+    # Workspace-local there is deliberately NO such catch-all: .agents/ is
+    # also the working directory of the sub-agents (ORIGINAL_REQUEST.md,
+    # phase_*_results.json, segment_*/handoff_*.md). A blanket pattern on
+    # .agents/ would cripple the CLI -- hence only the named subdirectories,
+    # exactly as for .opencode/.
+    (re.compile(r"(?:^|/)[._]agents?/skills(?:\.json|/|$)"), ".agents/skills/"),
+    (re.compile(r"(?:^|/)[._]agents?/rules(?:/|$)"), ".agents/rules/"),
+    (re.compile(r"(?:^|/)[._]agents?/agents(?:/|$)"), ".agents/agents/"),
+    (re.compile(r"(?:^|/)[._]agents?/workflows(?:/|$)"), ".agents/workflows/"),
 ]
 
 # Tools that only ever read. Everything else counts as potentially writing, so a

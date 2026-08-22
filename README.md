@@ -300,6 +300,44 @@ owner action — `!` or dev mode — because it writes into a hard-protected
 directory. That is the point rather than a side effect: nothing else should be
 able to replace the file that does the guarding.
 
+### The third tool chain — Antigravity (`agy`)
+
+The same reasoning covers Antigravity, and it is covered whether or not an
+adapter for it ever exists. Its `hooks.json` is the sharp end: the
+documentation embedded in the binary lists it under *"Lifecycle Event —
+running scripts/commands at specific agent lifecycle points (e.g. pre-tool
+execution)"*. That is the exact counterpart to `.claude/hooks/`, and
+Antigravity brings no guard of its own.
+
+| Pattern | Strength |
+|---|---|
+| `~/.gemini/{config,antigravity-cli}/hooks.json` | hard |
+| `~/.gemini/config/mcp_config.json`, `plugins/`, `plugins.json` | hard |
+| `~/.gemini/config/projects/` (takes precedence over the global setting) | hard |
+| `~/.gemini/config/config.json` (enables plugins shipped disabled) | hard |
+| `~/.gemini/{settings,trustedFolders}.json`, `antigravity-cli/settings.json` | hard |
+| `~/.gemini/config/` — everything else there | level 1 |
+| project-local `[._]agents?/`: `hooks.json`, `mcp_config.json`, `plugins/` | hard |
+| project-local `[._]agents?/`: `skills/`, `rules/`, `agents/`, `workflows/` | level 1 |
+
+All four spellings of the workspace root are documented and covered:
+`.agents/`, `.agent/`, `_agents/`, `_agent/`.
+
+`AGENTS.md` and `GEMINI.md` stay free, for the same reason as `CLAUDE.md`.
+Runtime data under `~/.gemini/antigravity-cli/` — `conversations/`, `brain/`,
+`history.jsonl`, `log/`, `cache/` — is not control and stays free too.
+
+Two cuts are worth spelling out, because both were tempting to get wrong:
+
+- **No blanket pattern on `.agents/`.** That directory is also the sub-agents'
+  working directory (`ORIGINAL_REQUEST.md`, `phase_*_results.json`,
+  `segment_*/handoff_*.md`). Locking it wholesale would cripple the CLI, so
+  only the named subdirectories are covered.
+- **One catch-all at level 1 for `~/.gemini/config/`.** That directory *is* the
+  documented global customization root and holds no runtime data, so a broad
+  pattern is safe there — and it also covers whatever a future release puts
+  in it. Enumerating only today's files has already cost us once.
+
 ---
 
 ## Audit log
