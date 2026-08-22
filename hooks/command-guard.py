@@ -439,7 +439,58 @@ def _installation_self_protect() -> list[str]:
     return list(dict.fromkeys(alle))
 
 
-SELF_PROTECT_PATHS = _BUILTIN_SELF_PROTECT + _installation_self_protect()
+# The shell's startup files — the ground every command check stands on.
+#
+# This guard judges the TEXT of a command. What a name means in the shell that
+# actually runs it, the guard cannot see. A single line like
+#
+#     function python3() { ... }
+#
+# in a startup file turns every later "python3 ..." into something else, while
+# the guard keeps reading the harmless text and lets it through. That is not a
+# way around ONE rule; it is the ground under all of them.
+#
+# MEASURED, not assumed: on the machine this was found on, the tool chain
+# starts /bin/zsh, and although $- reports a non-interactive shell, every alias
+# and function from ~/.zshrc is defined in it. The file is loaded on every
+# single command invocation.
+#
+# Cut hard, also from measurement (147k audit lines over 2.5 months): six of
+# the seven files had ZERO writes. ~/.zshrc had twelve, eight of them from one
+# clean-up session (a prompt injection and a key were removed). Four remain
+# over 2.5 months, the last one four weeks before. That is not everyday work —
+# a hard block here is not hit often enough to get switched off. The owner's
+# own `!` bypasses the guard anyway.
+#
+# The chains are listed IN FULL, including links with no measured write at all.
+# Half a chain is an open door: whoever cannot write .zshrc writes .zlogin
+# instead. That is the same mistake the read protection and the project-local
+# control files already demonstrated — protection anchored to fixed points
+# rather than to a rule.
+#
+# NOT here: the system-wide equivalents (/etc/profile, /etc/zsh/*,
+# /etc/profile.d/). Measured: they already block via the system-path guard.
+_SHELL_STARTUP_FILES = [
+    # zsh
+    "~/.zshenv",                    # read by EVERY zsh, non-interactive too
+    "~/.zprofile",
+    "~/.zshrc",
+    "~/.zlogin",
+    "~/.zlogout",
+    # bash
+    "~/.bash_profile",
+    "~/.bash_login",
+    "~/.bashrc",
+    "~/.bash_logout",
+    # read by sh and bash
+    "~/.profile",
+    # fish
+    "~/.config/fish/config.fish",
+    "~/.config/fish/conf.d",
+]
+
+SELF_PROTECT_PATHS = (_BUILTIN_SELF_PROTECT + _SHELL_STARTUP_FILES
+                      + _installation_self_protect())
 
 # Project-local control files — a RULE, not a list of places.
 #

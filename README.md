@@ -258,6 +258,34 @@ These paths can never be written by AI tool calls — neither via Bash nor via W
 
 The list is hardcoded in the hook (not in the JSON rules) on purpose: if it lived in the rules file, the protection list could be edited through itself. The pending directory `~/.claude/.sudo-overrides-pending` is **deliberately not** protected — the AI must be able to drop proposals there.
 
+### The shell's startup files
+
+The same list also covers the shell startup files, and for a reason worth stating plainly: this guard judges the **text** of a command. What a name means in the shell that actually runs it, the guard cannot see. One line —
+
+```sh
+function python3() { ... }
+```
+
+— in a startup file turns every later `python3 ...` into something else, while the guard keeps reading the harmless text and letting it through. That is not a way around one rule; it is the ground under all of them.
+
+| Protected | |
+|---|---|
+| zsh | `~/.zshenv`, `~/.zprofile`, `~/.zshrc`, `~/.zlogin`, `~/.zlogout` |
+| bash | `~/.bash_profile`, `~/.bash_login`, `~/.bashrc`, `~/.bash_logout` |
+| sh | `~/.profile` |
+| fish | `~/.config/fish/config.fish`, `~/.config/fish/conf.d/` |
+
+**Reading stays free** on every route — `cat`, `grep`, `sed -n`, `Read`, and copying a backup *outward*. A protection that locks you out of inspecting your own shell keeps you from proving a finding, and gets switched off. Only writing blocks.
+
+Two things worth knowing before this surprises you:
+
+- A backup **next to** a protected file is fine (`cp ~/.zshrc ~/.zshrc.bak` — the `.bak` carries a different name and is not a startup file). A backup **into** a protected directory is not (`conf.d/a.fish.bak` lands inside `conf.d/`).
+- The system-wide equivalents (`/etc/profile`, `/etc/zsh/*`, `/etc/profile.d/`) are not in this list because they already block via the system-path guard.
+
+Why hard rather than level 1: the chains are listed in full, including links nobody has ever written to, because half a chain is an open door — whoever cannot write `.zshrc` writes `.zlogin`. On the machine this was built for, six of the seven files had **zero** writes in 2.5 months of audit log, and `~/.zshrc` had twelve, eight of them from a single clean-up session. A block that is hit roughly twice a month does not get switched off. Your own `!` bypasses the guard regardless.
+
+If your setup does touch these files often, `~/.zshrc` is the one to consider moving to level 1 — it was the only one with any measured traffic at all.
+
 ### Control files, wherever they lie
 
 The list above is anchored to the home directory. The tool chain reads control
