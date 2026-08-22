@@ -49,7 +49,8 @@ If you used the earlier version, here is what changed:
 
 - **Blocked patterns** — `rm -rf /`, `mkfs`, `chmod 777`, fork bombs, pipe-to-shell, recursive `chown`/`chmod`/`chgrp` on system paths. **Always** blocked, even with an active override.
 - **Git safety** — `git reset --hard`, force-push (incl. `--force-with-lease`), `commit --no-verify`, `commit --amend`, `git add -A` / `git add .`, and writing `git config` are **always** blocked. Force-push to `main`/`master` has its own dedicated rule on top.
-- **Self-protection** — The AI cannot write the hook, the rules file, the rules document, the active override directory, or the `bin/` scripts — via Bash **or** Write/Edit. No override lifts this.
+- **Self-protection** — The AI cannot write the hook, the rules file, the rules document, the active override directory, or the `bin/` scripts — via Bash **or** Write/Edit. No override lifts this. It reaches beyond this repo's own files: the **shell's startup files** (`.zshrc`, `.bashrc`, `.profile`, …) are the ground every command check stands on, and the **control files of other CLIs** (opencode, Antigravity) hand out the same power one directory over.
+- **Delete protection** — A second path list for paths that may be *changed* but never *removed*. Write protection would block four maintenance paths to stop one deletion; this separates the two.
 - **Owner-only commands** — The approval and dev-mode scripts are hard-blocked for AI Bash calls, so the AI cannot grant itself rights.
 - **Protected paths** — Level-dependent write protection for `~/.ssh`, `~/.gnupg`, `/etc/shadow`, `/boot`, `/usr/bin`, etc.
 - **Credential & `.env` read protection** — The Read tool cannot reach private keys, cloud credentials, or `.env` files without a level-1+ override. Public keys and SSH config stay open.
@@ -169,6 +170,15 @@ delete". Knowing this contract avoids surprise:
   write context. Inside a single segment the coarseness remains — `sha256sum
   <protected file> > /tmp/sum.txt` is refused although only the redirect target
   is written.
+- **Interpreter one-liners are matched literally.** The inline branch compares
+  the expanded command text against the protected paths. It does **not** resolve
+  shell variables: `VAR=<protected dir>; python3 -c "open('$VAR/x')"` is not
+  matched, while the same path written out is. The ordinary write check *does*
+  resolve such assignments — so the two branches differ here. Measured, both
+  directions. Assembling a path from pieces (`'/et' + 'c/passwd'`) escapes both,
+  which is the general obfuscation limit named in THREAT-MODEL.md: no
+  substring layer tames a Turing-complete shell. Sandbox and least privilege are
+  the answer to that one, not the hook.
 
 ---
 
@@ -257,6 +267,20 @@ These paths can never be written by AI tool calls — neither via Bash nor via W
 | `~/.claude/rules` | the rules document(s) |
 
 The list is hardcoded in the hook (not in the JSON rules) on purpose: if it lived in the rules file, the protection list could be edited through itself. The pending directory `~/.claude/.sudo-overrides-pending` is **deliberately not** protected — the AI must be able to drop proposals there.
+
+**A neighbour is not the path.** Every protected entry is matched with a path
+boundary, so a directory whose name merely *starts* with a protected one stays
+free: `~/.claude/.sudo-overrides-pending` (proposals), a `.zshrc.bak`, a
+`hooks-old/`. Without that boundary the prefix match drags them all in.
+
+This matters more than it sounds, because the guard has **two** places that
+compare against this list: the ordinary write check, and a separate branch for
+interpreter one-liners (`python3 -c`, `node -e`) — inline code carries no shell
+write indicator and no token boundary, so a path inside `open("...")` has to be
+matched as a substring. Both branches need the boundary. For a while only one
+had it, and the branch that lacked it refused exactly the thing the paragraph
+above promises: dropping and checking an override proposal. **The guard was
+blocking the use of its own escalation path.**
 
 ### The shell's startup files
 
@@ -701,6 +725,27 @@ the adapter knows the working directory.
 
 There is no third value. `sys.exit(0)` and `sys.exit(2)` are the only exits in
 the core, so **anything else is a failure state, never a quiet yes.**
+
+**But `2` is ambiguous, and that costs more than it looks.** The core catches
+unexpected errors in itself and exits fail-closed — with the same `2`. That is
+right for safety: without the net, every crash would be a silent pass. It also
+means **a crash is indistinguishable from a considered denial** for anything
+that checks the exit code, which is what a test suite does.
+
+We learned this the expensive way. A crash in the *most common* branch of the
+write check survived 13 local test lists and 2993 test cases here, because every
+one of them asserted "blocked" and got it. The user saw a stack trace instead of
+"which path, which grant is missing" — fail-closed held, the *explanation* was
+lost.
+
+If you write tests against this guard, assert on the **reason**, not only the
+exit code: a denial that carries a crash marker is not a denial. See
+`tests/test_no_crash_on_real_paths.py`, which does exactly that across eight
+protection classes and in both languages.
+
+The general lesson outstrips this project: **wherever something catches
+fail-closed, it needs a second measurement that makes the caught thing
+visible.** A safety net that swallows errors also hides them.
 
 ### The four duties of an adapter
 
