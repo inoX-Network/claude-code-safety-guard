@@ -1183,6 +1183,98 @@ def _normalize_obfuscation(command: str) -> str:
     return _IFS_RE.sub(" ", command)
 
 
+# Heredoc bodies: text, or command? The question is not WHETHER there is a
+# heredoc, but WHERE its body goes.
+#
+#   cat <<'E' ... E              to stdout, then gone          -> text
+#   cat > file <<'E' ... E       becomes a FILE                -> check it
+#   cat <<'E' | bash ... E       gets EXECUTED                 -> check it
+#   python3 <<'E' ... E          gets EXECUTED                 -> check it
+#
+# The first case used to cost anyone trying to DOCUMENT a refused command — in
+# a finding, an error report, a message to another project. Which is the very
+# path a false positive is reported through. Reported by a peer who ran into it
+# doing exactly that.
+#
+# The file form has to stay checked for a reason that is easy to miss: whatever
+# is written into a file can be executed later, and by then the guard sees only
+# the script invocation and no longer knows the contents.
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _heredoc_body_goes_somewhere(head: str) -> bool:
+    """Does the body leave stdout? Redirect, or an interpreter receiving it."""
+    if re.search(r"\d*>>?\s*\S", head):           # > file, >> file
+        return True
+    # Check at the COMMAND POSITION, not by searching the text: `cat <<E |
+    # grep -c python` carries the word python as a SEARCH PATTERN, not as a
+    # command. Comparing across all words held that for an interpreter and
+    # refused a harmless filter — text instead of action, inside the fix
+    # itself. Exactly the class of error this guard is built against.
+    #
+    # No separate test for the pipe: it is not the pipe that matters but who
+    # is on the other end, and the loop below sees those words too. A check on
+    # "|" was in here first and stayed inert under mutation.
+    for part in re.split(r"\|\||&&|[|;]", head):
+        toks = [x.strip("'\"") for x in part.split()]
+        i = 0
+        while i < len(toks) and (toks[i].startswith("-") or "=" in toks[i]
+                                 or os.path.basename(toks[i]) in ("sudo", "env",
+                                                                  "nohup", "time")):
+            i += 1
+        if i >= len(toks):
+            continue
+        name = os.path.basename(toks[i])
+        if name in _INTERPRETERS or name in ("bash", "sh", "zsh", "ksh", "dash"):
+            return True
+    return False
+
+
+def _without_stdout_heredocs(command: str) -> str:
+    """Drops heredoc bodies that only go to stdout.
+
+    Everything else stays untouched — in any doubt the whole command is still
+    checked (fail-closed). In particular the body stays when the head
+    redirects, or is itself an interpreter.
+    """
+    if "<<" not in command:
+        return command
+    lines = command.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        hit = _HEREDOC_RE.search(line)
+        if not hit:
+            out.append(line)
+            i += 1
+            continue
+        marker = hit.group(2)
+        body = []
+        j = i + 1
+        while j < len(lines) and lines[j].strip() != marker:
+            body.append(lines[j])
+            j += 1
+        if j >= len(lines):
+            # No terminator found: touch nothing (fail-closed).
+            out.append(line)
+            i += 1
+            continue
+        if not _heredoc_body_goes_somewhere(line):
+            out.append(line)
+            out.append(f"# (quoted text, {len(body)} lines)")
+        else:
+            # The body goes somewhere, so it belongs WITH the head, not on its
+            # own lines. Segment splitting cuts at newlines; kept apart, the
+            # inline-code detection would see `python3 <<E` without the path
+            # and the path without a recognisable interpreter. That is exactly
+            # where the hole was.
+            out.append(" ".join([line] + [b.strip() for b in body]))
+        out.append(lines[j])
+        i = j + 1
+    return "\n".join(out)
+
+
 def _inline_code_segments(command: str) -> list[str]:
     """The parts of the line that actually CARRY inline interpreter code.
 
@@ -1238,6 +1330,12 @@ def _interpreter_inline_code(command: str) -> bool:
             if os.path.basename(tok) not in _INTERPRETERS:
                 continue
             if any(rest in _INLINE_CODE_FLAGS for rest in toks[i + 1:]):
+                return True
+            # An interpreter also reads code from its INPUT: `python3 <<E`
+            # executes the heredoc body with no -c at all. Found while building
+            # the test list for the heredoc false positive — the body ran free
+            # because no inline flag appeared.
+            if any(rest.startswith("<<") for rest in toks[i + 1:]):
                 return True
     return False
 
@@ -3089,6 +3187,11 @@ def main():
     # De-obfuscate IFS-style word-splitting once, so EVERY downstream check
     # (blocked_patterns, paths, sudo, self-protect, reads) sees real whitespace.
     command = _normalize_obfuscation(command)
+
+    # Quoted text is not a command: drop heredoc bodies that only reach stdout.
+    # Bodies going into a file, through a pipe into a shell, or straight into
+    # an interpreter stay.
+    command = _without_stdout_heredocs(command)
 
     rules = load_rules()
     if not rules:
