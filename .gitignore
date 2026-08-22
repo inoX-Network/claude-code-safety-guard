@@ -30,3 +30,4 @@ session-state.json
 # interne Pfade und Namen, die in einem oeffentlichen Repo nichts zu suchen haben.
 # Nicht wieder hierher legen.
 graph/
+tests/benches/
