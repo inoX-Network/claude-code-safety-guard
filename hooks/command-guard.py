@@ -439,7 +439,58 @@ def _installation_self_protect() -> list[str]:
     return list(dict.fromkeys(alle))
 
 
-SELF_PROTECT_PATHS = _BUILTIN_SELF_PROTECT + _installation_self_protect()
+# The shell's startup files — the ground every command check stands on.
+#
+# This guard judges the TEXT of a command. What a name means in the shell that
+# actually runs it, the guard cannot see. A single line like
+#
+#     function python3() { ... }
+#
+# in a startup file turns every later "python3 ..." into something else, while
+# the guard keeps reading the harmless text and lets it through. That is not a
+# way around ONE rule; it is the ground under all of them.
+#
+# MEASURED, not assumed: on the machine this was found on, the tool chain
+# starts /bin/zsh, and although $- reports a non-interactive shell, every alias
+# and function from ~/.zshrc is defined in it. The file is loaded on every
+# single command invocation.
+#
+# Cut hard, also from measurement (147k audit lines over 2.5 months): six of
+# the seven files had ZERO writes. ~/.zshrc had twelve, eight of them from one
+# clean-up session (a prompt injection and a key were removed). Four remain
+# over 2.5 months, the last one four weeks before. That is not everyday work —
+# a hard block here is not hit often enough to get switched off. The owner's
+# own `!` bypasses the guard anyway.
+#
+# The chains are listed IN FULL, including links with no measured write at all.
+# Half a chain is an open door: whoever cannot write .zshrc writes .zlogin
+# instead. That is the same mistake the read protection and the project-local
+# control files already demonstrated — protection anchored to fixed points
+# rather than to a rule.
+#
+# NOT here: the system-wide equivalents (/etc/profile, /etc/zsh/*,
+# /etc/profile.d/). Measured: they already block via the system-path guard.
+_SHELL_STARTUP_FILES = [
+    # zsh
+    "~/.zshenv",                    # read by EVERY zsh, non-interactive too
+    "~/.zprofile",
+    "~/.zshrc",
+    "~/.zlogin",
+    "~/.zlogout",
+    # bash
+    "~/.bash_profile",
+    "~/.bash_login",
+    "~/.bashrc",
+    "~/.bash_logout",
+    # read by sh and bash
+    "~/.profile",
+    # fish
+    "~/.config/fish/config.fish",
+    "~/.config/fish/conf.d",
+]
+
+SELF_PROTECT_PATHS = (_BUILTIN_SELF_PROTECT + _SHELL_STARTUP_FILES
+                      + _installation_self_protect())
 
 # Project-local control files — a RULE, not a list of places.
 #
@@ -505,6 +556,35 @@ _PROJECT_CONTROL_HARD = [
      ".opencode/plugin/"),
     (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/tools(?:/|$)"),
      ".opencode/tools/"),
+    # Antigravity (agy): code execution of the third tool chain.
+    # hooks.json is the counterpart to .claude/hooks/ -- the documentation
+    # embedded in the binary names "pre-tool execution" as its example.
+    # Two locations, because the CLI reads both: config/ is the shared one,
+    # antigravity-cli/ the legacy one (still read, per its changelog).
+    (re.compile(r"(?:^|/)\.gemini/(?:config|antigravity-cli)/hooks\.json$"),
+     "~/.gemini/hooks.json"),
+    (re.compile(r"(?:^|/)\.gemini/config/mcp_config\.json$"),
+     "~/.gemini/config/mcp_config.json"),
+    (re.compile(r"(?:^|/)\.gemini/config/plugins(?:\.json|/|$)"),
+     "~/.gemini/config/plugins/"),
+    # Per-project permissions -- these take PRECEDENCE over the global
+    # setting, so they are the stronger lever of the two.
+    (re.compile(r"(?:^|/)\.gemini/config/projects(?:/|$)"),
+     "~/.gemini/config/projects/"),
+    # config.json carries the list of active plugins ("plugins map keyed by
+    # the plugin's directory name"). Writing it enables a plugin that shipped
+    # with "disabled": true.
+    (re.compile(r"(?:^|/)\.gemini/config/config\.json$"),
+     "~/.gemini/config/config.json"),
+    (re.compile(r"(?:^|/)\.gemini/antigravity-cli/settings\.json$"),
+     "~/.gemini/antigravity-cli/settings.json"),
+    (re.compile(r"(?:^|/)\.gemini/(?:settings|trustedFolders)\.json$"),
+     "~/.gemini/settings.json"),
+    # Workspace-local. FOUR spellings, all four documented:
+    # .agents/, .agent/, _agents/, _agent/.
+    (re.compile(r"(?:^|/)[._]agents?/hooks\.json$"), ".agents/hooks.json"),
+    (re.compile(r"(?:^|/)[._]agents?/mcp_config\.json$"), ".agents/mcp_config.json"),
+    (re.compile(r"(?:^|/)[._]agents?/plugins(?:\.json|/|$)"), ".agents/plugins/"),
 ]
 _PROJECT_CONTROL_GATED = [
     (re.compile(r"(?:^|/)\.claude/agents(?:/|$)"), ".claude/agents/"),
@@ -518,6 +598,25 @@ _PROJECT_CONTROL_GATED = [
      ".opencode/command/"),
     (re.compile(r"(?:^|/)(?:\.opencode|\.config/opencode)/skills(?:/|$)"),
      ".opencode/skills/"),
+    # Antigravity: instructions for future runs. They do not execute anything
+    # themselves, but they can tell the model to do anything -- so tier 1,
+    # like .claude/agents/.
+    #
+    # Globally ONE pattern is enough: ~/.gemini/config/ is documented as the
+    # global customization root ("Global Configuration (Machine-Local)"); no
+    # runtime data lives there. This also covers skills/, workflows/ and
+    # global_workflows/ -- and whatever a future release puts there. That gap
+    # has cost us once already: new version, new files, old pattern.
+    (re.compile(r"(?:^|/)\.gemini/config(?:/|$)"), "~/.gemini/config/"),
+    # Workspace-local there is deliberately NO such catch-all: .agents/ is
+    # also the working directory of the sub-agents (ORIGINAL_REQUEST.md,
+    # phase_*_results.json, segment_*/handoff_*.md). A blanket pattern on
+    # .agents/ would cripple the CLI -- hence only the named subdirectories,
+    # exactly as for .opencode/.
+    (re.compile(r"(?:^|/)[._]agents?/skills(?:\.json|/|$)"), ".agents/skills/"),
+    (re.compile(r"(?:^|/)[._]agents?/rules(?:/|$)"), ".agents/rules/"),
+    (re.compile(r"(?:^|/)[._]agents?/agents(?:/|$)"), ".agents/agents/"),
+    (re.compile(r"(?:^|/)[._]agents?/workflows(?:/|$)"), ".agents/workflows/"),
 ]
 
 # Tools that only ever read. Everything else counts as potentially writing, so a
@@ -1084,6 +1183,117 @@ def _normalize_obfuscation(command: str) -> str:
     return _IFS_RE.sub(" ", command)
 
 
+# Heredoc bodies: text, or command? The question is not WHETHER there is a
+# heredoc, but WHERE its body goes.
+#
+#   cat <<'E' ... E              to stdout, then gone          -> text
+#   cat > file <<'E' ... E       becomes a FILE                -> check it
+#   cat <<'E' | bash ... E       gets EXECUTED                 -> check it
+#   python3 <<'E' ... E          gets EXECUTED                 -> check it
+#
+# The first case used to cost anyone trying to DOCUMENT a refused command — in
+# a finding, an error report, a message to another project. Which is the very
+# path a false positive is reported through. Reported by a peer who ran into it
+# doing exactly that.
+#
+# The file form has to stay checked for a reason that is easy to miss: whatever
+# is written into a file can be executed later, and by then the guard sees only
+# the script invocation and no longer knows the contents.
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+# ONLY these commands pass a heredoc body through unchanged. Everything else
+# counts as "the body goes somewhere".
+#
+# The direction is deliberate, and the first attempt had it backwards: it
+# listed the DANGEROUS heads (bash, python3, ...) and treated everything
+# unlisted as harmless. With that, `ssh host 'bash -s' <<E` ran free -- ssh was
+# not on the list, so the body was discarded and nobody saw the remote commands
+# in it. They had been checked BEFORE: the fix had opened what it was meant to
+# protect. Caught by a live probe ten minutes after deployment.
+#
+# A danger list is wrong here in principle, because it would have to be
+# COMPLETE: ssh, docker exec -i, kubectl exec -i, xargs, su, nc, and every
+# future tool that hands stdin to something that executes. Every gap in it is
+# an open channel. A harmless list is merely inconvenient when incomplete.
+_OUTPUT_ONLY = ("cat", "bat", "less", "more")
+# Filters that pass a body along without executing it.
+_HARMLESS_FILTERS = ("grep", "egrep", "fgrep", "head", "tail", "wc", "sort",
+                     "uniq", "cut", "tr", "nl", "rev", "column", "fold")
+
+
+def _heredoc_body_goes_somewhere(head: str) -> bool:
+    """Does the body leave stdout? When in doubt YES (fail-closed).
+
+    Only a narrow list of pure output commands, without a redirect and with at
+    most harmless filters behind them, lets a body count as text.
+    """
+    if re.search(r"\d*>>?\s*\S", head):           # > file, >> file
+        return True
+    # Check at the COMMAND POSITION, not by searching the text: `cat <<E |
+    # grep -c python` carries the word python as a SEARCH PATTERN, not as a
+    # command. Comparing across all words held that for an interpreter and
+    # refused a harmless filter — text instead of action, inside the fix itself.
+    parts = re.split(r"\|\||&&|[|;]", head)
+    for index, part in enumerate(parts):
+        toks = [x.strip("'\"") for x in part.split()]
+        i = 0
+        while i < len(toks) and (toks[i].startswith("-") or "=" in toks[i]):
+            i += 1
+        if i >= len(toks):
+            return True                             # empty link: in doubt, yes
+        name = os.path.basename(toks[i])
+        allowed = _OUTPUT_ONLY if index == 0 else _HARMLESS_FILTERS + _OUTPUT_ONLY
+        if name not in allowed:
+            return True
+    return False
+
+
+def _without_stdout_heredocs(command: str) -> str:
+    """Drops heredoc bodies that only go to stdout.
+
+    Everything else stays untouched — in any doubt the whole command is still
+    checked (fail-closed). In particular the body stays when the head
+    redirects, or is itself an interpreter.
+    """
+    if "<<" not in command:
+        return command
+    lines = command.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        hit = _HEREDOC_RE.search(line)
+        if not hit:
+            out.append(line)
+            i += 1
+            continue
+        marker = hit.group(2)
+        body = []
+        j = i + 1
+        while j < len(lines) and lines[j].strip() != marker:
+            body.append(lines[j])
+            j += 1
+        if j >= len(lines):
+            # No terminator found: touch nothing (fail-closed).
+            out.append(line)
+            i += 1
+            continue
+        if not _heredoc_body_goes_somewhere(line):
+            out.append(line)
+            out.append(f"# (quoted text, {len(body)} lines)")
+        else:
+            # The body goes somewhere, so it belongs WITH the head, not on its
+            # own lines. Segment splitting cuts at newlines; kept apart, the
+            # inline-code detection would see `python3 <<E` without the path
+            # and the path without a recognisable interpreter. That is exactly
+            # where the hole was.
+            out.append(" ".join([line] + [b.strip() for b in body]))
+        out.append(lines[j])
+        i = j + 1
+    return "\n".join(out)
+
+
 def _inline_code_segments(command: str) -> list[str]:
     """The parts of the line that actually CARRY inline interpreter code.
 
@@ -1139,6 +1349,12 @@ def _interpreter_inline_code(command: str) -> bool:
             if os.path.basename(tok) not in _INTERPRETERS:
                 continue
             if any(rest in _INLINE_CODE_FLAGS for rest in toks[i + 1:]):
+                return True
+            # An interpreter also reads code from its INPUT: `python3 <<E`
+            # executes the heredoc body with no -c at all. Found while building
+            # the test list for the heredoc false positive — the body ran free
+            # because no inline flag appeared.
+            if any(rest.startswith("<<") for rest in toks[i + 1:]):
                 return True
     return False
 
@@ -1838,7 +2054,15 @@ def command_hits_self_protect(command: str) -> str | None:
         ce = expand_path(block)
         for prot in SELF_PROTECT_PATHS:
             p = expand_path(prot).rstrip("/")
-            if p in ce and not _dev_unlocked(prot):
+            # Path boundary as in the write branch below. Without it a plain
+            # substring match drags in every NEIGHBOUR: the directory holding
+            # override PROPOSALS carries the name of the active one as its
+            # prefix, and so does a backup copy of a shell startup file.
+            # Measured against a real audit log: anyone checking their own
+            # override proposal for valid JSON was refused by self-protection --
+            # the guard blocked the use of its own escalation path.
+            if (re.search(re.escape(p) + _PATH_BOUNDARY, ce)
+                    and not _dev_unlocked(prot)):
                 return prot
 
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
@@ -2982,6 +3206,11 @@ def main():
     # De-obfuscate IFS-style word-splitting once, so EVERY downstream check
     # (blocked_patterns, paths, sudo, self-protect, reads) sees real whitespace.
     command = _normalize_obfuscation(command)
+
+    # Quoted text is not a command: drop heredoc bodies that only reach stdout.
+    # Bodies going into a file, through a pipe into a shell, or straight into
+    # an interpreter stay.
+    command = _without_stdout_heredocs(command)
 
     rules = load_rules()
     if not rules:

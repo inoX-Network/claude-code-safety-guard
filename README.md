@@ -49,7 +49,8 @@ If you used the earlier version, here is what changed:
 
 - **Blocked patterns** — `rm -rf /`, `mkfs`, `chmod 777`, fork bombs, pipe-to-shell, recursive `chown`/`chmod`/`chgrp` on system paths. **Always** blocked, even with an active override.
 - **Git safety** — `git reset --hard`, force-push (incl. `--force-with-lease`), `commit --no-verify`, `commit --amend`, `git add -A` / `git add .`, and writing `git config` are **always** blocked. Force-push to `main`/`master` has its own dedicated rule on top.
-- **Self-protection** — The AI cannot write the hook, the rules file, the rules document, the active override directory, or the `bin/` scripts — via Bash **or** Write/Edit. No override lifts this.
+- **Self-protection** — The AI cannot write the hook, the rules file, the rules document, the active override directory, or the `bin/` scripts — via Bash **or** Write/Edit. No override lifts this. It reaches beyond this repo's own files: the **shell's startup files** (`.zshrc`, `.bashrc`, `.profile`, …) are the ground every command check stands on, and the **control files of other CLIs** (opencode, Antigravity) hand out the same power one directory over.
+- **Delete protection** — A second path list for paths that may be *changed* but never *removed*. Write protection would block four maintenance paths to stop one deletion; this separates the two.
 - **Owner-only commands** — The approval and dev-mode scripts are hard-blocked for AI Bash calls, so the AI cannot grant itself rights.
 - **Protected paths** — Level-dependent write protection for `~/.ssh`, `~/.gnupg`, `/etc/shadow`, `/boot`, `/usr/bin`, etc.
 - **Credential & `.env` read protection** — The Read tool cannot reach private keys, cloud credentials, or `.env` files without a level-1+ override. Public keys and SSH config stay open.
@@ -169,6 +170,15 @@ delete". Knowing this contract avoids surprise:
   write context. Inside a single segment the coarseness remains — `sha256sum
   <protected file> > /tmp/sum.txt` is refused although only the redirect target
   is written.
+- **Interpreter one-liners are matched literally.** The inline branch compares
+  the expanded command text against the protected paths. It does **not** resolve
+  shell variables: `VAR=<protected dir>; python3 -c "open('$VAR/x')"` is not
+  matched, while the same path written out is. The ordinary write check *does*
+  resolve such assignments — so the two branches differ here. Measured, both
+  directions. Assembling a path from pieces (`'/et' + 'c/passwd'`) escapes both,
+  which is the general obfuscation limit named in THREAT-MODEL.md: no
+  substring layer tames a Turing-complete shell. Sandbox and least privilege are
+  the answer to that one, not the hook.
 
 ---
 
@@ -258,6 +268,48 @@ These paths can never be written by AI tool calls — neither via Bash nor via W
 
 The list is hardcoded in the hook (not in the JSON rules) on purpose: if it lived in the rules file, the protection list could be edited through itself. The pending directory `~/.claude/.sudo-overrides-pending` is **deliberately not** protected — the AI must be able to drop proposals there.
 
+**A neighbour is not the path.** Every protected entry is matched with a path
+boundary, so a directory whose name merely *starts* with a protected one stays
+free: `~/.claude/.sudo-overrides-pending` (proposals), a `.zshrc.bak`, a
+`hooks-old/`. Without that boundary the prefix match drags them all in.
+
+This matters more than it sounds, because the guard has **two** places that
+compare against this list: the ordinary write check, and a separate branch for
+interpreter one-liners (`python3 -c`, `node -e`) — inline code carries no shell
+write indicator and no token boundary, so a path inside `open("...")` has to be
+matched as a substring. Both branches need the boundary. For a while only one
+had it, and the branch that lacked it refused exactly the thing the paragraph
+above promises: dropping and checking an override proposal. **The guard was
+blocking the use of its own escalation path.**
+
+### The shell's startup files
+
+The same list also covers the shell startup files, and for a reason worth stating plainly: this guard judges the **text** of a command. What a name means in the shell that actually runs it, the guard cannot see. One line —
+
+```sh
+function python3() { ... }
+```
+
+— in a startup file turns every later `python3 ...` into something else, while the guard keeps reading the harmless text and letting it through. That is not a way around one rule; it is the ground under all of them.
+
+| Protected | |
+|---|---|
+| zsh | `~/.zshenv`, `~/.zprofile`, `~/.zshrc`, `~/.zlogin`, `~/.zlogout` |
+| bash | `~/.bash_profile`, `~/.bash_login`, `~/.bashrc`, `~/.bash_logout` |
+| sh | `~/.profile` |
+| fish | `~/.config/fish/config.fish`, `~/.config/fish/conf.d/` |
+
+**Reading stays free** on every route — `cat`, `grep`, `sed -n`, `Read`, and copying a backup *outward*. A protection that locks you out of inspecting your own shell keeps you from proving a finding, and gets switched off. Only writing blocks.
+
+Two things worth knowing before this surprises you:
+
+- A backup **next to** a protected file is fine (`cp ~/.zshrc ~/.zshrc.bak` — the `.bak` carries a different name and is not a startup file). A backup **into** a protected directory is not (`conf.d/a.fish.bak` lands inside `conf.d/`).
+- The system-wide equivalents (`/etc/profile`, `/etc/zsh/*`, `/etc/profile.d/`) are not in this list because they already block via the system-path guard.
+
+Why hard rather than level 1: the chains are listed in full, including links nobody has ever written to, because half a chain is an open door — whoever cannot write `.zshrc` writes `.zlogin`. On the machine this was built for, six of the seven files had **zero** writes in 2.5 months of audit log, and `~/.zshrc` had twelve, eight of them from a single clean-up session. A block that is hit roughly twice a month does not get switched off. Your own `!` bypasses the guard regardless.
+
+If your setup does touch these files often, `~/.zshrc` is the one to consider moving to level 1 — it was the only one with any measured traffic at all.
+
 ### Control files, wherever they lie
 
 The list above is anchored to the home directory. The tool chain reads control
@@ -299,6 +351,44 @@ too.
 owner action — `!` or dev mode — because it writes into a hard-protected
 directory. That is the point rather than a side effect: nothing else should be
 able to replace the file that does the guarding.
+
+### The third tool chain — Antigravity (`agy`)
+
+The same reasoning covers Antigravity, and it is covered whether or not an
+adapter for it ever exists. Its `hooks.json` is the sharp end: the
+documentation embedded in the binary lists it under *"Lifecycle Event —
+running scripts/commands at specific agent lifecycle points (e.g. pre-tool
+execution)"*. That is the exact counterpart to `.claude/hooks/`, and
+Antigravity brings no guard of its own.
+
+| Pattern | Strength |
+|---|---|
+| `~/.gemini/{config,antigravity-cli}/hooks.json` | hard |
+| `~/.gemini/config/mcp_config.json`, `plugins/`, `plugins.json` | hard |
+| `~/.gemini/config/projects/` (takes precedence over the global setting) | hard |
+| `~/.gemini/config/config.json` (enables plugins shipped disabled) | hard |
+| `~/.gemini/{settings,trustedFolders}.json`, `antigravity-cli/settings.json` | hard |
+| `~/.gemini/config/` — everything else there | level 1 |
+| project-local `[._]agents?/`: `hooks.json`, `mcp_config.json`, `plugins/` | hard |
+| project-local `[._]agents?/`: `skills/`, `rules/`, `agents/`, `workflows/` | level 1 |
+
+All four spellings of the workspace root are documented and covered:
+`.agents/`, `.agent/`, `_agents/`, `_agent/`.
+
+`AGENTS.md` and `GEMINI.md` stay free, for the same reason as `CLAUDE.md`.
+Runtime data under `~/.gemini/antigravity-cli/` — `conversations/`, `brain/`,
+`history.jsonl`, `log/`, `cache/` — is not control and stays free too.
+
+Two cuts are worth spelling out, because both were tempting to get wrong:
+
+- **No blanket pattern on `.agents/`.** That directory is also the sub-agents'
+  working directory (`ORIGINAL_REQUEST.md`, `phase_*_results.json`,
+  `segment_*/handoff_*.md`). Locking it wholesale would cripple the CLI, so
+  only the named subdirectories are covered.
+- **One catch-all at level 1 for `~/.gemini/config/`.** That directory *is* the
+  documented global customization root and holds no runtime data, so a broad
+  pattern is safe there — and it also covers whatever a future release puts
+  in it. Enumerating only today's files has already cost us once.
 
 ---
 
@@ -635,6 +725,27 @@ the adapter knows the working directory.
 
 There is no third value. `sys.exit(0)` and `sys.exit(2)` are the only exits in
 the core, so **anything else is a failure state, never a quiet yes.**
+
+**But `2` is ambiguous, and that costs more than it looks.** The core catches
+unexpected errors in itself and exits fail-closed — with the same `2`. That is
+right for safety: without the net, every crash would be a silent pass. It also
+means **a crash is indistinguishable from a considered denial** for anything
+that checks the exit code, which is what a test suite does.
+
+We learned this the expensive way. A crash in the *most common* branch of the
+write check survived 13 local test lists and 2993 test cases here, because every
+one of them asserted "blocked" and got it. The user saw a stack trace instead of
+"which path, which grant is missing" — fail-closed held, the *explanation* was
+lost.
+
+If you write tests against this guard, assert on the **reason**, not only the
+exit code: a denial that carries a crash marker is not a denial. See
+`tests/test_no_crash_on_real_paths.py`, which does exactly that across eight
+protection classes and in both languages.
+
+The general lesson outstrips this project: **wherever something catches
+fail-closed, it needs a second measurement that makes the caught thing
+visible.** A safety net that swallows errors also hides them.
 
 ### The four duties of an adapter
 
