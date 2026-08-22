@@ -1202,30 +1202,49 @@ def _normalize_obfuscation(command: str) -> str:
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
+# ONLY these commands pass a heredoc body through unchanged. Everything else
+# counts as "the body goes somewhere".
+#
+# The direction is deliberate, and the first attempt had it backwards: it
+# listed the DANGEROUS heads (bash, python3, ...) and treated everything
+# unlisted as harmless. With that, `ssh host 'bash -s' <<E` ran free -- ssh was
+# not on the list, so the body was discarded and nobody saw the remote commands
+# in it. They had been checked BEFORE: the fix had opened what it was meant to
+# protect. Caught by a live probe ten minutes after deployment.
+#
+# A danger list is wrong here in principle, because it would have to be
+# COMPLETE: ssh, docker exec -i, kubectl exec -i, xargs, su, nc, and every
+# future tool that hands stdin to something that executes. Every gap in it is
+# an open channel. A harmless list is merely inconvenient when incomplete.
+_OUTPUT_ONLY = ("cat", "bat", "less", "more")
+# Filters that pass a body along without executing it.
+_HARMLESS_FILTERS = ("grep", "egrep", "fgrep", "head", "tail", "wc", "sort",
+                     "uniq", "cut", "tr", "nl", "rev", "column", "fold")
+
+
 def _heredoc_body_goes_somewhere(head: str) -> bool:
-    """Does the body leave stdout? Redirect, or an interpreter receiving it."""
+    """Does the body leave stdout? When in doubt YES (fail-closed).
+
+    Only a narrow list of pure output commands, without a redirect and with at
+    most harmless filters behind them, lets a body count as text.
+    """
     if re.search(r"\d*>>?\s*\S", head):           # > file, >> file
         return True
     # Check at the COMMAND POSITION, not by searching the text: `cat <<E |
     # grep -c python` carries the word python as a SEARCH PATTERN, not as a
     # command. Comparing across all words held that for an interpreter and
-    # refused a harmless filter — text instead of action, inside the fix
-    # itself. Exactly the class of error this guard is built against.
-    #
-    # No separate test for the pipe: it is not the pipe that matters but who
-    # is on the other end, and the loop below sees those words too. A check on
-    # "|" was in here first and stayed inert under mutation.
-    for part in re.split(r"\|\||&&|[|;]", head):
+    # refused a harmless filter — text instead of action, inside the fix itself.
+    parts = re.split(r"\|\||&&|[|;]", head)
+    for index, part in enumerate(parts):
         toks = [x.strip("'\"") for x in part.split()]
         i = 0
-        while i < len(toks) and (toks[i].startswith("-") or "=" in toks[i]
-                                 or os.path.basename(toks[i]) in ("sudo", "env",
-                                                                  "nohup", "time")):
+        while i < len(toks) and (toks[i].startswith("-") or "=" in toks[i]):
             i += 1
         if i >= len(toks):
-            continue
+            return True                             # empty link: in doubt, yes
         name = os.path.basename(toks[i])
-        if name in _INTERPRETERS or name in ("bash", "sh", "zsh", "ksh", "dash"):
+        allowed = _OUTPUT_ONLY if index == 0 else _HARMLESS_FILTERS + _OUTPUT_ONLY
+        if name not in allowed:
             return True
     return False
 

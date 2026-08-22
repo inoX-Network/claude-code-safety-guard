@@ -125,6 +125,32 @@ def check_heredoc_into_sudo_shell_is_refused():
     return _blocks(_heredoc("sudo bash", ONE_LINER))
 
 
+def check_heredoc_into_a_remote_shell_is_refused():
+    """THE CASE THAT BROUGHT DOWN THE FIRST ATTEMPT.
+
+    It was missing from this list, and the audit-log measurement caught it only
+    by accident: the one remote case in the log happened to carry a `2>&1`,
+    which hit the redirect regex. Without that it ran free — the fix had TORN
+    OPEN what had been closed before. A case that blocks for the wrong reason
+    proves nothing.
+    """
+    return _blocks("ssh host 'bash -s' <<'END'\n" + ONE_LINER + "\nEND")
+
+
+def check_heredoc_into_a_remote_shell_unquoted_is_refused():
+    return _blocks("ssh host bash <<'END'\n" + ONE_LINER + "\nEND")
+
+
+def check_heredoc_into_a_container_is_refused():
+    return _blocks("docker exec -i box bash <<'END'\n" + ONE_LINER + "\nEND")
+
+
+def check_heredoc_into_an_unknown_tool_is_refused():
+    """In doubt, refuse: a danger list would have to be complete, a harmless
+    list is merely inconvenient."""
+    return _blocks("some-new-tool <<'END'\n" + ONE_LINER + "\nEND")
+
+
 def check_a_plain_one_liner_is_still_refused():
     return _blocks(ONE_LINER)
 
@@ -184,6 +210,10 @@ CASES = [
     ("heredoc straight into a shell is refused", check_heredoc_straight_into_a_shell_is_refused),
     ("heredoc straight into an interpreter is refused", check_heredoc_straight_into_an_interpreter_is_refused),
     ("heredoc into sudo shell is refused", check_heredoc_into_sudo_shell_is_refused),
+    ("heredoc into a remote shell is refused", check_heredoc_into_a_remote_shell_is_refused),
+    ("heredoc into a remote shell unquoted is refused", check_heredoc_into_a_remote_shell_unquoted_is_refused),
+    ("heredoc into a container is refused", check_heredoc_into_a_container_is_refused),
+    ("heredoc into an unknown tool is refused", check_heredoc_into_an_unknown_tool_is_refused),
     ("a plain one liner is still refused", check_a_plain_one_liner_is_still_refused),
     ("a plain redirect is still refused", check_a_plain_redirect_is_still_refused),
     ("a quoted one liner stays free", check_a_quoted_one_liner_stays_free),
