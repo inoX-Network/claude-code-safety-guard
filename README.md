@@ -171,15 +171,23 @@ delete". Knowing this contract avoids surprise:
   write context. Inside a single segment the coarseness remains — `sha256sum
   <protected file> > /tmp/sum.txt` is refused although only the redirect target
   is written.
-- **Interpreter one-liners are matched literally.** The inline branch compares
-  the expanded command text against the protected paths. It does **not** resolve
-  shell variables: `VAR=<protected dir>; python3 -c "open('$VAR/x')"` is not
-  matched, while the same path written out is. The ordinary write check *does*
-  resolve such assignments — so the two branches differ here. Measured, both
-  directions. Assembling a path from pieces (`'/et' + 'c/passwd'`) escapes both,
-  which is the general obfuscation limit named in THREAT-MODEL.md: no
-  substring layer tames a Turing-complete shell. Sandbox and least privilege are
-  the answer to that one, not the hook.
+- **Interpreter one-liners are matched literally, and naming one is enough.**
+  The inline branch compares the expanded command text against the protected
+  paths, shell assignments included — `VAR=<protected dir>; python3 -c
+  "open('$VAR/x')"` is matched. (It was not until 2026-08-23: only the ordinary
+  write check resolved assignments, and the two branches disagreed.) Inside this
+  branch even a plain **read** is refused: `python3 -c "print(open(<control
+  file>).read())"` does not get through. That bluntness is deliberate and
+  measured — of 608 real refusals, 44 were `open(path,'w')`, a write with no
+  shell verb and no redirection that nothing else catches. The price is ten real
+  reads across seven sessions, each with `cat`/`grep`/`head` as the way out, and
+  the refusal now says so instead of claiming you tried to write. Assembling a
+  path from pieces still escapes the branch, but only when the split falls
+  *inside* the protected part: `'/tmp/x/.clau' + 'de/settings.json'` passes,
+  `'/tmp/x/.claude/settings.json'` split anywhere before it does not. That is
+  the general obfuscation limit named in THREAT-MODEL.md: no substring layer
+  tames a Turing-complete shell. Sandbox and least privilege are the answer to
+  that one, not the hook.
 
 ---
 

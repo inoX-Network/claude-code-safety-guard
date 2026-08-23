@@ -13,6 +13,8 @@
   "read.dir_credentials": "{path} rekursiv zu lesen (enthält geschützte Zugangsdaten) erfordert Override-Stufe 1+",
   "control.hard": "BLOCKIERT: '{what}' steuert die Werkzeugkette selbst — das Schreiben ist an jedem Ort gesperrt. Kein Override hebt das auf, nur der Eigentümer via !.",
   "control.gated": "BLOCKIERT: '{what}' trägt Anweisungen für künftige Sitzungen — das Schreiben erfordert Override-Stufe 1+.",
+  "control.hard_inline": "BLOCKIERT: '{what}' steuert die Werkzeugkette selbst. In einem Interpreter-Einzeiler (python -c, node -e) ist schon die Nennung gesperrt — auch beim Lesen, weil eine solche Zeile im selben Atemzug schreiben kann und die Shell das nicht sieht. Zum Lesen stattdessen cat/grep/head. Kein Override hebt das auf, nur der Eigentümer via !.",
+  "control.gated_inline": "BLOCKIERT: '{what}' trägt Anweisungen für künftige Sitzungen. In einem Interpreter-Einzeiler (python -c, node -e) ist schon die Nennung gesperrt — auch beim Lesen, weil eine solche Zeile im selben Atemzug schreiben kann. Zum Lesen stattdessen cat/grep/head; zum Schreiben Override-Stufe 1+.",
   "self_protect.file": "BLOCKIERT: Selbstschutz — '{path}' gehört zum Sicherheitssystem ({hit}) und darf nur vom Eigentümer via ! geändert werden. Kein Override hebt das auf.",
   "self_protect.command": "BLOCKIERT: Selbstschutz — Schreibzugriff auf '{hit}' (Sicherheitssystem). Kein Override möglich, nur der Eigentümer via !.",
   "path.write_blocked": "BLOCKIERT: Schreibzugriff (Write/Edit) auf geschützten Pfad '{path}'. {extra}Benötigt: {needed}. ESKALATION: Der Agent fragt den Koordinator → der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei.",
