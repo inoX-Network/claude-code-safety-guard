@@ -186,6 +186,23 @@ _MESSAGES = {
         "BLOCKED: '{what}' carries instructions for future sessions — writing it "
         "requires override level 1+."
     ),
+    # The interpreter branch blocks the mere MENTION of a control file, reading
+    # included. Saying "writing is blocked" there sends the reader looking for
+    # write permission when the fix is to use cat/grep instead — measured on
+    # 2026-08-23: ten real cases across seven sessions, every one of them a read.
+    "control.hard_inline": (
+        "BLOCKED: '{what}' steers the tool chain itself. Inside an interpreter "
+        "one-liner (python -c, node -e) even naming it is blocked — reading "
+        "included, because such a line can write in the same breath and the "
+        "shell cannot tell. To read it, use cat/grep/head instead. No override "
+        "lifts this, only the owner via !."
+    ),
+    "control.gated_inline": (
+        "BLOCKED: '{what}' carries instructions for future sessions. Inside an "
+        "interpreter one-liner (python -c, node -e) even naming it is blocked — "
+        "reading included, because such a line can write in the same breath. To "
+        "read it, use cat/grep/head instead; to write it, override level 1+."
+    ),
     # --- self-protection ---
     "self_protect.file": (
         "BLOCKED: self-protection — '{path}' belongs to the security system "
@@ -677,23 +694,40 @@ def _without_interpreter_program(command: str) -> str:
     return " ".join(p for k, p in enumerate(parts) if k not in drop)
 
 
-def command_hits_project_control(command: str) -> tuple[str, bool] | None:
-    """Bash counterpart: a write command aimed at a project-local control file.
+def command_hits_project_control(command: str) -> tuple[str, bool, bool] | None:
+    """Bash counterpart: a command aimed at a project-local control file.
 
-    Only on detected write access, so reading one's own configuration stays free.
-    A copy SOURCE is not a target — taking a working copy is reading.
+    Returns (what, hard, inline). `inline` says the hit came from the
+    interpreter branch, where the MERE MENTION is blocked — the caller needs it
+    to phrase the refusal correctly.
+
+    Outside that branch, only detected write access counts, so reading one's own
+    configuration stays free. A copy SOURCE is not a target — taking a working
+    copy is reading.
     """
     command = _collapse_path_traversal(_normalize_obfuscation(command))
 
     # Interpreter one-liners carry no shell write indicator. Naming a control
     # file inside -c/-e code is enough: there is no legitimate reason to reach
     # the tool chain's own steering that way.
+    #
+    # Why the blanket rule stays, measured on 2026-08-23 over 608 distinct
+    # refusals: 44 of them are `python -c "open(path,'w')..."` — a write that
+    # _command_is_write cannot see, because the writing happens INSIDE the code,
+    # with no shell verb and no redirection. This branch is the only one that
+    # catches them. Narrowing it to "block only when the code writes" would need
+    # a complete list of every write path in Python and Node — a list of
+    # dangers, and every gap in it is a hole. The price is ten real read cases
+    # across seven sessions, each with an easy way out (cat/grep).
+    #
+    # What WAS wrong is the message: it said "writing is blocked" at a read.
+    # Hence the third return value.
     cd_bases = _cd_targets(command)
     for block in _inline_code_segments(command):
         for tok in _command_path_tokens(block):
             hit = project_control_file(tok, cd_bases)
             if hit:
-                return hit
+                return (hit[0], hit[1], True)
 
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
@@ -712,7 +746,7 @@ def command_hits_project_control(command: str) -> tuple[str, bool] | None:
         for tok in _command_path_tokens(segment):
             hit = project_control_file(tok, cd_bases)
             if hit:
-                return hit
+                return (hit[0], hit[1], False)
     return None
 
 # Hook development mode (Option B): the owner can lift the self-protection ONLY
@@ -3287,15 +3321,17 @@ def main():
     #     the same power open one directory further along.
     control_hit = command_hits_project_control(command)
     if control_hit:
-        what, hard = control_hit
+        what, hard, inline = control_hit
         if hard:
             _audit(input_data, "Bash", command, "block", f"project_control:{what}", "hard")
-            print(msg("control.hard", what=what), file=sys.stderr)
+            print(msg("control.hard_inline" if inline else "control.hard",
+                      what=what), file=sys.stderr)
             sys.exit(2)
         override = load_override(input_data.get("agent_id"), session_id)
         if not override or override.get("override_level", 0) < 1:
             _audit(input_data, "Bash", command, "block", f"project_control:{what}", 0)
-            print(msg("control.gated", what=what), file=sys.stderr)
+            print(msg("control.gated_inline" if inline else "control.gated",
+                      what=what), file=sys.stderr)
             sys.exit(2)
 
     # 2e. Docker/Podman ALWAYS-block — catastrophic flags + encirclement mounts.
