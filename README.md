@@ -1,13 +1,14 @@
 # Safety Guard — for Claude Code &amp; opencode
 
 [![Born from a real incident](https://img.shields.io/badge/born%20from-a%20real%20incident-red)](https://github.com/anthropics/claude-code/issues/39283)
-[![Works with](https://img.shields.io/badge/works%20with-Claude%20Code%20%2B%20opencode-success)](opencode/README.md)
+[![Works with](https://img.shields.io/badge/works%20with-Claude%20Code%20%2B%20opencode%20%2B%20Antigravity-success)](#supported-tool-chains)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A **deterministic tool-call guard** for AI coding agents. It sees every tool call *before* it runs and blocks the catastrophic ones — `rm -rf /`, reading `~/.ssh`, writing `/etc`, force-push to `main`, credential exfiltration — with a **3-level, agent-scoped override** for when you genuinely need elevated rights, and a self-protection layer so the AI can never disarm its own guard. Same input, same verdict, every time. No LLM in the loop: it's the net for when the model's judgment (or the permission prompt) fails or gets subverted by prompt injection.
 
 - **Claude Code:** runs as a `PreToolUse` hook.
 - **opencode:** runs as a plugin that bridges to the same guard — see [opencode/README.md](opencode/README.md).
+- **Antigravity (`agy`):** runs as a `PreToolUse` adapter against the same guard — see [Supported tool chains](#supported-tool-chains).
 
 > **Born from a real incident.** This started after [Claude Code executed a destructive `chown -R` on `/etc/`](https://github.com/anthropics/claude-code/issues/39283) — a multi-hour recovery. The built-in permission system wasn't enough. This is defense-in-depth.
 
@@ -363,8 +364,10 @@ able to replace the file that does the guarding.
 
 ### The third tool chain — Antigravity (`agy`)
 
-The same reasoning covers Antigravity, and it is covered whether or not an
-adapter for it ever exists. Its `hooks.json` is the sharp end: the
+The same reasoning covers Antigravity, and it held before any adapter
+existed — self-protection of a chain's control files does not depend on
+that chain being wired up. Since 2026-08-23 an adapter exists as well; see
+*Supported tool chains* below. Its `hooks.json` is the sharp end: the
 documentation embedded in the binary lists it under *"Lifecycle Event —
 running scripts/commands at specific agent lifecycle points (e.g. pre-tool
 execution)"*. That is the exact counterpart to `.claude/hooks/`, and
@@ -773,6 +776,61 @@ Replaying 77718 distinct logged commands: **20 previously rejected commands now
 pass, across 18 sessions, and none is newly blocked.**
 
 ---
+
+## Supported tool chains
+
+One guard, several front ends. The guard itself never changes for a new CLI —
+what changes is the thin adapter that translates that CLI's dialect into the
+guard's, and back.
+
+| | Claude Code | opencode | Antigravity (`agy`) |
+|---|---|---|---|
+| **How it hooks in** | native `PreToolUse` hook | plugin (TypeScript) | adapter (Python) |
+| **Where it lives** | `hooks/command-guard.py` | `opencode/plugin/safety-guard.ts` | not published yet — see below |
+| **How "blocked" is said** | exit code `2` | thrown error | `{"decision":"deny"}` on stdout |
+| **Tools mapped by name** | all (native payload) | 4 (`bash`, `read`, `write`, `edit`) | 21 of 57 |
+| **Unmapped tools** | — | pass through | fail-closed if they carry a path, command or code argument |
+| **Its own control files protected** | yes | yes | yes |
+| **Far side is fail-closed** | yes | yes | yes, measured |
+
+**"Tools mapped by name" is not a quality score.** A chain with four tools needs
+four mappings. Antigravity exposes 57, and mapping every one of them would be
+the wrong move: a list of everything dangerous is a list you will one day
+forget to extend. What catches the rest is the fail-closed rule — an unknown
+tool carrying a path, a command or a code argument is refused, whether anyone
+has heard of it or not.
+
+### How to know what a CLI really exposes
+
+Ask it, don't read about it. Antigravity's own documentation and its internal
+constants disagreed about tool names, and both were partly wrong. The
+authoritative list came from the CLI itself:
+
+```sh
+echo '{"prompt":"x"}' | agy --input-format stream-json --output-format stream-json
+```
+
+The first event it emits carries the complete tool list of the running build.
+Measured on 2026-08-23, that list decided four open questions at once — and
+revealed four tools that were slipping past an adapter everyone believed
+complete.
+
+**This belongs in the acceptance check of every new CLI version.** It costs one
+call. A tool that arrives with an update is otherwise silently unguarded.
+
+### Antigravity: built and measured, not yet published
+
+The adapter runs and is measured — 19 of 19 against the live chain, both
+directions — but it is not in this repository yet. Its comments are the part
+worth having, and they are still in the author's language; publishing the code
+without them would ship a shell. Until then, the contract below is enough to
+build one, and Antigravity's control files are protected either way.
+
+### What a front end inherits
+
+An editor or IDE that drives one of these CLIs inherits its protection
+unchanged — the guard sits at the tool call, below anything a UI does. Nothing
+extra to install, and nothing extra to get wrong.
 
 ## Wiring up another CLI — the integration contract
 
