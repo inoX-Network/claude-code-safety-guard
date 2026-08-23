@@ -1314,6 +1314,21 @@ def _inline_code_segments(command: str) -> list[str]:
     iterates over the segments itself, so it is true for the whole line exactly
     when it is true for one segment. A fallback would be dead code -- it was
     written, and the mutation test exposed it as having no effect.
+
+    VARIABLES ARE RESOLVED HERE, deliberately in this one place. Measured
+    2026-08-23: `P=<protected dir>; python3 -c "open('$P/x','w')"` ran FREE,
+    while the same path written out was blocked -- the write branch did resolve
+    the assignment via _with_assignments, this branch did not. The shell
+    substitutes "$P" BEFORE the interpreter starts, so this is a working
+    bypass, not the obfuscation boundary named in the threat model: a plain
+    assignment arises in everyday use without any intent to evade.
+
+    Why here and not at the call sites: THREE branches consume these segments
+    (project control files, self-protection, read protection) and all three had
+    the same blind spot. That spread-out responsibility IS the cause of this
+    class of bug -- two halves of one promise, kept in only one. Putting the
+    resolution in the callers just pre-builds the fourth site that will forget
+    it again.
     """
     segments = split_segments(command)
     hits = []
@@ -1326,7 +1341,7 @@ def _inline_code_segments(command: str) -> list[str]:
                     and i + 1 < len(segments):
                 i += 1
                 block += " " + segments[i]
-            hits.append(block)
+            hits.append(_with_assignments(block, command))
         i += 1
     return hits
 
