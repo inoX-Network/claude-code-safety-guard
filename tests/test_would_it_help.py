@@ -131,6 +131,34 @@ def check_no_protected_file_is_read():
             os.chmod(key, 0o600)
 
 
+def check_backup_is_recommended_without_being_required():
+    """The advice must appear, and must not read as a prerequisite.
+
+    A guard reduces how OFTEN something goes wrong; a copy elsewhere decides
+    whether it MATTERS when it does. Of the pair the copy is the cheaper half,
+    so a report that recommended only the guard would be selling rather than
+    advising. It must also stay a recommendation: making it sound required
+    would turn a helpful sentence into a barrier for exactly the person who
+    needs the tool most.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _exposed_machine(home)
+        # A repository with no remote: the case where a mistake is permanent.
+        repo = home / "Projects" / "unsaved" / ".git"
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / "config").write_text("[core]\n\trepositoryformatversion = 0\n",
+                                     encoding="utf-8")
+        report = _run(home)
+        if "_broken" in report:
+            return False, "no report"
+        advice = " ".join(report.get("backup_advice", [])).lower()
+        mentions = "no remote" in advice
+        stays_optional = "not required" in advice
+        return (mentions and stays_optional), (
+            f"mentions={mentions} optional={stays_optional}: {advice[:180]}")
+
+
 def check_sample_cap_is_disclosed():
     """A bounded run must say what it did not look at."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -177,6 +205,7 @@ CASES = [
     ("a bare machine scores no exposure", check_bare_machine_finds_little),
     ("an exposed machine is recognised as such", check_exposed_machine_is_recognised),
     ("no protected file is ever opened", check_no_protected_file_is_read),
+    ("a copy elsewhere is recommended, not required", check_backup_is_recommended_without_being_required),
     ("a capped run discloses what it skipped", check_sample_cap_is_disclosed),
 ]
 

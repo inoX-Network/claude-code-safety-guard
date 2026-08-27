@@ -55,6 +55,23 @@ other, and repeating it honestly is the entire point of the tool existing.
 This project would rather someone walked away informed than installed
 something they do not need.
 
+## The recommendation the report makes, whichever way it goes
+
+The report ends with one piece of advice that stands regardless of its own
+verdict: **work that exists in only one place is work a mistake can end.** It
+counts how many of their repositories have no remote and says so.
+
+This guard reduces how *often* something goes wrong. A copy somewhere else
+decides whether it *matters* when it does — and of the two, the copy is the
+cheaper half. So if the report names repositories with no remote, that is worth
+picking up on, and it is worth offering to do: pushing a repository somewhere
+is one of the things an assistant does well and a person new to this reasonably
+does not want to learn first.
+
+Recommend it; do not gate on it. The guard works fine without, and someone who
+is told they must set up version control before they may protect themselves
+will do neither.
+
 ## If they decide to install
 
 `INSTALL.md` is the guide. Two things there are easy to miss:
