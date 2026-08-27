@@ -1,5 +1,6 @@
 # Safety Guard — for Claude Code &amp; opencode
 
+[![tests](https://github.com/inoX-Network/claude-code-safety-guard/actions/workflows/tests.yml/badge.svg)](https://github.com/inoX-Network/claude-code-safety-guard/actions/workflows/tests.yml)
 [![Born from a real incident](https://img.shields.io/badge/born%20from-a%20real%20incident-red)](https://github.com/anthropics/claude-code/issues/39283)
 [![Works with](https://img.shields.io/badge/works%20with-Claude%20Code%20%2B%20opencode%20%2B%20Antigravity-success)](docs/tool-chains.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
