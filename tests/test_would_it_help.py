@@ -36,7 +36,9 @@ def _run(home: Path, extra_args=()) -> dict:
     for leaking in ("CLAUDE_SECURITY_RULES", "CLAUDE_GUARD_CONFIG",
                     "CLAUDE_HOOK_DEV_FLAG", "CLAUDE_SUDO_OVERRIDES_DIR"):
         env.pop(leaking, None)
-    proc = subprocess.run([sys.executable, str(TOOL), "--json", *extra_args],
+    # --yes stands in for the consent a person gives at the prompt. Without it
+    # the tool reads nothing at all, which is the subject of its own case below.
+    proc = subprocess.run([sys.executable, str(TOOL), "--json", "--yes", *extra_args],
                           capture_output=True, text=True, env=env, timeout=600)
     try:
         return json.loads(proc.stdout)
@@ -143,7 +145,34 @@ def check_sample_cap_is_disclosed():
             f"cap not visible in the report: examined={examined} seen={seen}")
 
 
+def check_nothing_is_read_without_consent():
+    """The gate, and it is the important one.
+
+    The notes for assistants ask them to offer this rather than run it — but a
+    request is the wrong instrument when someone's shell history is at stake.
+    So without consent the tool must read nothing at all, and say whose job it
+    was to ask.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _exposed_machine(home)
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["PATH"] = str(home / "no-tools-here")
+        proc = subprocess.run([sys.executable, str(TOOL), "--json"],
+                              capture_output=True, text=True, env=env, timeout=300)
+        refused = proc.returncode != 0
+        # No report may have been produced, and the message has to name who
+        # should have asked — otherwise a user sees a bare refusal and blames
+        # the tool for being broken.
+        silent = "exposure" not in proc.stdout
+        explains = "asked you first" in (proc.stdout + proc.stderr)
+        return (refused and silent and explains), (
+            f"refused={refused} silent={silent} explains={explains}")
+
+
 CASES = [
+    ("nothing is read without consent", check_nothing_is_read_without_consent),
     ("a machine with no agent is told it needs nothing", check_bare_machine_is_told_no),
     ("a bare machine scores no exposure", check_bare_machine_finds_little),
     ("an exposed machine is recognised as such", check_exposed_machine_is_recognised),
