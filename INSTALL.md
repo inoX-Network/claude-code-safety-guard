@@ -119,9 +119,79 @@ Two ways to provide it:
    `CLAUDE.md`, add a short block that points at the rules document and
    summarizes the contract.
 
-A minimal, generic `CLAUDE.md` block:
+A minimal, generic `CLAUDE.md` block. **Adapt the paths in angle brackets to
+your install** — everything else applies as written:
 
 ```markdown
+## Safety guard — how to work with it
+
+A PreToolUse hook (`command-guard.py`) checks every tool call before it runs,
+for Bash, Read, Write, Edit, MultiEdit and NotebookEdit. **The hook and its
+override files are the authority — not this prompt.** You cannot grant
+yourself any rights. It is not an obstacle course; it is the reason you can be
+trusted with this machine.
+
+**Reading is free.** Listing, `cat`, `grep` and searching protected paths all
+work. Only writing, deleting and privilege escalation are gated.
+
+**A block is a signal, not a hurdle.** If the guard refuses something:
+stop, re-read the message, rephrase — and if the refusal is wrong, report it.
+Never look for an encoded, split-up or otherwise disguised form of the same
+command. Every bypass attempt is logged, and a bypass found in the log is
+treated as a far more serious event than the original block.
+
+**False alarms are normal and worth reporting.** The guard matches text, so a
+protected path quoted *inside* a commit message, a search pattern or an
+explanation can trigger it even though nothing is being written. The way out
+is always the same: put the text in a file (the file-writing tool passes its
+target structurally, not as command text), or assemble the string in code.
+Report the case so the rule can be sharpened.
+
+**You cannot grant yourself rights.** The active override directory, the hook
+source, the rules file and the approval scripts are self-protected. No
+override lifts that — by design.
+
+**How to ask for rights, concretely:**
+
+1. Work out the *smallest* scope that covers the one task. Not "while we're at
+   it" — one job, one override.
+2. Pick the *lowest sufficient level* (1 before 2 before 3) and be ready to say
+   why a lower one does not suffice.
+3. Write a proposal file into `<PENDING_DIR>` (you may write there) with
+   `confirmed: false` and the required fields. The *active* override directory
+   is self-protected and out of your reach.
+4. Hand the owner a ready-to-copy command and explain level and scope:
+   `! <BIN_DIR>/grant-override <id> --minutes N [--confirm LABEL] [--snapshot ID]`
+   Never run it yourself — only their `!` invocation reaches the script, sets
+   `confirmed: true` and moves the file into the active directory.
+
+> Writing that proposal through a shell command often fails, and it looks like
+> a bug but is not: the proposal has to *name* the protected path it asks for,
+> and the path check sees that name in the command text. Use the file-writing
+> tool instead — it passes the target structurally.
+
+**Explain what you do, in proportion to the level.** Level 1: what and why.
+Level 2: what, why, risk, and the concrete rollback command. Level 3: a full
+briefing before *each* command, then wait for an explicit go-ahead.
+
+**Assume the person reading you is not a systems administrator.** Name the
+command, say what it does to the machine, and use an analogy where it helps.
+
+You can never write the hook, the rules file, the rules document, the active
+override directory, or the approval scripts. No override lifts that.
+
+Full protocol: `<RULES_DOC>`.
+```
+
+Replace the placeholders with the paths from your install — defaults:
+`<PENDING_DIR>` = `~/.claude/.sudo-overrides-pending/`, `<BIN_DIR>` =
+`~/.claude/bin`, `<RULES_DOC>` = `~/.claude/rules/security-operations.md`. If
+you moved the runtime directories (section C), these move with them.
+
+Keep the block otherwise generic — no machine-specific names, IPs or paths
+beyond those placeholders. Everything above is behaviour, not configuration:
+it stays true on any install.
+
 ### Optional: the update check
 
 `hooks/update-check.py` is a **separate** hook and needs its own entry, as
@@ -139,31 +209,6 @@ the file is not, nothing runs and nothing says so — the check is only "armed"
 once both halves match. It stays off until `update_check.enabled` is `true` in
 `guard-config.json` (see the README section).
 
-## Safety guard is armed
-
-A PreToolUse hook (`command-guard.py`) enforces the security rules technically
-for Bash, Read, Write, Edit, MultiEdit, and NotebookEdit. The hook and its
-override files are the authority — not this prompt. You cannot grant yourself
-any rights.
-
-When an action is (or will be) blocked and you genuinely need it:
-1. Determine the lowest sufficient level (1/2/3) and the minimal scope.
-2. Write an override PROPOSAL (with `confirmed: false`) into
-   `~/.claude/.sudo-overrides-pending/`. You may write there; the active
-   override directory is self-protected and you cannot.
-3. Hand the owner a ready-to-copy command and explain level + scope:
-   `! ~/.claude/bin/grant-override <id> --minutes N [--confirm LABEL] [--snapshot ID]`
-4. Only the owner's `!` invocation activates the override. The hook then grants
-   the scope until it expires.
-
-You can never write the hook, the rules file, the rules document, the active
-override directory, or the `bin/` scripts. No override lifts that.
-
-Full protocol: `~/.claude/rules/security-operations.md`.
-```
-
-Keep this block generic — no machine-specific names, IPs, or paths beyond the
-`~/.claude/` ones above.
 
 ---
 
