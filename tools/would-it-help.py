@@ -67,7 +67,7 @@ def redact(command: str) -> str:
 
 
 # ---------------------------------------------------------------- what is here
-def what_is_at_stake() -> tuple[list[str], int]:
+def what_is_at_stake() -> tuple[list[str], int, int, int]:
     """Existence only. This function must never open a protected file."""
     findings: list[str] = []
     weight = 0
@@ -96,12 +96,21 @@ def what_is_at_stake() -> tuple[list[str], int]:
 
     env_files = 0
     repos = 0
+    unversioned = 0
     for base in (HOME / "Projects", HOME / "Projekte", HOME / "code",
                  HOME / "src", HOME / "dev", HOME / "work"):
         if not base.is_dir():
             continue
-        for _ in base.rglob(".git"):
+        for git_dir in base.rglob(".git"):
             repos += 1
+            config = git_dir / "config"
+            try:
+                if config.is_file():
+                    text = config.read_text(encoding="utf-8", errors="replace")
+                    if "[remote " not in text:
+                        unversioned += 1
+            except Exception:
+                pass
             if repos > 400:
                 break
         for _ in base.rglob(".env"):
@@ -111,6 +120,16 @@ def what_is_at_stake() -> tuple[list[str], int]:
     if repos:
         findings.append(f"{repos}+ git repositories under your work directories")
         weight += 2
+    if unversioned:
+        # This is the sharpest number in the report. Everything else measures
+        # how much could go wrong; this measures how much of it would be
+        # UNRECOVERABLE. A repository with a remote survives a bad command --
+        # someone re-clones it and loses an afternoon. One without is simply
+        # gone. Read from .git/config rather than by running git: faster, and
+        # it opens a config file rather than anything private.
+        findings.append(
+            f"{unversioned} of them have no remote — a mistake there is final")
+        weight += unversioned
     if env_files:
         findings.append(f"{env_files}+ .env files (credentials live in these)")
         weight += 3
@@ -129,7 +148,7 @@ def what_is_at_stake() -> tuple[list[str], int]:
 
     if not findings:
         findings.append("nothing of the usual kinds found")
-    return findings, weight
+    return findings, weight, unversioned, repos
 
 
 # ------------------------------------------------------- who works here
@@ -255,6 +274,35 @@ def ask_the_guard(commands: list[str]) -> tuple[Counter, Counter, list[tuple[str
 
 
 # ---------------------------------------------------------------- verdict
+def backup_advice(unversioned: int, repos: int) -> list[str]:
+    """The one recommendation this report makes, and why it is not a demand.
+
+    A guard reduces how often something goes wrong. A copy somewhere else
+    decides whether it MATTERS when it does. The two are not alternatives, and
+    of the pair the copy is the cheaper one — so a report that only recommends
+    the guard would be selling rather than advising.
+
+    Not a prerequisite: the guard works fine without it. Recommended, because
+    the failure it cannot prevent is the one that ends your afternoon.
+    """
+    if not repos:
+        return []
+    if not unversioned:
+        return ["Every repository found here has a remote. That is the single "
+                "best protection there is, and it is already in place — a bad "
+                "command costs you a re-clone, not the work."]
+    return [
+        f"{unversioned} of your {repos} repositories have no remote. Those are "
+        "the ones where a mistake is permanent, and no guard can make that "
+        "less true — it can only make it rarer.",
+        "Pushing them somewhere (GitHub or anywhere else) is not required for "
+        "this guard, and it is recommended anyway: it is the cheaper half of "
+        "the pair. You do not need to know how — an assistant with tool access "
+        "does this well, and setting it up is one of the things worth asking "
+        "it for.",
+    ]
+
+
 def verdict(weight: int, agents: list[str], blocked: int, total: int,
             source_is_agent_log: bool) -> list[str]:
     """Plain sentences, and it is allowed to say no."""
@@ -373,7 +421,7 @@ def main() -> int:
         print(f"Run this from a checkout of the repo — no hook at {HOOK}")
         return 2
 
-    stakes, weight = what_is_at_stake()
+    stakes, weight, unversioned, repos = what_is_at_stake()
     agents = agents_present()
     commands, source, total_seen = collect_commands(limit)
     source_is_agent_log = "log" in source and "history" not in source
@@ -384,6 +432,7 @@ def main() -> int:
 
     examined = tally["allowed"] + tally["blocked"]
     lines = verdict(weight, agents, tally["blocked"], examined, source_is_agent_log)
+    advice = backup_advice(unversioned, repos)
 
     if as_json:
         print(json.dumps({
@@ -392,6 +441,7 @@ def main() -> int:
             "source": source, "commands_seen": total_seen,
             "examined": examined, "blocked": tally["blocked"],
             "verdict": lines,
+            "backup_advice": advice,
         }, indent=2))
         return 0
 
@@ -430,6 +480,10 @@ def main() -> int:
     print("\nVERDICT")
     for line in lines:
         print(f"  {line}")
+    if advice:
+        print("\nTHE ONE THING WORTH DOING EITHER WAY")
+        for line in advice:
+            print(f"  {line}")
     print("\nWHAT THIS DOES NOT TELL YOU")
     print("  · Whether the rules fit your work. The defaults are a starting")
     print("    point; the setup dialogue is where they become yours.")
