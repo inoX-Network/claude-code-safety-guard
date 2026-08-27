@@ -66,6 +66,31 @@ If you used the earlier version, here is what changed:
 
 ---
 
+## Before you install: is this for you?
+
+```bash
+git clone https://github.com/inoX-Network/claude-code-safety-guard
+cd claude-code-safety-guard
+python3 tools/would-it-help.py
+```
+
+Nothing is installed, written or sent anywhere by that command. It counts what
+is reachable from your machine (keys, remote hosts, credentials — existence
+only, no protected file is ever opened), notes which AI assistants with tool
+access live there, and then feeds your own past commands to the **real hook in
+this checkout** to see how many of them it would have stopped.
+
+Then it tells you, in plain sentences, whether that is worth it — **including
+"probably not".** If no assistant with tool access is found, it says the guard
+would protect you from nothing today and to come back when that changes. A
+report that recommends itself whatever it finds would be worthless, because you
+could not tell the honest cases from the sales pitch.
+
+One caveat it prints rather than hides: **the guard protects you from an agent,
+not from yourself.** Where an agent's log exists it is used; where only shell
+history exists, the report says so and labels its own numbers as the weaker
+evidence they are.
+
 ## How it works
 
 ```

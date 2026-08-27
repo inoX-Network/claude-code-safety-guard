@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""would-it-help — would this guard actually be worth it on THIS machine?
+
+    python3 tools/would-it-help.py            # run it from a fresh clone
+    python3 tools/would-it-help.py --sample 5000
+    python3 tools/would-it-help.py --json
+
+Run this BEFORE installing anything. Nothing is written, nothing is sent
+anywhere, and no file that the guard would protect is ever opened — only its
+existence is noted.
+
+WHAT THIS IS AND WHY IT IS BLUNT
+
+Security tools are sold with fear. This one is not for everybody, and a report
+that says "you need this" regardless of what it found would be worthless — you
+could not tell the honest cases from the sales pitch.
+
+So the verdict here can be **"probably not worth it"**, and it says so when the
+numbers say so. Everything below is counted on your machine, from your own
+history. There is no scoring curve and no marketing.
+
+THE ONE THING THAT WOULD MAKE THIS DISHONEST
+
+**The guard protects you from an agent, not from yourself.** You know what you
+are doing; a model with tool access on your machine does not know what you
+would never do. So the meaningful question is not "what dangerous things have
+I typed" — it is "what would an assistant do here, and what would it reach".
+
+That is why agent logs, where they exist, count for far more than shell
+history. Where only shell history exists, this report says so instead of
+quietly treating one as the other.
+
+Method: your commands are fed to the REAL hook from this checkout — not to a
+simplified copy of its rules — and only its verdict is read. Nothing runs.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+HOME = Path.home()
+REPO = Path(__file__).resolve().parent.parent
+HOOK = REPO / "hooks" / "command-guard.py"
+EXAMPLE_RULES = REPO / "security-rules.example.json"
+
+# Never print a raw command: history lines contain tokens, passwords and paths
+# that are nobody's business, least of all a report's. Quoted sections and
+# anything that looks assigned are replaced wholesale — structure is enough to
+# recognise a case, and this is the only way that does not depend on
+# maintaining a list of secret shapes.
+_QUOTED = re.compile(r"""(['"])(?:\\.|(?!\1).)*\1""")
+_ASSIGNED = re.compile(r"(=)\s*\S+")
+
+
+def redact(command: str) -> str:
+    text = _QUOTED.sub("'…'", command)
+    text = _ASSIGNED.sub(r"\1…", text)
+    return " ".join(text.split())[:90]
+
+
+# ---------------------------------------------------------------- what is here
+def what_is_at_stake() -> tuple[list[str], int]:
+    """Existence only. This function must never open a protected file."""
+    findings: list[str] = []
+    weight = 0
+
+    ssh = HOME / ".ssh"
+    if ssh.is_dir():
+        # Not a name pattern: keys are called all sorts of things. Everything
+        # that is not a known non-key is treated as one — the safe direction
+        # for a report about risk.
+        known_non_keys = {"config", "known_hosts", "known_hosts.old",
+                          "authorized_keys", "environment"}
+        keys = [f for f in ssh.iterdir()
+                if f.is_file() and f.name not in known_non_keys
+                and not f.name.endswith(".pub")]
+        if keys:
+            findings.append(f"{len(keys)} private key(s) in ~/.ssh")
+            weight += 3
+        cfg = ssh / "config"
+        if cfg.is_file():
+            hosts = sum(1 for line in cfg.open(encoding="utf-8", errors="replace")
+                        if line.strip().lower().startswith("host ")
+                        and "*" not in line)
+            if hosts:
+                findings.append(f"{hosts} remote host(s) configured in ~/.ssh/config")
+                weight += hosts  # every reachable machine is its own blast radius
+
+    env_files = 0
+    repos = 0
+    for base in (HOME / "Projects", HOME / "Projekte", HOME / "code",
+                 HOME / "src", HOME / "dev", HOME / "work"):
+        if not base.is_dir():
+            continue
+        for _ in base.rglob(".git"):
+            repos += 1
+            if repos > 400:
+                break
+        for _ in base.rglob(".env"):
+            env_files += 1
+            if env_files > 200:
+                break
+    if repos:
+        findings.append(f"{repos}+ git repositories under your work directories")
+        weight += 2
+    if env_files:
+        findings.append(f"{env_files}+ .env files (credentials live in these)")
+        weight += 3
+
+    for name, tool in (("container tool", "docker"), ("kubernetes", "kubectl"),
+                       ("cloud CLI", "aws"), ("cloud CLI", "gcloud")):
+        if shutil.which(tool):
+            findings.append(f"{name} installed ({tool}) — reaches beyond this machine")
+            weight += 2
+
+    for cloud in (HOME / ".aws" / "credentials", HOME / ".config" / "gcloud",
+                  HOME / ".kube" / "config"):
+        if cloud.exists():
+            findings.append(f"cloud credentials present ({cloud.name})")
+            weight += 3
+
+    if not findings:
+        findings.append("nothing of the usual kinds found")
+    return findings, weight
+
+
+# ------------------------------------------------------- who works here
+def agents_present() -> list[str]:
+    found = []
+    if (HOME / ".claude").is_dir():
+        found.append("Claude Code")
+    if (HOME / ".config" / "opencode").is_dir() or shutil.which("opencode"):
+        found.append("opencode")
+    if (HOME / ".gemini").is_dir() or shutil.which("agy"):
+        found.append("an Antigravity/Gemini CLI")
+    if (HOME / ".cursor").is_dir():
+        found.append("Cursor")
+    return found
+
+
+# ------------------------------------------------------- what actually happened
+def collect_commands(limit: int) -> tuple[list[str], str, int]:
+    """Returns (commands, source description, total seen).
+
+    Agent logs first — they record what a MODEL did, which is the thing this
+    guard sits in front of. Shell history is a fallback and is labelled as the
+    weaker evidence it is.
+    """
+    audit = HOME / ".claude" / ".agent-audit" / "actions.jsonl"
+    if audit.is_file():
+        seen, cmds = 0, []
+        with audit.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if entry.get("tool") != "Bash":
+                    continue
+                command = entry.get("target") or ""
+                if command:
+                    seen += 1
+                    if len(cmds) < limit:
+                        cmds.append(command)
+        if cmds:
+            return cmds, "your assistant's own log — what a model actually ran", seen
+
+    for hist in (HOME / ".zsh_history", HOME / ".bash_history"):
+        if not hist.is_file():
+            continue
+        cmds, seen = [], 0
+        for line in hist.open(encoding="utf-8", errors="replace"):
+            # zsh writes ': <epoch>:<elapsed>;<command>'
+            command = line.split(";", 1)[1] if line.startswith(":") and ";" in line else line
+            command = command.strip()
+            if command:
+                seen += 1
+                if len(cmds) < limit:
+                    cmds.append(command)
+        if cmds:
+            return cmds, f"{hist.name} — YOUR commands, not an agent's", seen
+
+    return [], "no history found", 0
+
+
+# ------------------------------------------------------- what the guard would do
+def _kind_of(reason: str) -> str:
+    """A category for a block message, so the report can group instead of list.
+
+    Deliberately coarse: the message carries the offending path, so grouping
+    on the full text would give every stop its own category and say nothing.
+    """
+    text = reason.split(":", 1)[1].strip() if ":" in reason else reason
+    text = re.sub(r"[\'\"`].*?[\'\"`]", "…", text)
+    text = re.sub(r"[~/][\w./-]+", "…", text)
+    return " ".join(text.split())[:70] or "unclassified"
+
+
+def ask_the_guard(commands: list[str]) -> tuple[Counter, Counter, list[tuple[str, str]]]:
+    """Feed the REAL hook, read only its verdict. Nothing is executed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ)
+        env["CLAUDE_SECURITY_RULES"] = str(EXAMPLE_RULES)
+        env["CLAUDE_SUDO_OVERRIDES_DIR"] = str(Path(tmp) / "none")
+        env["CLAUDE_AUDIT_DIR"] = str(Path(tmp) / "audit")
+        env["CLAUDE_HOOK_DEV_FLAG"] = str(Path(tmp) / "no-dev")
+        # Point the hook at an EMPTY config, so its messages come back in the
+        # default language. Without this the report inherits whatever language
+        # the reader's install happens to use — which on the development
+        # machine produced an English report with German reasons in it.
+        empty_config = Path(tmp) / "guard-config.json"
+        empty_config.write_text("{}", encoding="utf-8")
+        env["CLAUDE_GUARD_CONFIG"] = str(empty_config)
+
+        def one(command: str):
+            payload = json.dumps({"tool_name": "Bash",
+                                  "tool_input": {"command": command},
+                                  "cwd": str(HOME), "session_id": "would-it-help"})
+            try:
+                run = subprocess.run([sys.executable, str(HOOK)], input=payload,
+                                     capture_output=True, text=True,
+                                     timeout=30, env=env)
+            except Exception:
+                return command, None, ""
+            reason = ""
+            for line in (run.stdout + run.stderr).splitlines():
+                if "BLOCKED" in line or "BLOCKIERT" in line:
+                    reason = line.strip()
+                    break
+            return command, run.returncode, reason
+
+        tally: Counter = Counter()
+        reasons: Counter = Counter()
+        examples: list[tuple[str, str]] = []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for command, code, reason in pool.map(one, commands):
+                if code is None:
+                    tally["error"] += 1
+                elif code == 2:
+                    tally["blocked"] += 1
+                    reasons[_kind_of(reason)] += 1
+                    if len(examples) < 12:
+                        examples.append((redact(command), reason[:80]))
+                else:
+                    tally["allowed"] += 1
+        return tally, reasons, examples
+
+
+# ---------------------------------------------------------------- verdict
+def verdict(weight: int, agents: list[str], blocked: int, total: int,
+            source_is_agent_log: bool) -> list[str]:
+    """Plain sentences, and it is allowed to say no."""
+    lines = []
+    share = (blocked / total * 100) if total else 0.0
+
+    if not agents:
+        lines.append(
+            "No AI assistant with tool access was found on this machine. "
+            "This guard sits between such an assistant and your system, so "
+            "TODAY it would protect you from nothing. Come back when you "
+            "start using one.")
+        return lines
+
+    if weight <= 2:
+        lines.append(
+            f"Little was found that an accident could destroy ({weight} points "
+            "of exposure). The guard would mostly be in your way. Worth it only "
+            "if that changes.")
+    elif weight <= 8:
+        lines.append(
+            f"A moderate amount is reachable from here ({weight} points): "
+            "enough that a bad command would cost you an afternoon, not a "
+            "month.")
+    else:
+        lines.append(
+            f"A lot is reachable from here ({weight} points) — keys, remote "
+            "machines or credentials. A single wrong recursive command reaches "
+            "further than this machine.")
+
+    if total:
+        lines.append(
+            f"Of {total} commands examined, {blocked} ({share:.1f} %) would have "
+            "been stopped or made to ask first.")
+        if share < 0.5:
+            lines.append(
+                "That is a low rate: the guard would rarely interrupt you. It "
+                "also means it would rarely act — its value here is the rare "
+                "bad day, not daily friction.")
+        elif share <= 8:
+            lines.append(
+                "That is the usual range: a handful of pauses a day, most of "
+                "them on the same few kinds of command. Whether that is worth "
+                "it depends on the first column of this report, not on this "
+                "number.")
+        else:
+            lines.append(
+                "That is a high rate. Expect real friction, and expect to spend "
+                "the first days adjusting the rules to your work rather than "
+                "the other way round.")
+
+    if not source_is_agent_log:
+        lines.append(
+            "IMPORTANT: this was measured on YOUR shell history, not on an "
+            "agent's actions. You know what you are doing — the guard exists "
+            "for the case where something else is typing. Treat the number "
+            "above as a rough shape, not as a prediction.")
+    return lines
+
+
+def main() -> int:
+    limit = 20000
+    if "--sample" in sys.argv:
+        limit = int(sys.argv[sys.argv.index("--sample") + 1])
+    as_json = "--json" in sys.argv
+
+    if not HOOK.is_file():
+        print(f"Run this from a checkout of the repo — no hook at {HOOK}")
+        return 2
+
+    stakes, weight = what_is_at_stake()
+    agents = agents_present()
+    commands, source, total_seen = collect_commands(limit)
+    source_is_agent_log = "log" in source and "history" not in source
+
+    tally, reasons, examples = Counter(), Counter(), []
+    if commands:
+        tally, reasons, examples = ask_the_guard(commands)
+
+    examined = tally["allowed"] + tally["blocked"]
+    lines = verdict(weight, agents, tally["blocked"], examined, source_is_agent_log)
+
+    if as_json:
+        print(json.dumps({
+            "exposure": {"weight": weight, "findings": stakes},
+            "agents": agents,
+            "source": source, "commands_seen": total_seen,
+            "examined": examined, "blocked": tally["blocked"],
+            "verdict": lines,
+        }, indent=2))
+        return 0
+
+    print("Would this guard help on this machine?\n")
+    print("WHAT IS REACHABLE FROM HERE")
+    for item in stakes:
+        print(f"  · {item}")
+    print()
+    print("WHO WORKS HERE WITH TOOL ACCESS")
+    if agents:
+        for a in agents:
+            print(f"  · {a}")
+    else:
+        print("  · no AI assistant with tool access found")
+    print()
+    print("WHAT WAS MEASURED")
+    print(f"  source: {source}")
+    if total_seen > examined:
+        print(f"  {examined} of {total_seen} commands examined "
+              f"(--sample raises the cap; the rest were NOT looked at)")
+    else:
+        print(f"  {examined} commands examined")
+    if reasons:
+        # Grouped, not listed. Twelve near-identical container commands say
+        # far less than "22 of your 40 stops are one kind of work" — and the
+        # grouping is what tells you whether the friction would concentrate
+        # in one corner of your day or spread across all of it.
+        print("\n  Where the stops would fall:")
+        for kind, count in reasons.most_common(8):
+            share_here = count / max(tally["blocked"], 1) * 100
+            print(f"    {count:>4}  ({share_here:4.0f} %)  {kind}")
+    if examples:
+        print("\n  A few of them, with quotes and values removed:")
+        for cmd, _ in examples[:4]:
+            print(f"    {cmd}")
+    print("\nVERDICT")
+    for line in lines:
+        print(f"  {line}")
+    print("\nWHAT THIS DOES NOT TELL YOU")
+    print("  · Whether the rules fit your work. The defaults are a starting")
+    print("    point; the setup dialogue is where they become yours.")
+    print("  · Anything about files it did not open — no protected file was")
+    print("    read, only its existence noted.")
+    print("  · How you would feel about the friction. That is not measurable.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
