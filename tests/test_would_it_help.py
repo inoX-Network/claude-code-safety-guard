@@ -173,6 +173,172 @@ def check_sample_cap_is_disclosed():
             f"cap not visible in the report: examined={examined} seen={seen}")
 
 
+def _repo_at(path: Path, *, remote: bool = True) -> None:
+    git = path / ".git"
+    git.mkdir(parents=True, exist_ok=True)
+    body = "[core]\n\trepositoryformatversion = 0\n"
+    if remote:
+        body += '[remote "origin"]\n\turl = https://example.invalid/x.git\n'
+    (git / "config").write_text(body, encoding="utf-8")
+
+
+def check_work_outside_the_first_six_names_is_found():
+    """~/git is as common as ~/Projects, and used to be invisible.
+
+    The six names searched at first were the author's own habits. Anyone
+    keeping repositories in ~/git, ~/repos, ~/workspace or /srv was told
+    "nothing of the usual kinds found" and, on the strength of that zero, that
+    the guard would mostly be in the way. A wrong no is the expensive error for
+    a tool whose point is that it can say no.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _exposed_machine(home)
+        _repo_at(home / "git" / "some-project", remote=False)
+        report = _run(home)
+        if "_broken" in report:
+            return False, f"no report: {report['_broken']}"
+        found = " ".join(report.get("exposure", {}).get("findings", []))
+        return "no remote" in found, f"repository in ~/git not counted: {found}"
+
+
+def check_package_directories_are_skipped():
+    """A .env inside node_modules is an example file, not a credential.
+
+    Measured as a DIFFERENCE, not as an absolute: a writable /srv or web root
+    on the machine running the tests contributes findings of its own, and an
+    "expect exactly nothing" assertion would be about that machine instead of
+    about the rule.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _bare_machine(home)
+        before = _run(home)
+        if "_broken" in before:
+            return False, "no report"
+
+        junk = home / "code" / "app" / "node_modules" / "a-package"
+        junk.mkdir(parents=True)
+        (junk / ".env").write_text("EXAMPLE=1\n", encoding="utf-8")
+        _repo_at(junk / "bundled-dependency")
+
+        after = _run(home)
+        if "_broken" in after:
+            return False, "no report"
+        w_before = before.get("exposure", {}).get("weight")
+        w_after = after.get("exposure", {}).get("weight")
+        return w_before == w_after, (
+            f"what lives in node_modules changed the exposure: "
+            f"{w_before} -> {w_after}")
+
+
+def check_an_empty_result_says_where_it_looked():
+    """Zero has two meanings, and only one of them is an argument."""
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _bare_machine(home)
+        report = _run(home)
+        if "_broken" in report:
+            return False, "no report"
+        found = " ".join(report.get("exposure", {}).get("findings", []))
+        if "nothing of the usual kinds" not in found and "no work directory" not in found:
+            # The machine running the tests has work of its own in a writable
+            # system location. Then this case has nothing to measure.
+            return True, "not applicable: findings came from outside the constructed home"
+        return "searched" in found, (
+            f"reported nothing without saying where it looked: {found}")
+
+
+def _audit_log(home: Path, entries: list[dict]) -> None:
+    d = home / ".claude" / ".agent-audit"
+    d.mkdir(parents=True, exist_ok=True)
+    d.joinpath("actions.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+
+
+def _probe_entries() -> list[dict]:
+    """What verify-install.py leaves behind, verbatim from a measured run."""
+    return [
+        {"session_id": "verify-install", "tool": "Bash",
+         "target": "echo x > /root/.claude/hooks/command-guard.py",
+         "decision": "block"},
+        {"session_id": "verify-install", "tool": "Bash",
+         "target": "grant-override abc --minutes 5", "decision": "block"},
+        {"session_id": "verify-install", "tool": "Bash",
+         "target": "chmod -R 777 /etc", "decision": "block"},
+        {"session_id": "verify-install", "tool": "Bash",
+         "target": "echo hello", "decision": "allow"},
+        {"session_id": "verify-install", "tool": "Bash",
+         "target": "grep -c def /root/.claude/hooks/command-guard.py",
+         "decision": "allow"},
+    ]
+
+
+def check_own_probes_are_not_evidence():
+    """The checker's probes must never become the measurement.
+
+    verify-install.py drives the INSTALLED hook, where the environment is
+    ignored on purpose — so its probes land in the real audit log whether
+    anyone wants them there or not. Six in ten of them are blocks by
+    construction. INSTALL.md sends people through the installation check first,
+    so on a fresh machine those probes ARE the log, and this report used to
+    conclude "60 % would have been stopped, expect real friction" from its own
+    test material — advising against installing, on its own evidence.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _exposed_machine(home)
+        _audit_log(home, _probe_entries())
+        report = _run(home)
+        if "_broken" in report:
+            return False, f"no report: {report['_broken']}"
+        source = report.get("source", "")
+        examined = report.get("examined", 0)
+        # Nothing but probes in the log, so the log must not be the source: the
+        # real shell history next to it is the honest fallback.
+        used_the_log = "log" in source and "history" not in source
+        if used_the_log:
+            return False, f"counted its own probes as evidence: {source}"
+        return examined > 0, f"read nothing at all instead: {source}"
+
+
+def check_a_tiny_sample_gets_no_rate():
+    """A percentage over a handful of commands is noise with a decimal point."""
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _exposed_machine(home)
+        _audit_log(home, [
+            {"session_id": "b7f2-real-session", "tool": "Bash",
+             "target": t, "decision": "allow"}
+            for t in ("ls -la", "git status", "chmod -R 777 /etc", "df -h")
+        ])
+        report = _run(home)
+        if "_broken" in report:
+            return False, "no report"
+        verdict = " ".join(report.get("verdict", []))
+        if "%" in verdict:
+            return False, f"put a rate on 4 commands: {verdict[:200]}"
+        return "too few" in verdict, f"did not say why: {verdict[:200]}"
+
+
+def check_the_notice_is_printed_even_with_yes():
+    """--yes answers the question; it does not make the answer secret.
+
+    An assistant passing the flag would otherwise hand its user a report
+    without ever having said what was read to produce it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        _bare_machine(home)
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["PATH"] = str(home / "no-tools-here")
+        proc = subprocess.run([sys.executable, str(TOOL), "--json", "--yes"],
+                              capture_output=True, text=True, env=env, timeout=300)
+        said = "This report will read" in proc.stderr
+        return said, f"notice not printed with --yes: {proc.stderr[:200]}"
+
+
 def check_nothing_is_read_without_consent():
     """The gate, and it is the important one.
 
@@ -207,6 +373,14 @@ CASES = [
     ("no protected file is ever opened", check_no_protected_file_is_read),
     ("a copy elsewhere is recommended, not required", check_backup_is_recommended_without_being_required),
     ("a capped run discloses what it skipped", check_sample_cap_is_disclosed),
+    ("the checker's own probes are not evidence", check_own_probes_are_not_evidence),
+    ("a tiny sample gets no rate", check_a_tiny_sample_gets_no_rate),
+    ("the notice is printed even with --yes", check_the_notice_is_printed_even_with_yes),
+    ("work outside the first six directory names is found",
+     check_work_outside_the_first_six_names_is_found),
+    ("package directories are skipped", check_package_directories_are_skipped),
+    ("an empty result says where it looked",
+     check_an_empty_result_says_where_it_looked),
 ]
 
 try:
