@@ -19,6 +19,7 @@
 # ============================================================================
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -169,6 +170,19 @@ def check_shipped_rules_carry_the_branch_list():
     return bool(branches) and "main" in branches, f"got {branches!r}"
 
 
+# Five cases build a REAL repository, on purpose (see the header). Where git is
+# not installed they cannot be measured — and an unmeasurable case must say so
+# rather than fail: without this the file died with FileNotFoundError deep in
+# subprocess, which reads as "the guard is broken" when it means "no git here".
+NEEDS_GIT = {
+    "commit on main is blocked",
+    "commit on a feature branch is free",
+    "commit reached via cd is blocked",
+    "commit via git -C is blocked",
+    "reading git stays free",
+}
+HAVE_GIT = shutil.which("git") is not None
+
 CASES = [
     ("scp onto a protected remote path is a write", check_scp_to_protected_remote_path),
     ("rsync onto a protected remote path is a write", check_rsync_to_protected_remote_path),
@@ -189,6 +203,8 @@ try:
 
     @pytest.mark.parametrize("name,fn", CASES)
     def test_remote_copy_and_branch_guard(name, fn):
+        if name in NEEDS_GIT and not HAVE_GIT:
+            pytest.skip("needs git installed")
         ok, detail = fn()
         assert ok, f"{name}: {detail}"
 
@@ -197,11 +213,17 @@ except ImportError:
 
 
 if __name__ == "__main__":
-    failures = 0
+    failures = skipped = 0
     for name, fn in CASES:
+        if name in NEEDS_GIT and not HAVE_GIT:
+            skipped += 1
+            print(f"SKIP  {name}  (needs git)")
+            continue
         ok, detail = fn()
         failures += not ok
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
         if not ok:
             print(f"      {detail}")
+    if skipped:
+        print(f"\n{skipped} case(s) not measured — install git to run them.")
     raise SystemExit(0 if not failures else 1)

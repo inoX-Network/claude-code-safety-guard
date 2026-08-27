@@ -67,7 +67,73 @@ def redact(command: str) -> str:
 
 
 # ---------------------------------------------------------------- what is here
-def what_is_at_stake() -> tuple[list[str], int, int, int]:
+# Where people keep work. The first six were the whole list once, and everyone
+# whose repositories live in ~/git, ~/repos or /srv was told "nothing of the
+# usual kinds found" — followed by "the guard would mostly be in your way".
+# For a tool whose distinguishing feature is that it can say no, a wrong no is
+# the expensive error: it is given to a well-exposed machine with confidence.
+WORK_DIRS = ["Projects", "Projekte", "code", "src", "dev", "work",
+             "git", "repos", "workspace", "Development", "Documents"]
+SYSTEM_WORK_DIRS = [Path("/var/www"), Path("/srv"), Path("/opt")]
+
+# Not searched: package and build directories. They hold thousands of entries,
+# none of them anyone's work — and a .env inside node_modules is an example
+# file, not a credential. Skipping them is what makes searching more places
+# affordable. Measured before the change on a machine with 66 repositories:
+# 4.0 s for two rglob passes over ~/Projekte alone.
+SKIP_DIRS = {"node_modules", ".venv", "venv", "env", "site-packages", "target",
+             "dist", "build", ".cache", ".tox", ".mypy_cache", "__pycache__",
+             ".next", ".gradle", "vendor", ".terraform"}
+
+MAX_REPOS = 400
+MAX_ENV_FILES = 200
+
+
+def _scan_work_dirs() -> tuple[int, int, int, list[Path]]:
+    """Count repositories, unversioned ones and .env files. Returns the bases too.
+
+    Returning what was searched matters as much as the counts: a zero has two
+    very different meanings — "nothing here" and "not where you keep it" — and
+    only one of them justifies advising against the guard.
+    """
+    # System locations only where this user can actually write. What they
+    # cannot change, an assistant running as them cannot destroy either — and
+    # /opt is full of installed software on most machines, which is not
+    # anybody's work. Web roots and /srv, where they belong to the user, are.
+    searched = [b for b in (HOME / d for d in WORK_DIRS) if b.is_dir()]
+    searched += [b for b in SYSTEM_WORK_DIRS
+                 if b.is_dir() and os.access(b, os.W_OK)]
+
+    repos = unversioned = env_files = 0
+    for base in searched:
+        for root, dirs, files in os.walk(base, onerror=lambda err: None):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+
+            if ".git" in dirs or ".git" in files:
+                repos += 1
+                config = Path(root) / ".git" / "config"
+                try:
+                    if config.is_file():
+                        text = config.read_text(encoding="utf-8", errors="replace")
+                        if "[remote " not in text:
+                            unversioned += 1
+                except OSError:
+                    pass
+                if ".git" in dirs:
+                    dirs.remove(".git")     # nothing of interest below it
+
+            if ".env" in files:
+                env_files += 1
+
+            if repos > MAX_REPOS or env_files > MAX_ENV_FILES:
+                break
+        if repos > MAX_REPOS or env_files > MAX_ENV_FILES:
+            break
+
+    return repos, unversioned, env_files, searched
+
+
+def what_is_at_stake() -> tuple[list[str], int, int, int, list[Path]]:
     """Existence only. This function must never open a protected file."""
     findings: list[str] = []
     weight = 0
@@ -94,29 +160,7 @@ def what_is_at_stake() -> tuple[list[str], int, int, int]:
                 findings.append(f"{hosts} remote host(s) configured in ~/.ssh/config")
                 weight += hosts  # every reachable machine is its own blast radius
 
-    env_files = 0
-    repos = 0
-    unversioned = 0
-    for base in (HOME / "Projects", HOME / "Projekte", HOME / "code",
-                 HOME / "src", HOME / "dev", HOME / "work"):
-        if not base.is_dir():
-            continue
-        for git_dir in base.rglob(".git"):
-            repos += 1
-            config = git_dir / "config"
-            try:
-                if config.is_file():
-                    text = config.read_text(encoding="utf-8", errors="replace")
-                    if "[remote " not in text:
-                        unversioned += 1
-            except Exception:
-                pass
-            if repos > 400:
-                break
-        for _ in base.rglob(".env"):
-            env_files += 1
-            if env_files > 200:
-                break
+    repos, unversioned, env_files, searched = _scan_work_dirs()
     if repos:
         findings.append(f"{repos}+ git repositories under your work directories")
         weight += 2
@@ -147,8 +191,18 @@ def what_is_at_stake() -> tuple[list[str], int, int, int]:
             weight += 3
 
     if not findings:
-        findings.append("nothing of the usual kinds found")
-    return findings, weight, unversioned, repos
+        # Say WHERE nothing was found. Without that the reader cannot tell
+        # "there is nothing here" from "you keep your work somewhere I did not
+        # look" — and the verdict below turns the second into advice.
+        if searched:
+            where = ", ".join(str(b) for b in searched[:6])
+            findings.append(f"nothing of the usual kinds found (searched: {where})")
+        else:
+            findings.append(
+                "no work directory of the usual names exists — searched for "
+                + ", ".join(f"~/{d}" for d in WORK_DIRS[:6]) + " and others. "
+                "If your projects live elsewhere, this report has not seen them.")
+    return findings, weight, unversioned, repos, searched
 
 
 # ------------------------------------------------------- who works here
@@ -166,12 +220,40 @@ def agents_present() -> list[str]:
 
 
 # ------------------------------------------------------- what actually happened
-def collect_commands(limit: int) -> tuple[list[str], str, int]:
-    """Returns (commands, source description, total seen).
+# This repository's own probes, which must never be counted as evidence.
+#
+# verify-install.py drives the INSTALLED hook, and there the environment is
+# ignored on purpose — so its probes land in the real audit log, no matter what
+# either tool would prefer. Roughly six in ten of them are blocks by
+# construction: they exist to prove the walls stand. On a fresh install, where
+# the log is otherwise almost empty, they were the whole sample, and this
+# report concluded "60 % would have been stopped — expect real friction" from
+# its own test material. Measured on 2026-08-27 in a clean container: five
+# commands examined, three of them the checker's, and a real shell history of
+# ten lines sitting right next to it, correctly ignored because the agent log
+# outranks it.
+#
+# The session_id is the only reliable marker: real sessions carry a UUID.
+OWN_SESSIONS = {"verify-install", "would-it-help"}
+
+# Below this, no percentage is printed. A rate over a handful of commands says
+# more about which commands happened to be in the log than about the guard: at
+# n = 5 every single one moves the figure by 20 points. The commands are still
+# shown — they are a finding; the rate is not.
+MIN_SAMPLE = 30
+
+
+def collect_commands(limit: int) -> tuple[list[str], str, int, bool]:
+    """Returns (commands, source description, total seen, source is an agent log).
 
     Agent logs first — they record what a MODEL did, which is the thing this
     guard sits in front of. Shell history is a fallback and is labelled as the
     weaker evidence it is.
+
+    The fourth value used to be re-derived by the caller from the description
+    text ("log" in it, "history" not). A sentence written for humans is a poor
+    place to keep a flag: rewording it flips the logic silently, and an
+    IMPORTANT caveat in the report hangs on it.
     """
     audit = HOME / ".claude" / ".agent-audit" / "actions.jsonl"
     if audit.is_file():
@@ -182,6 +264,8 @@ def collect_commands(limit: int) -> tuple[list[str], str, int]:
                     entry = json.loads(line)
                 except Exception:
                     continue
+                if entry.get("session_id") in OWN_SESSIONS:
+                    continue
                 if entry.get("tool") != "Bash":
                     continue
                 command = entry.get("target") or ""
@@ -190,7 +274,7 @@ def collect_commands(limit: int) -> tuple[list[str], str, int]:
                     if len(cmds) < limit:
                         cmds.append(command)
         if cmds:
-            return cmds, "your assistant's own log — what a model actually ran", seen
+            return cmds, "your assistant's own log — what a model actually ran", seen, True
 
     for hist in (HOME / ".zsh_history", HOME / ".bash_history"):
         if not hist.is_file():
@@ -205,9 +289,9 @@ def collect_commands(limit: int) -> tuple[list[str], str, int]:
                 if len(cmds) < limit:
                     cmds.append(command)
         if cmds:
-            return cmds, f"{hist.name} — YOUR commands, not an agent's", seen
+            return cmds, f"{hist.name} — YOUR commands, not an agent's", seen, False
 
-    return [], "no history found", 0
+    return [], "no history found", 0, False
 
 
 # ------------------------------------------------------- what the guard would do
@@ -333,7 +417,14 @@ def verdict(weight: int, agents: list[str], blocked: int, total: int,
             "machines or credentials. A single wrong recursive command reaches "
             "further than this machine.")
 
-    if total:
+    if total and total < MIN_SAMPLE:
+        lines.append(
+            f"Only {total} command(s) could be examined, {blocked} of which "
+            "would have been stopped or made to ask first. That is too few to "
+            "put a rate on: with a sample this small the figure would say more "
+            "about which commands happen to be in the log than about your "
+            "work. Use the guard for a few days, then run this again.")
+    elif total:
         lines.append(
             f"Of {total} commands examined, {blocked} ({share:.1f} %) would have "
             "been stopped or made to ask first.")
@@ -386,6 +477,12 @@ def consent(as_json: bool) -> bool:
         "removed.",
     ]
     if "--yes" in sys.argv:
+        # Say it anyway. --yes answers the question; it does not make the
+        # answer secret. An assistant that passes the flag would otherwise show
+        # its user a report without ever having said what was read for it.
+        print("\n".join(notice), file=sys.stderr)
+        print("\n(--yes was passed: reading without asking again.)\n",
+              file=sys.stderr)
         return True
     if as_json or not sys.stdin.isatty():
         print("\n".join(notice), file=sys.stderr)
@@ -421,10 +518,9 @@ def main() -> int:
         print(f"Run this from a checkout of the repo — no hook at {HOOK}")
         return 2
 
-    stakes, weight, unversioned, repos = what_is_at_stake()
+    stakes, weight, unversioned, repos, searched = what_is_at_stake()
     agents = agents_present()
-    commands, source, total_seen = collect_commands(limit)
-    source_is_agent_log = "log" in source and "history" not in source
+    commands, source, total_seen, source_is_agent_log = collect_commands(limit)
 
     tally, reasons, examples = Counter(), Counter(), []
     if commands:
@@ -436,7 +532,8 @@ def main() -> int:
 
     if as_json:
         print(json.dumps({
-            "exposure": {"weight": weight, "findings": stakes},
+            "exposure": {"weight": weight, "findings": stakes,
+                         "searched": [str(b) for b in searched]},
             "agents": agents,
             "source": source, "commands_seen": total_seen,
             "examined": examined, "blocked": tally["blocked"],

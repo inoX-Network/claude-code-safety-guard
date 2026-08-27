@@ -34,13 +34,27 @@ C = "some-container"
 
 
 def _run(command: str) -> int:
-    """Hook als PreToolUse-Dry-run aufrufen, Exit-Code zurueckgeben."""
+    """Hook als PreToolUse-Dry-run aufrufen, Exit-Code zurueckgeben.
+
+    Arbeitsverzeichnis explizit auf ein leeres Wegwerf-Verzeichnis: Ohne diese
+    Angabe erbt der Haken das Verzeichnis des Aufrufers und wertet es aus.
+    Gemessen am 27.08.2026: aus einem frischen Klon auf `main` heraus fiel
+    `text-commit`, weil der Branch-Schutz greift -- die Zeile ist ein Commit auf
+    einem geschuetzten Branch, nicht ein Fehlalarm auf das Wort im Text. Der
+    Fall selbst ist richtig; er wurde nur an einem Ort gemessen, an dem eine
+    zweite, hier gar nicht gemeinte Regel zustaendig ist.
+
+    Diese Liste prueft die POSITION eines Befehls im Text. Alles, was vom
+    Standort abhaengt, gehoert nicht hinein -- also wird der Standort
+    festgelegt statt geerbt.
+    """
     with tempfile.TemporaryDirectory() as ov:
         payload = {
             "session_id": "command-position-test",
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": command},
+            "cwd": ov,
         }
         env = dict(os.environ)
         env["CLAUDE_SECURITY_RULES"] = str(EXAMPLE_RULES)
@@ -53,6 +67,7 @@ def _run(command: str) -> int:
             capture_output=True,
             text=True,
             env=env,
+            cwd=ov,
         )
         return p.returncode
 

@@ -1,0 +1,97 @@
+name: tests
+
+# Why this exists: 50 test files and roughly 3150 cases were running nowhere.
+# main was red without anyone noticing, a matcher missing from the install
+# guide was found by chance rather than by a check, and eight guard changes
+# shipped without the version being raised. All three are the same gap.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The hook runs under whatever `python3` the user has. Testing one
+        # version would only prove it works under that one.
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Both are optional for the suite and decide how much of it can be
+      # measured. Here they are installed, so nothing stays unmeasured:
+      # a skip in CI would be a case nobody ever runs.
+      - name: Install pyright (unlocks the diagnostics cases)
+        run: pip install pyright
+
+      - name: Run the suite
+        run: python -m pytest tests/ -q -rs | tee /tmp/pytest.txt
+
+      # A skip is honest on a developer machine and suspicious here: it means a
+      # case nobody ever measures. Exactly one is expected -- the one that needs
+      # a real ~/.claude, which no runner has. Everything beyond that is a tool
+      # that failed to install, and would otherwise pass unnoticed as green.
+      - name: No unexpected skips
+        run: |
+          summary=$(tail -3 /tmp/pytest.txt)
+          echo "$summary"
+          skipped=$(printf '%s' "$summary" | sed -n 's/.*[^0-9]\([0-9]\+\) skipped.*/\1/p')
+          skipped=${skipped:-0}
+          echo "skipped: $skipped"
+          if [ "$skipped" -gt 1 ]; then
+            echo "More cases skipped than the one that needs a real ~/.claude:"
+            grep '^SKIPPED' /tmp/pytest.txt || true
+            exit 1
+          fi
+
+  version-was-raised:
+    # The gap that let eight guard changes ship unannounced. If a change alters
+    # what the guard blocks, the version has to move -- otherwise the update
+    # check tells people "you are current" while a fix is already published.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Does this change what the guard blocks?
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --quiet origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "$base"...HEAD)
+          echo "$changed"
+
+          behaviour=$(echo "$changed" | grep -E \
+            '^(hooks/command-guard\.py|security-rules\.example\.json|opencode/)' \
+            || true)
+          if [ -z "$behaviour" ]; then
+            echo "No change to what the guard blocks. No version bump needed."
+            exit 0
+          fi
+
+          if echo "$changed" | grep -qx 'VERSION'; then
+            echo "Guard behaviour changed and VERSION was raised."
+            exit 0
+          fi
+
+          echo "This pull request changes what the guard blocks:"
+          echo "$behaviour"
+          echo
+          echo "VERSION was not raised, so the update check would not announce it."
+          echo "A version is a date with an optional counter: 2026.08.27-2 is the"
+          echo "second release of that day. See CHANGELOG.md."
+          exit 1

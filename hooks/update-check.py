@@ -49,15 +49,32 @@ CONFIG_PATH = Path(os.environ.get("CLAUDE_UPDATE_CONFIG")
 STATE_PATH = Path(os.environ.get("CLAUDE_UPDATE_STATE")
                   or HOME / ".claude" / ".update-check-state.json")
 
-DEFAULT_SOURCE = ("https://raw.githubusercontent.com/inoX-Network/"
-                  "claude-code-safety-guard/main/VERSION")
+# The published version is read from the latest RELEASE, not from the tip of a
+# branch. "A newer version is available" has to mean something a person can go
+# and look at: main moves several times a day, and pointing at it once meant
+# announcing a state that was one merge old before anyone read the sentence.
+DEFAULT_SOURCE = ("https://api.github.com/repos/inoX-Network/"
+                  "claude-code-safety-guard/releases/latest")
 DEFAULT_INTERVAL_HOURS = 24
 FETCH_TIMEOUT_SECONDS = 5
 
-# A version is a date: 2026.08.21. Dates sort as strings, which is the whole
-# reason for the format — no parsing, no ordering rules to get wrong.
-VERSION_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
-MAX_RESPONSE_BYTES = 64
+# A version is a date, optionally with a counter: 2026.08.21, 2026.08.27-2.
+# The counter exists because a date alone cannot separate two releases on the
+# same day — measured on 2026-08-27, when eleven commits landed and two of them
+# changed what the guard blocks: one before the bump, one after. The second was
+# never announced, and no amount of discipline would have helped, because the
+# string had nowhere left to move.
+VERSION_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}(?:-\d{1,3})?$")
+
+# Enough for a release payload; the value is picked out of it by key.
+MAX_RESPONSE_BYTES = 65536
+
+
+def _as_sortable(version: str) -> tuple[int, int, int, int]:
+    """Order two versions. String comparison gets -10 and -2 the wrong way round."""
+    head, _, counter = version.partition("-")
+    year, month, day = (int(part) for part in head.split("."))
+    return year, month, day, int(counter or 0)
 
 # Built-in English, same arrangement as the guard: the configured language wins,
 # English is always there as the floor. The texts live here rather than in the
@@ -66,8 +83,9 @@ MAX_RESPONSE_BYTES = 64
 _MESSAGES = {
     "update.available":
         "A newer version of the guard is published: {published} (installed: "
-        "{installed}). Its changes are almost always security fixes. Say the "
-        "word if you want to see what changed.",
+        "{installed}). What changed is listed in CHANGELOG.md, which marks "
+        "which entries close a way around the guard. Say the word if you want "
+        "it looked up.",
     "update.feature_exists":
         "The guard can check once a day whether a newer version is published. "
         "That is TURNED OFF and contacts nothing. To enable it, set "
@@ -163,9 +181,23 @@ def _fetch_published(source: str) -> str | None:
     except (urllib.error.URLError, OSError, ValueError):
         return None
     try:
-        value = raw.decode("ascii").strip()
+        text = raw.decode("utf-8").strip()
     except UnicodeDecodeError:
         return None
+
+    # A releases endpoint answers with JSON; a plain VERSION file with a line.
+    # Both are accepted, because an installation may point `source` at either —
+    # and in both cases the value has to survive the same strict pattern before
+    # it is used for anything.
+    if text.startswith("{"):
+        try:
+            value = str(json.loads(text).get("tag_name") or "").strip()
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            return None
+    else:
+        value = text
+
+    value = value[1:] if value.startswith("v") else value
     return value if VERSION_RE.match(value) else None
 
 
@@ -201,7 +233,7 @@ def main() -> int:
     state["last_published"] = published
     _save_state(state)
 
-    if published > installed:
+    if _as_sortable(published) > _as_sortable(installed):
         try:
             print(texts["update.available"].format(published=published,
                                                    installed=installed))

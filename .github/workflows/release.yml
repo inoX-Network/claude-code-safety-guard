@@ -1,0 +1,74 @@
+name: release
+
+# The update check asks for the latest RELEASE, not for the tip of main. This
+# is what makes one exist -- and what makes sure the tag and the VERSION file
+# can never disagree, which would leave every installation comparing against a
+# number nobody published.
+on:
+  push:
+    tags:
+      - "20[0-9][0-9].[0-1][0-9].[0-3][0-9]"
+      - "20[0-9][0-9].[0-1][0-9].[0-3][0-9]-[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tag and VERSION must agree
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          file="$(tr -d ' \n' < VERSION)"
+          echo "tag=$tag file=$file"
+          if [ "$tag" != "$file" ]; then
+            echo "The tag and the VERSION file disagree."
+            echo "Installations compare against the tag; the hook reports the"
+            echo "file. If they differ, everyone is told they are out of date"
+            echo "-- or that they are current when they are not."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: The suite must be green before anything is published
+        run: |
+          pip install -r requirements-dev.txt pyright
+          python -m pytest tests/ -q
+
+      - name: Extract this version's changelog entry
+        run: |
+          python - "$GITHUB_REF_NAME" <<'PY' > release-notes.md
+          import sys
+          from pathlib import Path
+
+          wanted = sys.argv[1]
+          lines = Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+          out, collecting = [], False
+          for line in lines:
+              if line.startswith("## "):
+                  if collecting:
+                      break
+                  collecting = line[3:].strip() == wanted
+                  continue
+              if collecting:
+                  out.append(line)
+
+          body = "\n".join(out).strip()
+          print(body if body else
+                f"No changelog entry for {wanted}. See the commit history.")
+          PY
+          cat release-notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md

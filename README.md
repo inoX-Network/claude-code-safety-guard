@@ -1,14 +1,15 @@
 # Safety Guard — for Claude Code &amp; opencode
 
+[![tests](https://github.com/inoX-Network/claude-code-safety-guard/actions/workflows/tests.yml/badge.svg)](https://github.com/inoX-Network/claude-code-safety-guard/actions/workflows/tests.yml)
 [![Born from a real incident](https://img.shields.io/badge/born%20from-a%20real%20incident-red)](https://github.com/anthropics/claude-code/issues/39283)
-[![Works with](https://img.shields.io/badge/works%20with-Claude%20Code%20%2B%20opencode%20%2B%20Antigravity-success)](#supported-tool-chains)
+[![Works with](https://img.shields.io/badge/works%20with-Claude%20Code%20%2B%20opencode%20%2B%20Antigravity-success)](docs/tool-chains.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A **deterministic tool-call guard** for AI coding agents. It sees every tool call *before* it runs and blocks the catastrophic ones — `rm -rf /`, reading `~/.ssh`, writing `/etc`, force-push to `main`, credential exfiltration — with a **3-level, agent-scoped override** for when you genuinely need elevated rights, and a self-protection layer so the AI can never disarm its own guard. Same input, same verdict, every time. No LLM in the loop: it's the net for when the model's judgment (or the permission prompt) fails or gets subverted by prompt injection.
 
 - **Claude Code:** runs as a `PreToolUse` hook.
 - **opencode:** runs as a plugin that bridges to the same guard — see [opencode/README.md](opencode/README.md).
-- **Antigravity (`agy`):** runs as a `PreToolUse` adapter against the same guard — see [Supported tool chains](#supported-tool-chains).
+- **Antigravity (`agy`):** runs as a `PreToolUse` adapter against the same guard — see [Supported tool chains](docs/tool-chains.md).
 
 > **Born from a real incident.** This started after [Claude Code executed a destructive `chown -R` on `/etc/`](https://github.com/anthropics/claude-code/issues/39283) — a multi-hour recovery. The built-in permission system wasn't enough. This is defense-in-depth.
 
@@ -30,22 +31,6 @@ cp security-rules.example.json ~/.claude/safety-guard/security-rules.json
 
 ---
 
-## What's new in v2
-
-If you used the earlier version, here is what changed:
-
-- **Six tool matchers instead of two.** The hook now guards `Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit`. The write tools are checked against protected paths **and** self-protection — they were previously a blind spot.
-- **Real level differentiation.** The hook now evaluates `override_level` 0/1/2/3 individually. It is no longer "any override active → everything allowed". Paths and sudo are unlocked *per level*.
-- **Agent scoping.** Subagents do **not** inherit the coordinator's or main session's override. Each agent needs its own override file bound to its `agent_id`, or it runs at level 0.
-- **Self-protection.** The hook, the rules file, the rules document, the active override directory and the `bin/` scripts can never be written by the AI — no override lifts this.
-- **Approval channel.** The AI can no longer write itself an override. It writes a *proposal*; only the owner activates it via an owner-exclusive script invoked through `!`.
-- **Dev mode.** A supervised, time-boxed way for the owner to let the AI edit the hook *sources* — without opening up settings, the override dir, or the rules.
-- **Fail-closed (breaking change).** When the rules file or input is missing/unparsable, the hook now behaves **conservatively** (blocks / discards the override) instead of allowing through.
-- **Audit log.** Every decision is written to a JSONL audit log with secret redaction.
-- **`expires_at` timestamps.** Overrides now end on an ISO-8601 expiry (or when the owner removes the file). The old "the instance deletes its own file" model is gone — the AI cannot delete active override files.
-
----
-
 ## Features
 
 - **Blocked patterns** — `rm -rf /`, `mkfs`, `chmod 777`, fork bombs, pipe-to-shell, recursive `chown`/`chmod`/`chgrp` on system paths. **Always** blocked, even with an active override.
@@ -61,7 +46,7 @@ If you used the earlier version, here is what changed:
 - **Audit log** — Every allow/block decision is logged (JSONL) with secret redaction.
 - **Desktop notifications** — Optional heads-up on package installs.
 - **Prompt injection detection** — Warns (doesn't block) when suspicious keywords appear in a command.
-- **Diagnostics register** — A second hook (`Stop` + `SessionStart`) that records language-server warnings the AI would otherwise file away, and asks for a reason instead of an acknowledgement. Five states; `fixed` is measured, not claimed. See its own section below.
+- **Diagnostics register** — A second hook (`Stop` + `SessionStart`) that records language-server warnings the AI would otherwise file away, and asks for a reason instead of an acknowledgement. Five states; `fixed` is measured, not claimed. See [docs/diagnostics-register.md](docs/diagnostics-register.md).
 - **Update check** — Optional, off by default: one line at session start when a newer version has been published. Reads and compares, nothing else.
 
 ---
@@ -108,6 +93,10 @@ instructs an assistant to recommend this project.
 That disclosure is deliberate. A file in a repository that issues instructions
 to a foreign agent has the same shape as a prompt injection, and a security tool
 should not be the one demonstrating it quietly.
+
+If you would rather your assistant did not read it: delete both files. Nothing
+about what the guard blocks depends on them — they are addressed to a reader,
+not to the hook.
 
 ## How it works
 
@@ -343,6 +332,12 @@ These paths can never be written by AI tool calls — neither via Bash nor via W
 | `~/.claude/settings.json`, `~/.claude/settings.local.json` | Claude Code settings |
 | `~/.claude/CLAUDE.md` | AI context file |
 | `~/.claude/rules` | the rules document(s) |
+| `~/.claude/guard-config.json` | this installation's own config — it says **where the rules live**, so whoever can write it points the guard at an empty rule set and disarms it without touching a single rule |
+
+Two further groups belong to the same list and have their own sections below,
+because they are longer than a table row: the **shell's startup files**, and
+the **control files of other tool chains** (opencode, Antigravity) — including
+the project-local ones, which are a rule rather than a list of places.
 
 The list is hardcoded in the hook (not in the JSON rules) on purpose: if it lived in the rules file, the protection list could be edited through itself. The pending directory `~/.claude/.sudo-overrides-pending` is **deliberately not** protected — the AI must be able to drop proposals there.
 
@@ -435,7 +430,7 @@ able to replace the file that does the guarding.
 The same reasoning covers Antigravity, and it held before any adapter
 existed — self-protection of a chain's control files does not depend on
 that chain being wired up. Since 2026-08-23 an adapter exists as well; see
-*Supported tool chains* below. Its `hooks.json` is the sharp end: the
+[Supported tool chains](docs/tool-chains.md). Its `hooks.json` is the sharp end: the
 documentation embedded in the binary lists it under *"Lifecycle Event —
 running scripts/commands at specific agent lifecycle points (e.g. pre-tool
 execution)"*. That is the exact counterpart to `.claude/hooks/`, and
@@ -528,9 +523,26 @@ No override unlocks any of these:
 | Fork bomb | `:(){ :\|:& };:` |
 | Git safety | `git reset --hard`, force-push (`-f` / `--force` / `--force-with-lease`), `commit --no-verify`, `commit --amend`, `git add -A` / `git add .`, writing `git config` |
 | Force-push to primary | `git push --force` / `-f` / `--force-with-lease` to `main` / `master` (dedicated rule) |
+| Commit on a protected branch | `git commit` while the repository is on a branch in `protected_git_branches` (`main` by default) — see the note below |
 | Self-protection paths | the hook, rules file, rules doc, active override dir, `bin/` (see above) |
 | Owner-only commands | `grant-override`, `hook-dev-mode` (AI Bash calls) |
 | Credential reads | `/etc/shadow`, `/etc/gshadow` |
+
+**About committing on `main`.** This one surprises people, so it is worth
+saying plainly: with the shipped rules, an AI cannot commit while your
+repository sits on `main`. Not the message, not the flags — the branch. The
+hook asks git for the real branch (`rev-parse`), so `cd repo && git commit` and
+`git -C repo commit` are covered too; merges and pulls stay free, and so does
+committing on any other branch. Change `protected_git_branches` if that does
+not fit how you work.
+
+It also reaches further than it looks. Running this repository's own test suite
+from a clone standing on `main` turns one case red — a case asserting that a
+commit message may merely *mention* a blocked command. Nothing is wrong with
+the guard there and nothing with the case: the test simply ran somewhere a
+second, unrelated rule applies. Both an external reviewer and the suite itself
+were caught by that on 2026-08-27, which is why the tests now state their
+working directory instead of inheriting it.
 
 ---
 
@@ -585,7 +597,7 @@ discoverable without nagging. Turn it on in `guard-config.json`:
   "update_check": {
     "enabled": true,
     "interval_hours": 24,
-    "source": "https://raw.githubusercontent.com/inoX-Network/claude-code-safety-guard/main/VERSION"
+    "source": "https://api.github.com/repos/inoX-Network/claude-code-safety-guard/releases/latest"
   }
 }
 ```
@@ -610,154 +622,32 @@ nothing runs, and nothing complains.
 }
 ```
 
-What it does: compares the `VERSION` file next to the hook against the published
-one (both are dates — `2026.08.21` — so string order is date order) and prints
-one line if the published one is newer. What it does not do: download anything,
-change anything, or run with elevated rights. It reads, compares, and speaks.
+What it does: compares the `VERSION` file next to the hook against the latest
+**release**, and prints one line if that one is newer. What it does not do:
+download anything, change anything, or run with elevated rights. It reads,
+compares, and speaks.
+
+The published version is read from a release rather than from the tip of
+`main`, because "a newer version exists" has to mean something you can go and
+look at. `main` moves several times a day; announcing it meant announcing a
+state that could already be one merge old — and, on a bad day, one that had
+not been through CI.
+
+A version is a date, optionally with a counter: `2026.08.21`, `2026.08.27-2`.
+The counter is not decoration. On 2026-08-27 eleven commits landed in one day,
+two of which changed what the guard blocks — one before the version was
+raised, one after. The second could not be announced, because the date had
+nowhere left to move. Counters are compared as numbers, so `-10` is newer
+than `-2`.
+
+The notice names [CHANGELOG.md](CHANGELOG.md) instead of characterising what
+changed. It used to say the changes were "almost always security fixes", which
+the script has no way of knowing: the entry that raised the version on
+2026-08-27 was a documentation commit. The changelog marks per entry whether
+it closes a way around the guard.
 
 Without a `VERSION` file next to the hook there is nothing to compare, and it
 stays silent rather than guessing.
-
----
-
-## The diagnostics register — a second hook
-
-`hooks/diagnostics-register.py` is **not** a security check. It is in this repo
-because it answers the same kind of question with the same kind of mechanism:
-what does an AI do reliably wrong, and what can be put in its way?
-
-### The problem it solves
-
-Language-server warnings arrive as an **attachment**, not as an answer. The
-filter "not my change, pre-existing code" is right most of the time and
-therefore runs automatically — and that is exactly when it takes the one real
-warning with it.
-
-The measured cost, in this repo: `"delete_only" is possibly unbound` was shown
-twice on the same day, on two different working copies, directly under the edit
-result. Filed away both times. It was a crash in the most common branch of the
-write check, and it survived 13 local test lists and 2993 test cases here,
-because a crash and a considered denial exit with the same code. Someone else
-had to trip over it.
-
-A resolution cannot fix that, because nothing about it is a decision. A hook
-can.
-
-### The five states
-
-| state | who sets it | why |
-|---|---|---|
-| `open` | the hook, automatically | starting state |
-| `fixed` | **nobody** — the tool runs pyright and looks | a measurement, not a claim. Harder to forge than a marking, and it keeps the owner out of the common case entirely |
-| `parked` | the AI, with a **reason and a deadline** | "it goes away once X lands" is a real case. The deadline is the price: parking is a postponement, not a disappearance |
-| `dismissed` | **the owner only** | the single path on which a real warning falls silent for good — whoever may walk it alone can switch the hook off |
-| `moot` | nobody — the file is gone | a finding, not a decision. Not deleted: if the file returns and the warning with it, it is recorded again |
-
-Whatever stays `open` is presented once every 24 hours — **the oldest case
-concretely**, with file, line and how long it has been standing. Not a count. A
-message saying "3 open items" is the same wallpaper in two weeks that the
-warnings themselves are today.
-
-### Why the filter is on the rule name, not the severity
-
-This is the number that decides whether such a hook survives contact with
-everyday work. Measured over 15942 real diagnostics from 570 transcripts:
-
-```
-Error    8964      <- of these, 3720 are reportMissingImports (41%)
-Hint     6954
-Warning    24
-```
-
-`reportMissingImports` is pyright not finding the virtual environment while the
-file is perfectly fine. **A hook keyed on severity fires on almost every edit
-and is switched off within a week.**
-
-The four rules it does watch — `reportPossiblyUnboundVariable`,
-`reportUndefinedVariable`, `reportRedeclaration`,
-`reportSelfClsParameterName` — are decidable without import resolution,
-checkable in seconds, and a hit is nearly always a real defect. Together they
-are **2.1 percent** of all diagnostics. Over 30 days that worked out to roughly
-two entries per week that actually needed presenting.
-
-### Installing it
-
-```jsonc
-// ~/.claude/settings.json
-"hooks": {
-  "Stop":         [{ "hooks": [{ "type": "command",
-                     "command": "python3 ~/.claude/hooks/diagnostics-register.py stop" }] }],
-  "SessionStart": [{ "hooks": [{ "type": "command",
-                     "command": "python3 ~/.claude/hooks/diagnostics-register.py start" }] }]
-}
-```
-
-Needs `pyright` on the PATH. To keep the AI from editing the register
-directly, add its directory to `blocked_paths_write` in your rules — the AI
-then reaches it only through the tool, and the tool enforces the state rules.
-
-### Two things worth knowing before you build on it
-
-**The anchor is `Stop`, not `PostToolUse`.** Measured: at the moment a
-`PostToolUse` hook on an edit runs, the diagnostics do not exist yet — the
-language server has not answered. They appear in the transcript a few seconds
-later. The timing is not deterministic either (sometimes they arrive with the
-edit, sometimes only with the next tool call), which makes `Stop` the latest
-and only reliable point.
-
-**It guards against negligence, not against intent.** Anyone assembling the
-register path at runtime writes past it — the same limit self-protection has,
-named in THREAT-MODEL.md. That is the right trade: the opponent here is one's
-own autopilot, not an attacker.
-
----
-
-## Configuration reference
-
-The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see [security-rules.example.json](security-rules.example.json) for a complete starting point), or from wherever `installation.rules` points. Top-level keys:
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `blocked_patterns` | `string[]` | Always-blocked patterns. Each entry is treated as a regex if it contains regex metacharacters, otherwise as a literal substring. A literal pipe must be written `\|`. |
-| `owner_only_commands` | `string[]` | Commands only the owner may run via `!`; hard-blocked for AI Bash. Matched at the **command position**, so the same name stays usable as text — in a search pattern, a note, or a file name. See below. |
-| `blocked_git_ops` | `string[]` | Always-blocked git operations (regex). |
-| `blocked_paths_write` | `string[]` | Paths protected from writes (supports `~`); level-dependent. |
-| `blocked_paths_delete` | `string[]` | Paths that may be **changed but not destroyed** (supports `~`); level-dependent. See below. |
-| `allowed_sudo` | `string[]` | Base allowlist of commands permitted after `sudo`. |
-| `require_confirmation` | `string[]` | Substrings that trigger a desktop notification. |
-| `protected_reads.always_allowed` | `string[]` | Read tool may always access (supports `*` globs). |
-| `protected_reads.require_override_1` | `string[]` | Read needs a level-1+ override. |
-| `protected_reads.always_blocked_reads` | `string[]` | Never readable, no override. |
-| `protected_reads.env_files_require_override_1` | `string[]` | `.env` filenames whose read **and** write need level 1+. |
-| `blocked_bash_patterns_force_push` | `string[]` | Regexes blocking force-push on `main`/`master`. |
-| `prompt_injection_keywords` | `string[]` | Keywords that emit a stderr warning (no block). |
-| `protected_git_branches` | `string[]` | Branches on which `git commit` is refused outright. The hook asks git for the real branch (`rev-parse`), so `git -C <path>` and `cd <path> && git commit` are covered. Merge and pull stay free. |
-| `docker.blocked_flags` | `string[]` | Extra container flags to refuse, **added to** a built-in list (`--privileged`, `--pid=host`, `--net=host`, `--ipc=host`, `--uts=host`, `--cap-add=ALL`, `--cap-add=SYS_ADMIN`, the container socket, `seccomp=unconfined`, `apparmor=unconfined`). Matched case-insensitively, since the container tool treats `--cap-add=all` and `=ALL` alike. The built-in list cannot be shortened from the rules file. |
-| `mcp_policy.gate_servers` | `string[]` | MCP servers whose every tool call needs a level-1+ override. |
-| `mcp_policy.safe_servers` | `string[]` | MCP servers whose calls are free. |
-| `mcp_policy.read_verb_prefixes` | `string[]` | For any other server: a tool whose name starts with one of these is treated as reading and stays free; everything else needs level 1+ (default-deny for writes). |
-
-> The self-protection path list is **not** in this file — it is hardcoded in the hook so it cannot be edited through itself.
-
-### Override file format
-
-A proposal you write into the pending directory:
-
-| Field | Type | Set by | Description |
-|-------|------|--------|-------------|
-| `override_level` | `1 \| 2 \| 3` | you | Permission level (must be an int, not bool). |
-| `task` | `string` | you | Non-empty description of what it's for. |
-| `project` | `string \| null` | you | Optional associated project. |
-| `confirmed` | `boolean` | you `false` → script `true` | The hook only honors `true`. |
-| `agent_id` | `string` | you | **Subagent only** — must equal the subagent's `agent_id`. Omit entirely for the main session. |
-| `expires_at` | ISO-8601 | the script (`--minutes`) | Mandatory for main-session overrides; optional but honored for agent overrides. |
-| `label` | `string` | the script | `EXTENDED` / `FULL` / `CRITICAL`. |
-| `granted_at`, `granted_by` | string | the script | Audit metadata. |
-| `snapshot_id` | `string` | the script (`--snapshot`) | Level 3 only. |
-| `grants.additional_sudo` | `string[] \| "all"` | you | Extra sudo commands (base allowlist still applies). |
-| `grants.allowed_paths` | `string[]` | you | Level-1 write paths, path-boundary-exact. |
-| `grants.recursive_operations` | `boolean` | you | Informational. |
-| `grants.system_paths` | `boolean` | you | Informational — **not evaluated** by the hook; only the level controls system-path access. |
 
 ---
 
@@ -846,208 +736,44 @@ pass, across 18 sessions, and none is newly blocked.**
 
 ---
 
-## Supported tool chains
+## Reference
 
-One guard, several front ends. The guard itself never changes for a new CLI —
-what changes is the thin adapter that translates that CLI's dialect into the
-guard's, and back.
+This README says what the guard does and why. The parts you look things up in
+live next to it:
 
-| | Claude Code | opencode | Antigravity (`agy`) |
-|---|---|---|---|
-| **How it hooks in** | native `PreToolUse` hook | plugin (TypeScript) | adapter (Python) |
-| **Where it lives** | `hooks/command-guard.py` | `opencode/plugin/safety-guard.ts` | not published yet — see below |
-| **How "blocked" is said** | exit code `2` | thrown error | `{"decision":"deny"}` on stdout |
-| **Tools mapped by name** | all (native payload) | 4 (`bash`, `read`, `write`, `edit`) | 21 of 57 |
-| **Unmapped tools** | — | pass through | fail-closed if they carry a path, command or code argument |
-| **Its own control files protected** | yes | yes | yes |
-| **Far side is fail-closed** | yes | yes | yes, measured |
-
-**"Tools mapped by name" is not a quality score.** A chain with four tools needs
-four mappings. Antigravity exposes 57, and mapping every one of them would be
-the wrong move: a list of everything dangerous is a list you will one day
-forget to extend. What catches the rest is the fail-closed rule — an unknown
-tool carrying a path, a command or a code argument is refused, whether anyone
-has heard of it or not.
-
-### How to know what a CLI really exposes
-
-Ask it, don't read about it. Antigravity's own documentation and its internal
-constants disagreed about tool names, and both were partly wrong. The
-authoritative list came from the CLI itself:
-
-```sh
-echo '{"prompt":"x"}' | agy --input-format stream-json --output-format stream-json
-```
-
-The first event it emits carries the complete tool list of the running build.
-Measured on 2026-08-23, that list decided four open questions at once — and
-revealed four tools that were slipping past an adapter everyone believed
-complete.
-
-**This belongs in the acceptance check of every new CLI version.** It costs one
-call. A tool that arrives with an update is otherwise silently unguarded.
-
-### Antigravity: built and measured, not yet published
-
-The adapter runs and is measured — 19 of 19 against the live chain, both
-directions — but it is not in this repository yet. Its comments are the part
-worth having, and they are still in the author's language; publishing the code
-without them would ship a shell. Until then, the contract below is enough to
-build one, and Antigravity's control files are protected either way.
-
-### What a front end inherits
-
-An editor or IDE that drives one of these CLIs inherits its protection
-unchanged — the guard sits at the tool call, below anything a UI does. Nothing
-extra to install, and nothing extra to get wrong.
-
-## Wiring up another CLI — the integration contract
-
-Today, anyone writing an adapter for a third CLI has to read the core to find
-out what it wants. This section is that answer, so the next one is clerical
-work rather than surgery.
-
-The shape is fixed: **the core decides, the adapter translates.** An adapter
-maps tool names and turns a return code into whatever "blocked" means in its
-protocol. It never decides whether something is safe.
-
-Why not teach the core a second protocol instead? Because the risk is
-asymmetric. A broken adapter blocks, and the caller sees the error. A broken
-format detector *inside* the core lets things through: a payload of format A
-mistaken for format B comes back as exit 0 — a denial silently turned into
-permission. The core keeps exactly one exit for that reason.
-
-### What the core expects on stdin
-
-One JSON object:
-
-```json
-{
-  "tool_name": "Bash",
-  "tool_input": { "command": "rm -rf /etc" },
-  "session_id": "optional",
-  "agent_id": "optional"
-}
-```
-
-- `tool_name` — one of the tool names the core knows: `Bash`, `Read`, `Write`,
-  `Edit`, `MultiEdit`, `NotebookEdit`, and the `mcp__*` family. Map your CLI's
-  names onto these.
-- `tool_input` — the payload. `command` for `Bash`, `file_path` for everything
-  that touches a file.
-- `session_id` / `agent_id` — optional, and they matter: overrides are bound to
-  them. Omitting `agent_id` is the safe choice, because the call is then
-  treated as a main session at level 0 and inherits nothing.
-
-**Resolve paths to absolute before the core sees them.** A relative
-`../../.claude/settings.json` cannot be matched against the self-protect list,
-and the core would wave it through. Resolving is the adapter's job because only
-the adapter knows the working directory.
-
-### What it answers
-
-| exit | meaning |
+| Document | What is in it |
 |---|---|
-| `0` | allowed — run the tool call |
-| `2` | blocked — the reason is on stderr, verbatim, for the user |
-
-There is no third value. `sys.exit(0)` and `sys.exit(2)` are the only exits in
-the core, so **anything else is a failure state, never a quiet yes.**
-
-**But `2` is ambiguous, and that costs more than it looks.** The core catches
-unexpected errors in itself and exits fail-closed — with the same `2`. That is
-right for safety: without the net, every crash would be a silent pass. It also
-means **a crash is indistinguishable from a considered denial** for anything
-that checks the exit code, which is what a test suite does.
-
-We learned this the expensive way. A crash in the *most common* branch of the
-write check survived 13 local test lists and 2993 test cases here, because every
-one of them asserted "blocked" and got it. The user saw a stack trace instead of
-"which path, which grant is missing" — fail-closed held, the *explanation* was
-lost.
-
-If you write tests against this guard, assert on the **reason**, not only the
-exit code: a denial that carries a crash marker is not a denial. See
-`tests/test_no_crash_on_real_paths.py`, which does exactly that across eight
-protection classes and in both languages.
-
-The general lesson outstrips this project: **wherever something catches
-fail-closed, it needs a second measurement that makes the caught thing
-visible.** A safety net that swallows errors also hides them.
-
-### The four duties of an adapter
-
-**1. Make no security decision.** Map names, translate return codes. No "this
-one looks harmless, I'll skip it". The moment an adapter starts judging, there
-are two policies to keep in sync, and the weaker one wins.
-
-**2. Block on anything that is not 0.** Not just on 2. Measured against damaged
-copies of the guard:
-
-| state of the guard file | exit | an adapter checking `== 2` |
-|---|---|---|
-| intact, blocks | 2 | blocks — correct |
-| syntax error on line 1 | 1 | **lets it through** |
-| empty file | 0 | **lets it through** |
-| killed by a signal | `null` | **lets it through** |
-
-The syntax error is the worst: it ends Python *before a single line runs*, so
-the core's own fail-closed handler never gets a turn. An interrupted copy
-switches the protection off in silence.
-
-The empty file is the one failure a return code cannot reveal, since 0 means
-allowed. Check the file's size instead. **Named limit:** that catches the broken
-guard, not the tampered one — a guard trimmed down to `pass` also returns 0 and
-looks identical from outside. What answers that is self-protection on the guard
-source, not the adapter.
-
-**3. Catch your own errors into a deny.** If the host CLI is not fail-closed —
-a crashing hook, unreadable output, a timeout — the adapter must turn its own
-failure into a block instead of dying. Measure this before you assume it: how
-the host behaves when its hook misbehaves decides how much the adapter has to
-carry.
-
-**4. Know which tools you are *not* checking, and why.** "Block unknown tools"
-is too blunt: a CLI has tools the core has no rules for, and blocking `glob`
-would make every session useless. The core solves it the other way round, and
-an adapter should copy that: keep a list of the tools that **only read**
-(`_READ_ONLY_TOOLS` in the core), and treat everything else as potentially
-writing. A tool that is not on the harmless list must either be mapped or
-blocked — never skipped by default. That way a tool nobody has thought of yet
-gets checked instead of waved through.
-
-There is one deliberate fail-open: if no guard is installed at all, the adapter
-warns and passes. Blocking there would make the CLI unusable for anyone who
-hasn't set the guard up, and it is not a hole an attacker can create — they
-would have to delete the guard first, which self-protection already covers.
-
-### Worked example
-
-`opencode/plugin/safety-guard.ts` is a complete adapter in 337 lines, and
-the core was never touched for it. It maps four tools onto the core's names,
-handles the multi-file `apply_patch` by sending every target path through
-separately, resolves relative paths against the project directory first, and
-blocks on every non-zero return.
-
-Its tests are the more useful part to copy:
-`opencode/test_broken_guard_denies.mjs` drives the **real** plugin function
-against deliberately damaged guard copies. A rebuilt call path would not have
-found any of the holes above, because the hole was in the real one.
+| [INSTALL.md](INSTALL.md) | the from-scratch setup, step by step |
+| [docs/configuration-reference.md](docs/configuration-reference.md) | every key in `security-rules.json` |
+| [docs/tool-chains.md](docs/tool-chains.md) | Claude Code, opencode, Antigravity — and how to wire up a fourth |
+| [docs/diagnostics-register.md](docs/diagnostics-register.md) | the second hook: language-server warnings that cannot be filed away |
+| [THREAT-MODEL.md](THREAT-MODEL.md) | what this deliberately does **not** do |
+| [SECURITY.md](SECURITY.md) | how to report a bypass without publishing it first |
+| [CHANGELOG.md](CHANGELOG.md) | what changed, and which changes were security fixes |
+| [docs/whats-new-in-v2.md](docs/whats-new-in-v2.md) | for returning readers of the first version |
+| [docs/counter-tests/](docs/counter-tests/) | reproduction steps for three closed gaps, to check them on your own machine |
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. If you've been bitten by a similar incident and have patterns to add to the blocklist, please share them.
+Issues and PRs welcome. If you've been bitten by a similar incident and have
+patterns to add to the blocklist, please share them. Found a way *around* the
+guard? [SECURITY.md](SECURITY.md) has a non-public route — please use it.
 
-Before opening a PR, run the test suite (no install needed — the tests isolate their own runtime state):
+[CONTRIBUTING.md](CONTRIBUTING.md) has the details. The short version:
 
 ```bash
-python3 tests/test_command_guard.py
-python3 tests/test_freigabe_e2e.py
+pip install -r requirements-dev.txt
+python3 -m pytest tests/ -q
 ```
 
-See [INSTALL.md](INSTALL.md#e-verify-its-armed) for how to verify a live installation.
+The suite needs no installation of the guard itself. Two areas measure more
+when `git` and `pyright` are present; without them those cases skip and say so
+rather than failing. One case needs a real `~/.claude` and skips otherwise.
+
+See [INSTALL.md](INSTALL.md#e-verify-its-armed) for how to verify a live
+installation, or run `python3 tools/verify-install.py`.
 
 ## License
 

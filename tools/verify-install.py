@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """verify-install — is this installation actually armed, or does it only look it?
 
-    python3 tools/verify-install.py [--json]
+    python3 tools/verify-install.py [--json] [--wiring-only] [--strict]
+
+      --json          machine-readable results instead of the report
+      --wiring-only   static checks only, no payload probes (see main())
+      --strict        exit non-zero on warnings too, for CI
 
 Section E of INSTALL.md asks you to try five things by hand. This does that
 work, plus the part hands are bad at: checking that both halves of every
@@ -36,6 +40,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +58,72 @@ def note(state: str, check: str, detail: str) -> None:
 
 
 # ---------------------------------------------------------------- part 1
+# The tools the guard is meant to stand in front of. The last one is a stand-in
+# for the whole mcp__* family: a matcher has to cover a name of that shape, not
+# the literal string.
+EXPECTED_TOOLS = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+                  "mcp__example__tool"]
+
+
+def _covers(matcher: str | None, tool: str) -> bool:
+    """Does this matcher put the guard in front of `tool`?
+
+    An absent or empty matcher covers every tool — that is the tool chain's own
+    convention, and it is the SAFEST configuration, not a gap. A check that
+    demanded seven literal names would report exactly that setup as broken;
+    this project's own test suite builds one, and so does the author's machine.
+    """
+    if matcher is None or matcher in ("", "*", ".*"):
+        return True
+    try:
+        return re.fullmatch(matcher, tool) is not None
+    except re.error:
+        # Not a usable pattern. Saying "covered" here would hide a real hole.
+        return False
+
+
+def check_matchers(matchers: list[str | None]) -> None:
+    """The half the behavioural probes below CANNOT see.
+
+    Those probes drive the hook directly and therefore prove what it decides —
+    never whether it is asked. A settings file that registers the guard for
+    `Bash` alone leaves Write, Edit, MultiEdit, NotebookEdit, Read and the MCP
+    tools unguarded, and every probe still comes back green, because each one
+    reaches the hook by hand. Measured on 2026-08-27: such an install reported
+    "12 ok, 1 to look at, 0 broken" and exit code 0.
+
+    Unlike the running session's wiring, this half is knowable from here: the
+    matchers are sitting in the file.
+    """
+    missing = [t for t in EXPECTED_TOOLS
+               if not any(_covers(m, t) for m in matchers)]
+    if not missing:
+        note(OK, "tool coverage",
+             f"{len(matchers)} matcher(s) cover all {len(EXPECTED_TOOLS)} tool kinds")
+        return
+    shown = ["the mcp__* family" if t.startswith("mcp__") else t for t in missing]
+    note(FAIL, "tool coverage",
+         "no matcher puts the guard in front of: " + ", ".join(shown)
+         + ". Those tool calls never reach it — see settings.example.json.")
+
+
+def check_interpreter(guard_commands: list[str]) -> None:
+    """The probes run under THIS python; production runs under that one."""
+    named = set()
+    for raw in guard_commands:
+        first = raw.split()[0] if raw.split() else ""
+        if "command-guard" not in first and first:
+            named.add(first)
+    if not named:
+        return
+    resolved = {shutil.which(n) or n for n in named}
+    if any(r != sys.executable for r in resolved):
+        note(WARN, "interpreter",
+             f"settings.json runs the hook with {', '.join(sorted(named))}, "
+             f"this check ran it with {sys.executable}. The verdicts below are "
+             "from a different interpreter than the one that guards you.")
+
+
 def find_hook_from_settings() -> Path | None:
     """The hook path AS THE TOOL CHAIN SEES IT — not where we hope it is.
 
@@ -69,10 +141,13 @@ def find_hook_from_settings() -> Path | None:
         return None
 
     commands: list[str] = []
+    guard_matchers: list[str | None] = []
     for entry in data.get("hooks", {}).get("PreToolUse", []) or []:
         for hook in entry.get("hooks", []) or []:
             if hook.get("type") == "command" and hook.get("command"):
                 commands.append(str(hook["command"]))
+                if "command-guard" in str(hook["command"]):
+                    guard_matchers.append(entry.get("matcher"))
 
     guard = [c for c in commands if "command-guard" in c]
     if not guard:
@@ -81,18 +156,37 @@ def find_hook_from_settings() -> Path | None:
         return None
     note(OK, "PreToolUse entry", f"{len(guard)} registered")
 
-    # Pull the path out of the command line and expand it the way a shell would.
-    raw = guard[0]
-    candidate = None
-    for token in raw.replace('"', " ").replace("'", " ").split():
-        if "command-guard" in token:
-            candidate = token
-            break
-    if candidate is None:
-        note(WARN, "hook path", f"could not parse a path out of: {raw[:60]}")
-        return None
+    check_matchers(guard_matchers)
 
-    path = Path(os.path.expandvars(os.path.expanduser(candidate)))
+    # Every registered entry, not just the first. With seven matchers the other
+    # six went unchecked, so one left pointing at an old path stayed invisible
+    # while the report said "hook file: ok".
+    paths: list[Path] = []
+    for raw in guard:
+        candidate = None
+        for token in raw.replace('"', " ").replace("'", " ").split():
+            if "command-guard" in token:
+                candidate = token
+                break
+        if candidate is None:
+            note(WARN, "hook path", f"could not parse a path out of: {raw[:60]}")
+            continue
+        p = Path(os.path.expandvars(os.path.expanduser(candidate)))
+        if p not in paths:
+            paths.append(p)
+
+    if not paths:
+        return None
+    if len(paths) > 1:
+        note(WARN, "hook path",
+             "the registered entries point at different files: "
+             + ", ".join(str(p) for p in paths))
+    for extra in paths[1:]:
+        if not extra.is_file():
+            note(FAIL, "hook file", f"an entry points at {extra} — nothing there")
+
+    check_interpreter(guard)
+    path = paths[0]
     # THE TWO HALVES. The entry existing proves nothing about the file.
     if not path.is_file():
         note(FAIL, "hook file",
@@ -150,22 +244,44 @@ def check_rules() -> dict | None:
     return data
 
 
-def check_owner_scripts() -> None:
-    found = 0
-    for name in ("grant-override", "hook-dev-mode"):
+def check_owner_scripts(rules: dict | None) -> None:
+    """Look for the scripts THIS installation calls its approval channel.
+
+    The names are taken from the rules for the same reason the probes below
+    take them from there: installations rename them. Measured on the author's
+    own machine, where they are German — a fixed English list reported "the
+    approval channel is missing" about a channel that was sitting right there.
+    A verification tool that invents the thing it verifies produces false
+    alarms about the very setup it is meant to certify.
+    """
+    configured = [str(c) for c in (rules or {}).get("owner_only_commands") or []]
+    names = configured or ["grant-override", "hook-dev-mode"]
+
+    missing = []
+    for name in names:
         for base in (HOME / ".claude" / "bin", HOME / ".claude" / "safety-guard" / "bin"):
             path = base / name
             if path.is_file():
-                found += 1
                 if not os.access(path, os.X_OK):
                     note(FAIL, f"script {name}",
                          f"{path} is not executable — the owner channel cannot run")
                 else:
                     note(OK, f"script {name}", str(path))
                 break
-    if found == 0:
+        else:
+            missing.append(name)
+
+    # Half a channel used to pass in silence: with one script present the count
+    # was non-zero and nothing was said about the other one.
+    where = "the bin directories of this installation"
+    if missing and len(missing) == len(names):
         note(WARN, "owner scripts",
-             "neither approval script found — the escalation path has no exit")
+             f"none of the approval scripts ({', '.join(names)}) found in "
+             f"{where} — the escalation path has no exit")
+    elif missing:
+        note(WARN, "owner scripts",
+             f"found, except: {', '.join(missing)} — not in {where}. "
+             "Whatever that script grants cannot be granted until it is there.")
 
 
 def check_dev_window() -> bool:
@@ -269,7 +385,7 @@ def main() -> int:
     hook = find_hook_from_settings()
     if hook is not None:
         rules = check_rules()
-        check_owner_scripts()
+        check_owner_scripts(rules)
         dev_open = check_dev_window()
         if not wiring_only:
             check_behaviour(hook, dev_open, rules)
@@ -290,14 +406,20 @@ def main() -> int:
     if not as_json:
         print(f"\n{len(results) - fails - warns} ok, {warns} to look at, {fails} broken")
         print("\nWHAT THIS CANNOT TELL YOU:")
-        print("  Whether your running session actually calls the hook. This")
-        print("  script invokes it directly; a session that never reaches it")
+        print("  Whether your running session actually calls the hook. The")
+        print("  matcher check above reads what settings.json registers; that")
+        print("  a session honours it is a different question. This script")
+        print("  invokes the hook directly, so a session that never reaches it")
         print("  would look identical here. Ask your assistant to write to the")
         print("  hook file and watch it be refused — that, and only that,")
         print("  proves the wiring.")
         if fails:
             print("\nSomething above is broken. An install that reports readiness")
             print("and protects nothing is the failure this tool exists to catch.")
+    # --strict: warnings become failures. A CI job wants "everything is as
+    # intended", not "nothing is outright broken".
+    if "--strict" in sys.argv:
+        return 1 if (fails or warns) else 0
     return 1 if fails else 0
 
 

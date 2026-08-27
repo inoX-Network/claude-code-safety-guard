@@ -39,8 +39,12 @@ SOUND_RULES = {
 }
 
 
+ALL_MATCHERS = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+                "mcp__.*"]
+
+
 def _build(home: Path, *, settings=True, hook_exists=True, rules_exist=True,
-           guard_entry=True):
+           guard_entry=True, matchers=None):
     """Assembles an install under `home`, leaving out whatever is asked."""
     (home / ".claude" / "hooks").mkdir(parents=True, exist_ok=True)
     (home / ".claude" / "safety-guard").mkdir(parents=True, exist_ok=True)
@@ -57,9 +61,17 @@ def _build(home: Path, *, settings=True, hook_exists=True, rules_exist=True,
     if settings:
         command = (f"python3 {hook_path}" if guard_entry
                    else "python3 /some/other/hook.py")
+        # matchers=None keeps the historical shape: one entry with no matcher
+        # field at all. That is not an oversight — it is the tool chain's way
+        # of saying "every tool", and the check must accept it.
+        if matchers is None:
+            entries = [{"hooks": [{"type": "command", "command": command}]}]
+        else:
+            entries = [{"matcher": m,
+                        "hooks": [{"type": "command", "command": command}]}
+                       for m in matchers]
         (home / ".claude" / "settings.json").write_text(json.dumps({
-            "hooks": {"PreToolUse": [{"hooks": [
-                {"type": "command", "command": command}]}]}
+            "hooks": {"PreToolUse": entries}
         }), encoding="utf-8")
 
 
@@ -121,12 +133,96 @@ def check_sound_install_passes():
     return _case(lambda h: _build(h), False, "a sound install")
 
 
+# --- the half that was missing: which tools the guard is even asked about ---
+#
+# Registering the hook for Bash alone leaves Write, Edit, MultiEdit,
+# NotebookEdit, Read and the MCP tools unguarded — and every behavioural probe
+# still came back green, because those probes reach the hook by hand rather
+# than through a matcher. Measured on 2026-08-27: "12 ok, 1 to look at,
+# 0 broken", exit code 0, on an install with a single matcher.
+def check_bash_only_install_is_caught():
+    return _case(lambda h: _build(h, matchers=["Bash"]), True,
+                 "only Bash is guarded, the write tools are not")
+
+
+def check_missing_mcp_matcher_is_caught():
+    # The gap PR #65 closed in the documentation. A test finds it next time.
+    return _case(lambda h: _build(h, matchers=ALL_MATCHERS[:-1]), True,
+                 "every tool but the mcp__* family")
+
+
+def check_all_matchers_pass():
+    return _case(lambda h: _build(h, matchers=ALL_MATCHERS), False,
+                 "all seven matchers")
+
+
+def check_absent_matcher_covers_everything():
+    # The counter-probe that keeps the check honest. An entry WITHOUT a matcher
+    # covers every tool; demanding seven literal names would report the safest
+    # possible configuration as a hole.
+    return _case(lambda h: _build(h, matchers=None), False,
+                 "one entry with no matcher field")
+
+
+def check_empty_matcher_covers_everything():
+    return _case(lambda h: _build(h, matchers=[""]), False,
+                 "one entry with an empty matcher")
+
+
+def check_owner_scripts_are_looked_up_by_their_configured_names():
+    """Installations rename the approval scripts, and this tool used to invent them.
+
+    Measured on the author's machine, where they are German: the check went
+    looking for `grant-override`, found nothing, and warned that the escalation
+    path had no exit — about a channel that was sitting in the same directory
+    under the name the rules actually give it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        rules = dict(SOUND_RULES, owner_only_commands=["freigabe-erteilen"])
+        _build(home)
+        (home / ".claude" / "safety-guard" / "security-rules.json").write_text(
+            json.dumps(rules), encoding="utf-8")
+        script = home / ".claude" / "bin" / "freigabe-erteilen"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        script.chmod(0o755)
+
+        _, out = _run(home)
+        found_by_configured_name = "freigabe-erteilen" in out
+        no_invented_complaint = "grant-override" not in out
+        return (found_by_configured_name and no_invented_complaint), (
+            f"configured={found_by_configured_name} "
+            f"quiet_about_invented={no_invented_complaint}\n{out[:400]}")
+
+
+def check_example_settings_cover_every_tool():
+    """The shipped example is the one place the matcher list is maintained.
+
+    Prose that counts ("six tool matchers") drifted away from it once already
+    and stayed wrong across two files. This asserts the file itself is
+    complete, so the documentation can point at it instead of repeating it.
+    """
+    example = json.loads((REPO / "settings.example.json")
+                         .read_text(encoding="utf-8"))
+    found = [e.get("matcher") for e in example["hooks"]["PreToolUse"]]
+    missing = [m for m in ALL_MATCHERS if m not in found]
+    return not missing, f"settings.example.json lacks: {missing}"
+
+
 CASES = [
     ("missing settings.json is caught", check_missing_settings),
     ("hook entry pointing nowhere is caught", check_hook_entry_points_nowhere),
     ("a foreign PreToolUse hook is not mistaken for ours", check_no_guard_entry),
     ("missing rules file is caught", check_missing_rules),
     ("a sound install passes", check_sound_install_passes),
+    ("a Bash-only install is caught", check_bash_only_install_is_caught),
+    ("a missing mcp__* matcher is caught", check_missing_mcp_matcher_is_caught),
+    ("all seven matchers pass", check_all_matchers_pass),
+    ("an absent matcher covers everything", check_absent_matcher_covers_everything),
+    ("an empty matcher covers everything", check_empty_matcher_covers_everything),
+    ("owner scripts are looked up by their configured names",
+     check_owner_scripts_are_looked_up_by_their_configured_names),
+    ("the shipped example covers every tool", check_example_settings_cover_every_tool),
 ]
 
 try:

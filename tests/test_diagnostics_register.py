@@ -25,8 +25,11 @@
 #     (filesAnalyzed=0, e.g. a hidden directory). The first version closed
 #     every such entry as fixed — the exact opposite of its purpose.
 # ============================================================================
+import functools
+import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -358,6 +361,25 @@ CASES = [
 ]
 
 
+def _throwaway_pattern():
+    """The hook's OWN throwaway pattern, not a copy of it.
+
+    A second copy here drifts: the day someone adds a path to the hook, this
+    file keeps testing the old list and reports green about a rule that no
+    longer exists in that form. Loaded by path because the file name carries a
+    hyphen and cannot be imported normally.
+    """
+    spec = importlib.util.spec_from_file_location("_diag_hook", SCRIPT)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:                                 # noqa: BLE001
+        return None
+    return getattr(module, "THROWAWAY", None)
+
+
 def _bench_root() -> Path:
     """NOT under /tmp: that is one of the throwaway paths the hook skips.
 
@@ -367,6 +389,55 @@ def _bench_root() -> Path:
     root = REPO / "tests" / "benches"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+# The same trap once more, one level up: if the CHECKOUT itself lies in a
+# throwaway place, the bench inside it is filtered too and nine cases go red
+# for a reason that has nothing to do with the hook. Measured while reviewing
+# an external report: a copy of the repository unpacked under /tmp produced
+# exactly that picture and it was read as a defect. Say it instead.
+_pattern = _throwaway_pattern()
+CHECKOUT_IS_THROWAWAY = bool(_pattern and _pattern.search(str(REPO) + "/"))
+
+# Two cases stand or fall with pyright: one measures that 'fixed' comes from a
+# real run, the other that a failed measurement does NOT close an entry.
+# Without pyright the first fails and the second passes for the wrong reason --
+# it is trivially true when nothing can be analysed at all.
+NEEDS_PYRIGHT = {"fixed is measured, not claimed", "unanalysed is not fixed"}
+
+
+@functools.lru_cache(maxsize=1)
+def have_working_pyright() -> bool:
+    """Not "is it on PATH" -- "does it actually analyse".
+
+    The difference is not academic. In a slim container `pip install pyright`
+    succeeds, the binary is on PATH, and its bundled Node cannot start for a
+    missing system library. It then exits 0 having reported nothing, which is
+    indistinguishable from "your file is clean" -- so the case measuring that
+    'fixed' comes from a real analysis went red while the tool looked present.
+    Measured 2026-08-27; the hook guards against the same shape (filesAnalyzed
+    = 0 must not close an entry), which is why asking the same question here is
+    the consistent thing to do.
+    """
+    if shutil.which("pyright") is None:
+        return False
+    with tempfile.TemporaryDirectory() as d:
+        probe = Path(d) / "probe.py"
+        probe.write_text("def f() -> int:\n    return undefined_name\n",
+                         encoding="utf-8")
+        try:
+            run = subprocess.run(["pyright", "--outputjson", str(probe)],
+                                 capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        try:
+            summary = json.loads(run.stdout).get("summary", {})
+        except (json.JSONDecodeError, AttributeError):
+            return False
+        return bool(summary.get("filesAnalyzed"))
+
+
+HAVE_PYRIGHT = have_working_pyright()
 
 
 def _run_case(fn):
@@ -379,6 +450,12 @@ try:
 
     @pytest.mark.parametrize("name,fn", CASES)
     def test_diagnostics_register(name, fn):
+        if CHECKOUT_IS_THROWAWAY:
+            pytest.skip(f"this checkout ({REPO}) matches the hook's throwaway "
+                        "pattern, so its own bench would be filtered out — "
+                        "run the suite from a normal location")
+        if name in NEEDS_PYRIGHT and not HAVE_PYRIGHT:
+            pytest.skip("needs pyright installed")
         ok, detail = _run_case(fn)
         assert ok, f"{name}: {detail}"
 
@@ -387,8 +464,19 @@ except ImportError:
 
 
 if __name__ == "__main__":
-    failures = 0
+    if CHECKOUT_IS_THROWAWAY:
+        print(f"NOT MEASURED: this checkout ({REPO}) matches the hook's own "
+              "throwaway pattern.\nIts bench would be filtered out and every "
+              "recording case would go red for the wrong reason.\nRun the suite "
+              "from a normal location.")
+        raise SystemExit(0)
+
+    failures = skipped = 0
     for name, fn in CASES:
+        if name in NEEDS_PYRIGHT and not HAVE_PYRIGHT:
+            skipped += 1
+            print(f"SKIP  {name}  (needs pyright)")
+            continue
         try:
             ok, detail = _run_case(fn)
         except Exception as err:                      # noqa: BLE001
@@ -397,4 +485,6 @@ if __name__ == "__main__":
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
         if not ok:
             print(f"      {detail}")
+    if skipped:
+        print(f"\n{skipped} case(s) not measured — install pyright to run them.")
     raise SystemExit(0 if not failures else 1)
