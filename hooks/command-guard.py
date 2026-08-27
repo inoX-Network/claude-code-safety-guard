@@ -1436,6 +1436,8 @@ _FALLBACK_RULES = {
     },
     "blocked_bash_patterns_force_push": [
         r"git\s+push\s+.*--force", r"git\s+push\s+.*\s-f(\s|$)",
+        # Force via a refspec with a leading '+' (e.g. 'git push origin +main').
+        r"git\s+push\s+(?:-\S+\s+)*\S+\s+\+\S",
     ],
 }
 

@@ -245,6 +245,18 @@ delete". Knowing this contract avoids surprise:
   the general obfuscation limit named in THREAT-MODEL.md: no substring layer
   tames a Turing-complete shell. Sandbox and least privilege are the answer to
   that one, not the hook.
+- **Delete protection names a path, not its ancestors.** `blocked_paths_delete`
+  — and the self-protection of the guard's own files — refuses destroying a
+  *named* path and everything under it, but naming an **ancestor directory**
+  removes the protected path as a side effect without matching either list.
+  Measured: `rm -rf ~/.claude/projects` and `rm -rf ~/.claude/hooks` are refused,
+  yet `rm -rf ~/.claude` — which takes both with it — passes, and so do
+  `find ~/.claude -delete` and `find ~/.claude | xargs rm`, where the protected
+  path never appears as a literal `rm` argument. The intended fix is a
+  depth-aware rule: block a *recursive* delete at or near the root of a protected
+  tree while single-file deletes underneath stay free, so everyday maintenance is
+  untouched. Until then, an OS sandbox / least privilege is the hard boundary —
+  as for every row in THREAT-MODEL.md.
 
 ---
 
