@@ -294,11 +294,14 @@ log, dev-mode flag) in a temp directory via environment variables, so they
 or after installing — only Python 3 is required:
 
 ```bash
-python3 tests/test_command_guard.py    # hook behavior — 187 cases
-python3 tests/test_freigabe_e2e.py     # approval channel + dev mode — 25 cases
+python3 tests/test_command_guard.py    # hook behavior
+python3 tests/test_freigabe_e2e.py     # approval channel + dev mode
 ```
 
-Expected output ends with `187 passed, 0 failed` and `25 passed, 0 failed`. Each
+Each run ends with `0 failed` — that, not a particular case count, is what you
+are checking. The counts grow with every hardening; a number printed here would
+be wrong within a fortnight and would send you hunting for a problem that is
+not there. (For the whole suite at once: `python3 -m pytest tests/ -q`.) Each
 case feeds the real hook a constructed stdin payload and asserts its exit code
 (`0` = allow, `2` = block), so a green run means the guard in this checkout
 enforces exactly what it should.
