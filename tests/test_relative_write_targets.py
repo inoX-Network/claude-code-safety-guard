@@ -106,7 +106,23 @@ CASES = [
 ]
 
 
-def _run(cwd: str, tool_name: str, tool_input: dict) -> int:
+def _run(cwd: str, tool_name: str, tool_input: dict, proc_cwd: str | None = None) -> int:
+    """Run the hook with `cwd` REPORTED in the payload, not entered.
+
+    The earlier version started the subprocess in `cwd` itself. That made the
+    file depend on `~/.claude` existing: on a machine without an installation
+    the run died with FileNotFoundError before the guard ever saw the payload —
+    a traceback instead of a test result, and the opposite of what the README
+    promises about the suite isolating its own runtime state.
+
+    Entering the directory was never what these cases measure. The guard
+    resolves relative targets against every plausible base (`_working_dirs`):
+    the reported cwd AND the process's own. The reported one is the case under
+    test; the process's own is a second, uncontrolled base — and the neutral
+    temporary directory used here keeps it out of the result. That the process
+    cwd counts too is measured separately, by the one case that can only run
+    where an installation exists.
+    """
     with tempfile.TemporaryDirectory() as ov:
         env = dict(os.environ)
         env["CLAUDE_SUDO_OVERRIDES_DIR"] = ov
@@ -115,14 +131,34 @@ def _run(cwd: str, tool_name: str, tool_input: dict) -> int:
         payload = {"session_id": "relative-target-test", "hook_event_name": "PreToolUse",
                    "tool_name": tool_name, "tool_input": tool_input, "cwd": cwd}
         p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
-                           capture_output=True, text=True, env=env, cwd=cwd)
+                           capture_output=True, text=True, env=env,
+                           cwd=proc_cwd or ov)
         return p.returncode
 
 
+# The one case that needs a real installation: the guard resolves relative
+# targets against the PROCESS's working directory as well as the reported one.
+# Standing in the protected directory while reporting somewhere harmless must
+# still block. It can only be measured where ~/.claude exists, so it is skipped
+# rather than failed elsewhere — a skip says "not measured here", a red test
+# would say "broken", and only one of those is true on a machine without an
+# installation.
+INSTALLED = os.path.isdir(CLAUDE)
+
+
+def process_cwd_counts_too() -> bool:
+    return _run("/tmp", "Bash", {"command": "cp /tmp/x hooks/command-guard.py"},
+                proc_cwd=CLAUDE) == BLOCK
+
+
 def run_all():
-    return [(cid, expected, rc, rc == expected)
-            for cid, cwd, t, i, expected in CASES
-            for rc in [_run(cwd, t, i)]]
+    out = [(cid, expected, rc, rc == expected)
+           for cid, cwd, t, i, expected in CASES
+           for rc in [_run(cwd, t, i)]]
+    if INSTALLED:
+        ok = process_cwd_counts_too()
+        out.append(("process-cwd-counts-too", BLOCK, BLOCK if ok else ALLOW, ok))
+    return out
 
 
 try:
@@ -131,6 +167,11 @@ try:
     @pytest.mark.parametrize("cid,cwd,tool_name,tool_input,expected", CASES)
     def test_relative_write_targets(cid, cwd, tool_name, tool_input, expected):
         assert _run(cwd, tool_name, tool_input) == expected, cid
+
+    @pytest.mark.skipif(not INSTALLED,
+                        reason=f"needs a real installation at {CLAUDE}")
+    def test_process_cwd_counts_too():
+        assert process_cwd_counts_too(), "process-cwd-counts-too"
 
 except ImportError:
     pass

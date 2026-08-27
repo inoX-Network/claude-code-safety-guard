@@ -1,0 +1,16 @@
+# What the test suite needs. The guard itself needs nothing: standard library
+# only, on purpose — a security hook that pulls in dependencies inherits their
+# supply chain.
+pytest>=7.0
+
+# Two further tools are NOT listed here, because the suite runs without them
+# and says which cases it could not measure:
+#
+#   git      — five cases in test_remote_copy_and_branch_guard.py build a real
+#              repository rather than mocking one. Without git they skip.
+#   pyright  — two cases in test_diagnostics_register.py measure that "fixed"
+#              comes from a real analysis. Without pyright they skip.
+#
+# The CI job installs both, so nothing stays unmeasured there. Locally you can
+# add them if you are touching those areas: `pip install pyright` brings its
+# own Node runtime.
