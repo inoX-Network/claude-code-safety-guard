@@ -24,7 +24,7 @@ Each repo file has exactly one installation target.
 | `rules/security-operations.md` | `~/.claude/rules/security-operations.md` | The override protocol, loaded as AI context (see [section B](#b-required-ai-context)). |
 | `bin/grant-override` | `~/.claude/bin/grant-override` | Owner-only approval script. `chmod +x` it. |
 | `bin/hook-dev-mode` | `~/.claude/bin/hook-dev-mode` | Owner-only dev-mode switch. `chmod +x` it. |
-| `settings.example.json` | merge its **6 PreToolUse matchers** into `~/.claude/settings.json` | Do not overwrite your existing settings — merge the `hooks.PreToolUse` array. |
+| `settings.example.json` | merge its **7 PreToolUse matchers** into `~/.claude/settings.json` | Do not overwrite your existing settings — merge the `hooks.PreToolUse` array. |
 
 ### Runtime directories and files
 
@@ -76,9 +76,10 @@ chmod +x ~/.claude/bin/grant-override ~/.claude/bin/hook-dev-mode
 
 ### 6. Wire up the hook in `settings.json`
 
-`settings.example.json` defines **six** PreToolUse matchers — one each for
-`Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit`, all pointing
-at the same hook:
+`settings.example.json` defines **seven** PreToolUse matchers — one each for
+`Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit`, plus
+`mcp__.*` (which gates MCP tool calls — e.g. `postgres` writes — per the
+`mcp_policy` in your rules file), all pointing at the same hook:
 
 ```json
 {
@@ -89,17 +90,22 @@ at the same hook:
       { "matcher": "Write",        "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
       { "matcher": "Edit",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
       { "matcher": "MultiEdit",    "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
-      { "matcher": "NotebookEdit", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] }
+      { "matcher": "NotebookEdit", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
+      { "matcher": "mcp__.*",      "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] }
     ]
   }
 }
 ```
 
+Without the `mcp__.*` matcher the hook never sees MCP tool calls, so the
+`mcp_policy` block in your rules file silently does nothing — the gate looks
+configured but is never consulted.
+
 Merge these into your existing `~/.claude/settings.json` (see the full file in
 [settings.example.json](settings.example.json)). Restart your Claude Code
 session so the new hook configuration is picked up.
 
-> All six matchers run the **same** script. The hook decides what to check based
+> All seven matchers run the **same** script. The hook decides what to check based
 > on the `tool_name` it reads from stdin, so you do not need separate scripts.
 
 ---
@@ -252,7 +258,7 @@ dirs consistently across the hook and both scripts:
 ### `settings.json`
 
 The `command` of each matcher (`python3 ~/.claude/hooks/command-guard.py`) is a
-literal path. If you move the hook, update all six matchers.
+literal path. If you move the hook, update all seven matchers.
 
 ### Script-internal paths
 
