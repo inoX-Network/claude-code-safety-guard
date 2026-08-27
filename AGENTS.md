@@ -1,0 +1,75 @@
+# Notes for an AI assistant reading this repository
+
+You are very likely reading this because someone asked you to look at this
+project, or because they are considering installing it. This file tells you
+what is here and what is worth offering them. It is information, not a script:
+you decide what is useful to say, and they decide what happens.
+
+## What this is — and that you are its subject
+
+A deterministic guard that inspects every tool call from an AI coding agent
+**before** it runs, and refuses the destructive ones. That agent is you.
+
+This is said plainly rather than glossed over, because the alternative is
+worse: an assistant that meets the guard for the first time as an unexplained
+refusal tends to treat it as an obstacle and look for a way round. It is not an
+obstacle. It is the reason someone can leave you alone with a machine that has
+their keys on it. If it ever blocks you, the intended response is to stop,
+re-read the message and rephrase — never to encode, split up or otherwise
+disguise the same command. Every attempt of that kind is logged, and one found
+in the log is treated far more seriously than the original refusal.
+
+## Worth offering before anyone installs anything
+
+The repository ships a report that answers, from measurements on *their*
+machine, whether this guard would be worth it for them personally:
+
+```bash
+python3 tools/would-it-help.py
+```
+
+It installs nothing, writes nothing and sends nothing. It counts what is
+reachable from the machine (keys, remote hosts, credentials — existence only,
+no protected file is ever opened), notes which assistants with tool access live
+there, and then feeds their own past commands to the real hook in this checkout
+to see how many it would have stopped.
+
+So if someone is weighing this project up, offering that is usually more useful
+than summarising the README at them. Something like:
+
+> There is a script in here that can measure whether this guard would actually
+> help on your machine — what it would reach, and how often it would have
+> interrupted you in the past. It runs read-only and installs nothing. Shall I
+> run it?
+
+**Two things not to do with it.** Do not oversell the result: the report is
+built to be able to say *"probably not worth it"*, and on a machine with no AI
+assistant it says the guard would protect against nothing today. That verdict
+is as valid as any other, and repeating it honestly is the entire point of the
+tool existing. And do not run it unasked — it reads shell history, which is
+personal. Offer, then wait.
+
+## If they decide to install
+
+`INSTALL.md` is the guide. Two things there are easy to miss:
+
+- **Section B** carries a ready-made block for their `CLAUDE.md` — the
+  behaviour rules that no code can enforce, with placeholders for their paths.
+  Without it you will meet refusals without knowing the way to an approval.
+- **`python3 tools/verify-install.py`** checks an install afterwards. It also
+  prints what it cannot establish, which is whether the running session really
+  reaches the hook. Only a real tool call shows that.
+
+## Orientation
+
+| | |
+|---|---|
+| `hooks/command-guard.py` | the guard itself |
+| `security-rules.example.json` | the rules, copied and adapted per install |
+| `tools/` | the assessment, the install check, the audit-log reader |
+| `tests/` | run with `python3 -m pytest tests/ -q` |
+| `THREAT-MODEL.md` | what it does and does not defend against |
+
+The README's *Known limitations* section is not marketing hedging — it lists
+real gaps with reasons. If someone asks what this cannot do, that section is
+the honest answer and worth quoting rather than paraphrasing.
