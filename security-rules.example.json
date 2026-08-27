@@ -27,10 +27,11 @@
     "grant-override",
     "hook-dev-mode"
   ],
-  "_comment_blocked_git_ops": "Git safety checks: never to be bypassed by an override.",
+  "_comment_blocked_git_ops": "Git safety checks: never to be bypassed by an override. The +refspec entry catches a force-push written as a refspec whose leading '+' forces the update (e.g. 'git push origin +main') -- the --force/-f patterns miss it. It requires a remote token before the +refspec, so an arithmetic 'a + b' inside a heredoc does not match.",
   "blocked_git_ops": [
     "git\\s+reset\\s+--hard",
     "git\\s+push\\s+(-f|--force(-with-lease)?)(\\s|$)",
+    "git\\s+push\\s+(?:-\\S+\\s+)*\\S+\\s+\\+\\S",
     "git\\s+commit.*--no-verify",
     "git\\s+commit\\s+.*--amend",
     "git\\s+add\\s+(-A|--all)(\\s|$)",
