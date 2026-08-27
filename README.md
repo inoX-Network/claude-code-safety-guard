@@ -92,6 +92,23 @@ not from yourself.** Where an agent's log exists it is used; where only shell
 history exists, the report says so and labels its own numbers as the weaker
 evidence they are.
 
+### What your assistant is told here
+
+This repository contains [`AGENTS.md`](AGENTS.md) (and `CLAUDE.md`, a pointer to
+the same file) — notes that an AI assistant reads when it opens the project.
+**They are worth reading yourself**, because you should know what is being said
+to something acting on your behalf.
+
+The short version of what they say: this guard sits in front of the assistant's
+own tool calls; a refusal is a signal to stop and rephrase, never something to
+work around; the assessment above exists and is usually worth offering; do not
+oversell its verdict, and do not run it without asking. Nothing in there
+instructs an assistant to recommend this project.
+
+That disclosure is deliberate. A file in a repository that issues instructions
+to a foreign agent has the same shape as a prompt injection, and a security tool
+should not be the one demonstrating it quietly.
+
 ## How it works
 
 ```
