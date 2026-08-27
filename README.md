@@ -548,7 +548,7 @@ working directory instead of inheriting it.
 
 ## Installation settings & language
 
-Two files, two jobs. **`security-rules.json`** says *what* is allowed — the section below covers it. **`~/.claude/guard-config.json`** says where this machine keeps things, and in which language the guard speaks. It is entirely optional: without it the guard runs on its defaults, in English. See [guard-config.example.json](guard-config.example.json).
+Two files, two jobs. **`security-rules.json`** says *what* is allowed — every key of it is in [docs/configuration-reference.md](docs/configuration-reference.md). **`~/.claude/guard-config.json`** says where this machine keeps things, and in which language the guard speaks. It is entirely optional: without it the guard runs on its defaults, in English. See [guard-config.example.json](guard-config.example.json).
 
 ```json
 {
