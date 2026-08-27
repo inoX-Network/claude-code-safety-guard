@@ -11,6 +11,19 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ## Unreleased
 
+### Fixed — the guard
+
+- **security** — The shell rewrites a command after the guard has read it, and
+  self-protection was reading the spelling that never executes. Empty quote
+  pairs (`~/.claude/set''tings.json`) and brace lists
+  (`~/.claude/{settings,x}.json`) both reached protected paths that the plain
+  spelling could not — no tool, no encoding, no override. Both are undone
+  before any check now, along with the IFS splitting that was already handled.
+  Globbing is deliberately *not* expanded: its result depends on the
+  filesystem, so a pattern is held against the protected list unexpanded
+  instead.
+
+
 ### Fixed — the tools, not the guard
 
 - **security (reporting)** — `tools/verify-install.py` never read the `matcher`

@@ -1213,9 +1213,64 @@ _PATHLIKE_RE = re.compile(r"(?:~|\$\{?HOME\}?|/)[\w./+\-]*")
 _ENV_RE = re.compile(r"""(?:^|[/\s='"])\.env(rc|\.[\w.\-]+)?(?=$|[\s'":])""")
 
 
+# Two more rewrites the shell performs before anything runs, and the guard was
+# reading the text from before. Both are state-free — the result depends only on
+# the string, never on what is on disk — which is exactly why they can be
+# applied HERE, ahead of every check, while globbing cannot: expanding a `*`
+# would make the verdict depend on the filesystem, so a pattern is instead held
+# against the protected list unexpanded (see the glob matcher).
+#
+# Measured 2026-08-25 against a byte-identical copy of the live hook: writing to
+# a self-protected path was refused when spelled plainly and went THROUGH when
+# broken up. `echo x > ~/.claude/set''tings.json` reached the file the guard is
+# built to defend above all others — its own settings — with no tool, no
+# encoding, and no override.
+_EMPTY_QUOTES_RE = re.compile(r"''|\"\"")
+_BRACE_WORD_RE = re.compile(r"\{([^{}]*,[^{}]*)\}")
+
+
+def _expand_brace_word(command: str) -> str:
+    """Expand simple `{a,b}` comma lists per word. No sequences, no nesting.
+
+    Deliberately narrow. `{1..9}` sequences and nested braces are left alone:
+    they need a real parser, and the case that matters here — a protected path
+    assembled from alternatives, `~/.claude/settings.{json,bak}` — is the plain
+    comma form. Capped at 12 alternatives per word so a crafted command cannot
+    turn this into a combinatorial bomb; over the cap the word is left as it is,
+    which is the same position the guard was in before.
+    """
+    if "{" not in command:
+        return command
+    out = []
+    for word in command.split(" "):
+        m = _BRACE_WORD_RE.search(word)
+        parts = m.group(1).split(",") if m else []
+        # `"key":` is JSON, not a shell brace list. Measured against 215,623
+        # logged commands: without this exception one real command was newly
+        # refused — a JSON payload in a variable assignment, expanded into two
+        # copies of the surrounding word, which put a second `docker` where a
+        # command name is read. Expansion duplicates text, and duplicated text
+        # grows new command positions; a data structure must not go through it.
+        if not m or len(parts) > 12 or '":' in m.group(1):
+            out.append(word)
+            continue
+        before, after = word[:m.start()], word[m.end():]
+        out.append(" ".join(_expand_brace_word(before + p + after) for p in parts))
+    return " ".join(out)
+
+
 def _normalize_obfuscation(command: str) -> str:
-    """Replace IFS-style word-split obfuscation with a real space."""
-    return _IFS_RE.sub(" ", command)
+    """Undo the state-free rewrites the shell would do, before checking anything.
+
+    Three of them: IFS word-splitting, empty quote pairs (`set''tings` →
+    `settings`, `settings""` → `settings`) and simple brace lists. The shell
+    performs all three before the command runs, so a guard that reads the text
+    beforehand is looking at a spelling that never executes.
+    """
+    command = _IFS_RE.sub(" ", command)
+    command = _EMPTY_QUOTES_RE.sub("", command)
+    command = _expand_brace_word(command)
+    return command
 
 
 # Heredoc bodies: text, or command? The question is not WHETHER there is a
