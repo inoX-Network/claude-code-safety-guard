@@ -315,11 +315,59 @@ def verdict(weight: int, agents: list[str], blocked: int, total: int,
     return lines
 
 
+def consent(as_json: bool) -> bool:
+    """Say what will be read, then wait for a yes. No yes, no reading.
+
+    The notes for assistants ask them to offer this rather than run it. That is
+    a request, not a barrier — and a request is the wrong instrument when the
+    thing at stake is someone's shell history. So the gate lives here, where it
+    cannot be skipped by an assistant being eager.
+
+    Not a TTY (an assistant running it, a CI job)? Then --yes is required and
+    the message says whose job it is to obtain that consent.
+    """
+    notice = [
+        "This report will read:",
+        "  · your assistant's command log, or your shell history — the",
+        "    commands themselves, to see which ones would have been stopped",
+        "  · the NAMES of files in ~/.ssh and similar places — never their",
+        "    contents. No file this guard would protect is ever opened.",
+        "",
+        "It does not write, install, or send anything anywhere. Nothing leaves",
+        "this machine, and commands are printed only with quotes and values",
+        "removed.",
+    ]
+    if "--yes" in sys.argv:
+        return True
+    if as_json or not sys.stdin.isatty():
+        print("\n".join(notice), file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Refusing to read anything without consent. Re-run with --yes.",
+              file=sys.stderr)
+        print("If an assistant is running this for you: it should have asked "
+              "you first, in its own words, and waited for your answer.",
+              file=sys.stderr)
+        return False
+    print("\n".join(notice))
+    try:
+        answer = input("\nGo ahead? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if answer in ("y", "yes", "j", "ja"):
+        return True
+    print("Nothing was read.")
+    return False
+
+
 def main() -> int:
     limit = 20000
     if "--sample" in sys.argv:
         limit = int(sys.argv[sys.argv.index("--sample") + 1])
     as_json = "--json" in sys.argv
+
+    if not consent(as_json):
+        return 1
 
     if not HOOK.is_file():
         print(f"Run this from a checkout of the repo — no hook at {HOOK}")

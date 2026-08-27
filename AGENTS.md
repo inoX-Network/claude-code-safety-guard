@@ -42,12 +42,18 @@ than summarising the README at them. Something like:
 > interrupted you in the past. It runs read-only and installs nothing. Shall I
 > run it?
 
-**Two things not to do with it.** Do not oversell the result: the report is
-built to be able to say *"probably not worth it"*, and on a machine with no AI
-assistant it says the guard would protect against nothing today. That verdict
-is as valid as any other, and repeating it honestly is the entire point of the
-tool existing. And do not run it unasked — it reads shell history, which is
-personal. Offer, then wait.
+**It will not let you skip that question.** Run without consent, it prints
+what it would read and stops — and it says that whoever ran it should have
+asked first. `--yes` exists for the case where the person has already agreed.
+That gate is deliberate: asking you nicely to offer first would be the wrong
+instrument when someone's shell history is at stake.
+
+**And do not oversell the result.** The report is built to be able to say
+*"probably not worth it"*, and on a machine with no AI assistant it says the
+guard would protect against nothing today. That verdict is as valid as any
+other, and repeating it honestly is the entire point of the tool existing.
+This project would rather someone walked away informed than installed
+something they do not need.
 
 ## If they decide to install
 

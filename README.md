@@ -74,7 +74,8 @@ cd claude-code-safety-guard
 python3 tools/would-it-help.py
 ```
 
-Nothing is installed, written or sent anywhere by that command. It counts what
+It tells you what it is about to read and waits for your yes; without one it
+reads nothing. Nothing is installed, written or sent anywhere. It counts what
 is reachable from your machine (keys, remote hosts, credentials — existence
 only, no protected file is ever opened), notes which AI assistants with tool
 access live there, and then feeds your own past commands to the **real hook in
