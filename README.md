@@ -596,7 +596,7 @@ discoverable without nagging. Turn it on in `guard-config.json`:
   "update_check": {
     "enabled": true,
     "interval_hours": 24,
-    "source": "https://raw.githubusercontent.com/inoX-Network/claude-code-safety-guard/main/VERSION"
+    "source": "https://api.github.com/repos/inoX-Network/claude-code-safety-guard/releases/latest"
   }
 }
 ```
@@ -621,10 +621,29 @@ nothing runs, and nothing complains.
 }
 ```
 
-What it does: compares the `VERSION` file next to the hook against the published
-one (both are dates — `2026.08.21` — so string order is date order) and prints
-one line if the published one is newer. What it does not do: download anything,
-change anything, or run with elevated rights. It reads, compares, and speaks.
+What it does: compares the `VERSION` file next to the hook against the latest
+**release**, and prints one line if that one is newer. What it does not do:
+download anything, change anything, or run with elevated rights. It reads,
+compares, and speaks.
+
+The published version is read from a release rather than from the tip of
+`main`, because "a newer version exists" has to mean something you can go and
+look at. `main` moves several times a day; announcing it meant announcing a
+state that could already be one merge old — and, on a bad day, one that had
+not been through CI.
+
+A version is a date, optionally with a counter: `2026.08.21`, `2026.08.27-2`.
+The counter is not decoration. On 2026-08-27 eleven commits landed in one day,
+two of which changed what the guard blocks — one before the version was
+raised, one after. The second could not be announced, because the date had
+nowhere left to move. Counters are compared as numbers, so `-10` is newer
+than `-2`.
+
+The notice names [CHANGELOG.md](CHANGELOG.md) instead of characterising what
+changed. It used to say the changes were "almost always security fixes", which
+the script has no way of knowing: the entry that raised the version on
+2026-08-27 was a documentation commit. The changelog marks per entry whether
+it closes a way around the guard.
 
 Without a `VERSION` file next to the hook there is nothing to compare, and it
 stays silent rather than guessing.

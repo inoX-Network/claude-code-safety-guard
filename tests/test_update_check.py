@@ -182,7 +182,12 @@ def check_plain_http_source_is_refused():
             encoding="utf-8")
         module = _load(cfg, tmp / "s.json")
         _, _, source = module._settings(json.loads(cfg.read_text(encoding="utf-8")))
-    return source.startswith("https://github") or "githubusercontent" in source, \
+        # Measured against the default the module itself declares, not against
+        # a host name written down here: the source moved from a raw file on a
+        # branch to the releases endpoint, and this case went red for that
+        # instead of for what it is about — that http is not accepted.
+        fell_back = source == module.DEFAULT_SOURCE
+    return fell_back and source.startswith("https://"), \
         f"plain http was accepted: {source}"
 
 
@@ -226,6 +231,43 @@ def _fetch_with_answer(raw: bytes):
 
 def check_well_formed_answer_is_accepted():
     return _fetch_with_answer(b"2026.09.01\n") == "2026.09.01", "rejected a valid date"
+
+
+def check_release_json_is_read():
+    """The source is a releases endpoint now, so the answer is JSON."""
+    payload = b'{"tag_name": "2026.09.01", "name": "September", "body": "notes"}'
+    return _fetch_with_answer(payload) == "2026.09.01", "release tag not read"
+
+
+def check_release_json_with_v_prefix_is_read():
+    payload = b'{"tag_name": "v2026.09.01"}'
+    return _fetch_with_answer(payload) == "2026.09.01", "v-prefixed tag rejected"
+
+
+def check_release_json_with_prose_tag_is_refused():
+    """Everything from the network still has to survive the strict pattern."""
+    payload = b'{"tag_name": "latest; rm -rf /"}'
+    return _fetch_with_answer(payload) is None, "prose tag accepted"
+
+
+def check_two_releases_on_one_day_are_distinguished():
+    """A date alone cannot separate them, and on 2026-08-27 it had to.
+
+    Eleven commits landed that day; two changed what the guard blocks, one
+    before the version bump and one after. The second was never announced,
+    because the string had nowhere left to move.
+    """
+    out, _, _ = _run(ON, "2026.08.21-2", installed="2026.08.21")
+    return "2026.08.21-2" in out, f"same-day release not reported: {out!r}"
+
+
+def check_counters_are_ordered_as_numbers():
+    """-10 is newer than -2. As strings it is the other way round."""
+    out, _, _ = _run(ON, "2026.08.21-10", installed="2026.08.21-2")
+    if "2026.08.21-10" not in out:
+        return False, f"-10 not seen as newer than -2: {out!r}"
+    back, _, _ = _run(ON, "2026.08.21-2", installed="2026.08.21-10")
+    return back == "", f"reported an older counter as newer: {back!r}"
 
 
 def check_prose_answer_is_refused():
@@ -328,6 +370,12 @@ CASES = [
     ("plain http source is refused", check_plain_http_source_is_refused),
     ("absurd interval falls back", check_absurd_interval_falls_back),
     ("well-formed answer is accepted", check_well_formed_answer_is_accepted),
+    ("a release payload is read", check_release_json_is_read),
+    ("a v-prefixed tag is read", check_release_json_with_v_prefix_is_read),
+    ("a prose tag is refused", check_release_json_with_prose_tag_is_refused),
+    ("two releases on one day are distinguished",
+     check_two_releases_on_one_day_are_distinguished),
+    ("counters are ordered as numbers", check_counters_are_ordered_as_numbers),
     ("prose answer is refused", check_prose_answer_is_refused),
     ("injection attempt is refused", check_injection_attempt_is_refused),
     ("html error page is refused", check_html_error_page_is_refused),
