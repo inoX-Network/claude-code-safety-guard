@@ -244,9 +244,21 @@ def check_rules() -> dict | None:
     return data
 
 
-def check_owner_scripts() -> None:
+def check_owner_scripts(rules: dict | None) -> None:
+    """Look for the scripts THIS installation calls its approval channel.
+
+    The names are taken from the rules for the same reason the probes below
+    take them from there: installations rename them. Measured on the author's
+    own machine, where they are German — a fixed English list reported "the
+    approval channel is missing" about a channel that was sitting right there.
+    A verification tool that invents the thing it verifies produces false
+    alarms about the very setup it is meant to certify.
+    """
+    configured = [str(c) for c in (rules or {}).get("owner_only_commands") or []]
+    names = configured or ["grant-override", "hook-dev-mode"]
+
     missing = []
-    for name in ("grant-override", "hook-dev-mode"):
+    for name in names:
         for base in (HOME / ".claude" / "bin", HOME / ".claude" / "safety-guard" / "bin"):
             path = base / name
             if path.is_file():
@@ -261,14 +273,15 @@ def check_owner_scripts() -> None:
 
     # Half a channel used to pass in silence: with one script present the count
     # was non-zero and nothing was said about the other one.
-    if len(missing) == 2:
+    where = "the bin directories of this installation"
+    if missing and len(missing) == len(names):
         note(WARN, "owner scripts",
-             "neither approval script found — the escalation path has no exit")
+             f"none of the approval scripts ({', '.join(names)}) found in "
+             f"{where} — the escalation path has no exit")
     elif missing:
-        note(WARN, f"script {missing[0]}",
-             f"not found in ~/.claude/bin or ~/.claude/safety-guard/bin. "
-             f"{'Approvals' if missing[0] == 'grant-override' else 'Dev mode'} "
-             "cannot be granted until it is installed.")
+        note(WARN, "owner scripts",
+             f"found, except: {', '.join(missing)} — not in {where}. "
+             "Whatever that script grants cannot be granted until it is there.")
 
 
 def check_dev_window() -> bool:
@@ -372,7 +385,7 @@ def main() -> int:
     hook = find_hook_from_settings()
     if hook is not None:
         rules = check_rules()
-        check_owner_scripts()
+        check_owner_scripts(rules)
         dev_open = check_dev_window()
         if not wiring_only:
             check_behaviour(hook, dev_open, rules)

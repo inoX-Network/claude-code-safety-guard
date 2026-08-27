@@ -169,6 +169,32 @@ def check_empty_matcher_covers_everything():
                  "one entry with an empty matcher")
 
 
+def check_owner_scripts_are_looked_up_by_their_configured_names():
+    """Installations rename the approval scripts, and this tool used to invent them.
+
+    Measured on the author's machine, where they are German: the check went
+    looking for `grant-override`, found nothing, and warned that the escalation
+    path had no exit — about a channel that was sitting in the same directory
+    under the name the rules actually give it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        rules = dict(SOUND_RULES, owner_only_commands=["freigabe-erteilen"])
+        _build(home)
+        (home / ".claude" / "safety-guard" / "security-rules.json").write_text(
+            json.dumps(rules), encoding="utf-8")
+        script = home / ".claude" / "bin" / "freigabe-erteilen"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        script.chmod(0o755)
+
+        _, out = _run(home)
+        found_by_configured_name = "freigabe-erteilen" in out
+        no_invented_complaint = "grant-override" not in out
+        return (found_by_configured_name and no_invented_complaint), (
+            f"configured={found_by_configured_name} "
+            f"quiet_about_invented={no_invented_complaint}\n{out[:400]}")
+
+
 def check_example_settings_cover_every_tool():
     """The shipped example is the one place the matcher list is maintained.
 
@@ -194,6 +220,8 @@ CASES = [
     ("all seven matchers pass", check_all_matchers_pass),
     ("an absent matcher covers everything", check_absent_matcher_covers_everything),
     ("an empty matcher covers everything", check_empty_matcher_covers_everything),
+    ("owner scripts are looked up by their configured names",
+     check_owner_scripts_are_looked_up_by_their_configured_names),
     ("the shipped example covers every tool", check_example_settings_cover_every_tool),
 ]
 

@@ -25,6 +25,7 @@
 #     (filesAnalyzed=0, e.g. a hidden directory). The first version closed
 #     every such entry as fixed — the exact opposite of its purpose.
 # ============================================================================
+import functools
 import importlib.util
 import json
 import os
@@ -400,10 +401,43 @@ CHECKOUT_IS_THROWAWAY = bool(_pattern and _pattern.search(str(REPO) + "/"))
 
 # Two cases stand or fall with pyright: one measures that 'fixed' comes from a
 # real run, the other that a failed measurement does NOT close an entry.
-# Without pyright installed the first fails and the second passes for the wrong
-# reason -- it is trivially true when nothing can be analysed at all.
+# Without pyright the first fails and the second passes for the wrong reason --
+# it is trivially true when nothing can be analysed at all.
 NEEDS_PYRIGHT = {"fixed is measured, not claimed", "unanalysed is not fixed"}
-HAVE_PYRIGHT = shutil.which("pyright") is not None
+
+
+@functools.lru_cache(maxsize=1)
+def have_working_pyright() -> bool:
+    """Not "is it on PATH" -- "does it actually analyse".
+
+    The difference is not academic. In a slim container `pip install pyright`
+    succeeds, the binary is on PATH, and its bundled Node cannot start for a
+    missing system library. It then exits 0 having reported nothing, which is
+    indistinguishable from "your file is clean" -- so the case measuring that
+    'fixed' comes from a real analysis went red while the tool looked present.
+    Measured 2026-08-27; the hook guards against the same shape (filesAnalyzed
+    = 0 must not close an entry), which is why asking the same question here is
+    the consistent thing to do.
+    """
+    if shutil.which("pyright") is None:
+        return False
+    with tempfile.TemporaryDirectory() as d:
+        probe = Path(d) / "probe.py"
+        probe.write_text("def f() -> int:\n    return undefined_name\n",
+                         encoding="utf-8")
+        try:
+            run = subprocess.run(["pyright", "--outputjson", str(probe)],
+                                 capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        try:
+            summary = json.loads(run.stdout).get("summary", {})
+        except (json.JSONDecodeError, AttributeError):
+            return False
+        return bool(summary.get("filesAnalyzed"))
+
+
+HAVE_PYRIGHT = have_working_pyright()
 
 
 def _run_case(fn):
