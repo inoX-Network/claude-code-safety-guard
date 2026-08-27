@@ -306,6 +306,24 @@ case feeds the real hook a constructed stdin payload and asserts its exit code
 (`0` = allow, `2` = block), so a green run means the guard in this checkout
 enforces exactly what it should.
 
+### Check the installation itself
+
+```bash
+python3 tools/verify-install.py          # add --wiring-only to skip the probes
+```
+
+This reads `settings.json` to find the hook **the way the tool chain does** —
+not where the docs hope it is — then checks that a file actually exists at that
+path, that the rules load from wherever `guard-config.json` says, that the
+owner-only scripts are executable, and that no dev window is open. Then it
+feeds the hook the cases below as payloads and reads only its exit code;
+nothing is executed.
+
+It is deliberate that this cannot replace the manual step. The script invokes
+the hook **directly**, so a session that never reaches the hook would look
+identical here. It says so at the end of every run rather than letting a green
+result imply more than it proves.
+
 ### Manually verify it's armed in Claude Code
 
 After installing and restarting your session, confirm the guard actually blocks.
