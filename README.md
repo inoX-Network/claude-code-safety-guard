@@ -165,6 +165,17 @@ delete". Knowing this contract avoids surprise:
   deliberate trade-off: resolving symlinks touches the filesystem and opens
   TOCTOU, performance, and existence questions. Tracked in
   `BEFUND-guard-scope-symlink-2026-07-24.md` (columns 3/4 of the test matrix).
+- **Glob patterns are checked against the protection list, not expanded.**
+  Since 2026-08-25 a write target containing `*`, `?` or `[…]` is held against
+  every protected path component by component: if the pattern *could* hit one,
+  it is refused. Before that the comparison was literal, so
+  `echo x > ~/.claude/setting*.json` walked past the self-protection while the
+  spelled-out name was refused. Expanding the pattern was rejected on purpose —
+  it would touch the filesystem and reopen the TOCTOU question above. The
+  remaining gap is the same one the symlink note describes: a target that only
+  becomes a path *later* — through a variable, a decoder, word splitting — is
+  still invisible to a text matcher. A pattern must be at least as deep as the
+  protected path, otherwise a bare `*` would match everything.
 - The write-verb gate is not a strict verb→path binding. It is *(a write verb)
   AND (a protected path)* **within the same segment** of the line: a write in one
   segment no longer makes a protected path in another its target, and a directory

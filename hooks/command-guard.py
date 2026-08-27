@@ -8,6 +8,7 @@ Part of: claude-code-safety-guard
 License: MIT
 """
 
+import fnmatch
 import json
 import os
 import re
@@ -2076,6 +2077,58 @@ def hits_self_protect(file_path: str) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------
+# Glob normalisation (2026-08-25)
+#
+# The guard inspects the RAW command text; the shell assembles names only
+# afterwards. Measured in an adversarial audit: '~/.claude/setting*.json' does
+# not contain 'settings.json' literally, so no match, so it ran through. That
+# made the hardest protection class — the one documented as "no override, never
+# bypassable" — reachable with a single asterisk.
+#
+# The obvious fix, expanding the pattern to see what it hits, was rejected: it
+# would make the verdict depend on the file system, i.e. on state that can
+# change between check and execution.
+#
+# So the question is turned around: the PATTERN is held against the protection
+# LIST. If it could hit a protected path, it is a hit — regardless of what
+# happens to be on disk right now. Stateless, and coarse in the SAFE direction:
+# a pattern that could match blocks even when it currently matches nothing.
+_GLOB_CHARS_RE = re.compile(r"[*?\[]")
+
+
+def _has_glob(text: str) -> bool:
+    return bool(_GLOB_CHARS_RE.search(text))
+
+
+def _glob_touches_tree(pattern: str, protected: str) -> bool:
+    """Whether a path PATTERN could hit the protected path or anything below it.
+
+    Compared component by component: a glob must never match across a slash,
+    otherwise '/tmp/*' would count as a hit on '/tmp/a/b' and the whole notion
+    of a path boundary would be gone. Without a glob this behaves exactly like
+    the literal prefix comparison it complements.
+    """
+    p = [t for t in pattern.strip("/").split("/") if t]
+    g = [t for t in protected.strip("/").split("/") if t]
+    if not p or not g:
+        return False
+    # The pattern must be AT LEAST as deep as the protected path. Without this
+    # guard a bare '*' hits everything, because fnmatch('home', '*') is true.
+    # Measured against 25,497 real commands containing glob characters: 152
+    # were wrongly blocked without it — multiplications inside one-liners,
+    # star imports, a CSS selector in a heredoc. None of them pointed at a
+    # protected path. Since a glob never matches across a slash, a shorter
+    # pattern cannot mean the protected path in the first place.
+    if len(p) < len(g):
+        return False
+    for i in range(len(g)):
+        # fnmatchcase: this file system distinguishes upper and lower case.
+        if not fnmatch.fnmatchcase(g[i], p[i]):
+            return False
+    return True
+
+
 def command_hits_self_protect(command: str) -> str | None:
     """Return the self-protection path a Bash write command targets.
 
@@ -2113,6 +2166,17 @@ def command_hits_self_protect(command: str) -> str | None:
             if (re.search(re.escape(p) + _PATH_BOUNDARY, ce)
                     and not _dev_unlocked(prot)):
                 return prot
+        # Glob normalisation here too: the comparison above is literal, and an
+        # inline one-liner can assemble its target from a pattern just as well
+        # (glob.glob('...setting*.json')).
+        for tok in _command_path_tokens(ce):
+            if not _has_glob(tok):
+                continue
+            candidate = expand_path(tok.strip("'\"`"))
+            for prot in SELF_PROTECT_PATHS:
+                pe = expand_path(prot).rstrip("/")
+                if _glob_touches_tree(candidate, pe) and not _dev_unlocked(prot):
+                    return prot
 
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
@@ -2138,6 +2202,21 @@ def command_hits_self_protect(command: str) -> str | None:
         for segment in writing:
             if re.search(p + _PATH_BOUNDARY, expand_path(segment)) and not _dev_unlocked(prot):
                 return prot
+
+    # Glob normalisation: the search above compares LITERALLY, so a target the
+    # shell only assembles later slips past it. Hold every glob-bearing path
+    # token of the WRITING segments against the protection list instead. No
+    # look at the file system: the question is whether the pattern COULD hit.
+    for segment in writing:
+        for tok in _command_path_tokens(segment):
+            if not _has_glob(tok):
+                continue
+            candidate = expand_path(tok.strip("'\"`"))
+            for prot in SELF_PROTECT_PATHS:
+                pe = expand_path(prot).rstrip("/")
+                if _glob_touches_tree(candidate, pe) and not _dev_unlocked(prot):
+                    return prot
+
     # Relative targets carry no protected prefix literally, so the search above
     # cannot see them. Resolve every path-ish token instead — same check, just
     # with the working directory in hand.
