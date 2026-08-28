@@ -346,6 +346,15 @@ boundary, so a directory whose name merely *starts* with a protected one stays
 free: `~/.claude/.sudo-overrides-pending` (proposals), a `.zshrc.bak`, a
 `hooks-old/`. Without that boundary the prefix match drags them all in.
 
+This matters more than it sounds, because the guard has **two** places that
+compare against this list: the ordinary write check, and a separate branch for
+interpreter one-liners (`python3 -c`, `node -e`) — inline code carries no shell
+write indicator and no token boundary, so a path inside `open("...")` has to be
+matched as a substring. Both branches need the boundary. For a while only one
+had it, and the branch that lacked it refused exactly the thing the paragraph
+above promises: dropping and checking an override proposal. **The guard was
+blocking the use of its own escalation path.**
+
 ### The shell rewrites the command after the guard has read it
 
 Self-protection compares paths. The shell *assembles* paths, and it does so
@@ -372,7 +381,8 @@ time-of-check question. A pattern is therefore held against the protected list
 problems are genuinely different.
 
 **What it costs.** Nothing measurable: 1.4 µs per command against 0.1 µs
-before, on a hook that spends about 30 ms starting a Python process. And
+before, on a hook whose whole invocation takes 39 ms (median of 30 runs,
+almost all of it starting Python). And
 nothing in false alarms — replayed against 215,936 logged commands, exactly two
 became newly blocked, and both were this project's own attack probes from the
 audit that motivated the change. Zero real commands.
@@ -390,15 +400,6 @@ today. They behave identically before and after this change — the next class i
 the same family, needing a different answer, because removing them is not
 state-free in the same simple way: a quote can span words and a backslash can
 escape a separator.
-
-This matters more than it sounds, because the guard has **two** places that
-compare against this list: the ordinary write check, and a separate branch for
-interpreter one-liners (`python3 -c`, `node -e`) — inline code carries no shell
-write indicator and no token boundary, so a path inside `open("...")` has to be
-matched as a substring. Both branches need the boundary. For a while only one
-had it, and the branch that lacked it refused exactly the thing the paragraph
-above promises: dropping and checking an override proposal. **The guard was
-blocking the use of its own escalation path.**
 
 ### The shell's startup files
 
