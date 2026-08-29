@@ -9,7 +9,24 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
-## Unreleased
+## 2026.08.29
+
+### Fixed — the guard
+
+- **security** — A level-1 grant covered more than it named. `check_blocked_paths`
+  reports which LIST ENTRY matched, and that entry — not the path the command
+  actually touches — was what the grant was checked against. A grant on
+  `~/.ssh/config.d` therefore opened all of `~/.ssh`: `authorized_keys`, the
+  private key, `rm -rf ~/.ssh`. On an installation whose rules list directories
+  (`/etc`, `/opt/inox`) rather than single files, a deployment grant on one
+  service opened every other service and the recursive delete of the whole tree
+  — the exact operation level 1 says it does not allow. The grant is now checked
+  against the concretely touched target, and against the DEEPEST list entry that
+  covers it, so a grant on a zone no longer swallows a more specific entry
+  below it (`/etc` no longer covers `/etc/shadow` when both are listed).
+  Reported 2026-08-29 by an external review, measured on both editions.
+
+## 2026.08.27-3
 
 ### Fixed — the guard
 
