@@ -214,9 +214,11 @@ delete". Knowing this contract avoids surprise:
   AND (a protected path)* **within the same segment** of the line: a write in one
   segment no longer makes a protected path in another its target, and a directory
   change, an assignment value or a line continuation still counts as part of the
-  write context. Inside a single segment the coarseness remains — `sha256sum
-  <protected file> > /tmp/sum.txt` is refused although only the redirect target
-  is written.
+  write context. Inside a single segment, the redirect target is what counts:
+  `sha256sum <protected file> > /tmp/sum.txt` runs, because only the scratch
+  file is written. Copying *onto* a protected path with a harmless redirect
+  appended (`cp x <protected file> > /tmp/log.txt`) is still refused — the
+  redirect does not launder the copy.
 - **Interpreter one-liners are matched literally, and naming one is enough.**
   The inline branch compares the expanded command text against the protected
   paths, shell assignments included — `VAR=<protected dir>; python3 -c
@@ -256,6 +258,7 @@ A static blocklist isn't enough — sometimes you legitimately need extra `sudo`
 ### Level 1 — EXTENDED (deployment, configuration)
 
 - **Allowed:** write to explicitly granted paths (`grants.allowed_paths`, path-boundary-exact); extra sudo commands (`grants.additional_sudo`); single-file ops on normally protected paths.
+- **A grant covers what it names, nothing around it.** A grant on `/opt/inox/billing` allows writes below that directory — not to a sibling service, and not to the tree above it. The reverse holds as well: a broad grant on `/etc` does not cover a more specific protected entry such as `/etc/shadow`. Until 2026.08.29 the first half was missing, and a grant on a subdirectory opened its whole zone.
 - **Not allowed:** recursive operations on protected paths; operations on system paths (`/usr/`, `/lib/`, `/bin/`, `/sbin/`); `chown`/`chmod` on `/etc/` beyond explicitly named files.
 - **Explanation duty:** WHAT + WHY.
 
@@ -295,9 +298,11 @@ The AI **cannot** grant itself an override. The active override directory is sel
 2. **The AI writes a proposal** (`confirmed: false`) into the pending directory `~/.claude/.sudo-overrides-pending/` — which is deliberately **not** self-protected.
 3. **The AI hands the owner a ready-to-copy command** and explains level + scope:
    ```
-   ! ~/.claude/bin/grant-override <id> --minutes N [--confirm LABEL] [--snapshot ID]
+   ! ~/.claude/bin/grant-override <id> --minutes N [--confirm LABEL] [--snapshot ID] [--all-sessions]
    ```
-4. **The owner runs it** (their consent). Because `grant-override` is an owner-only command, only the owner's `!` reaches it. The script sets `confirmed: true`, `label`, `expires_at`, `granted_at`, `granted_by`, then moves the file into the active directory `~/.claude/.sudo-overrides/`.
+4. **The owner runs it** (their consent). Because `grant-override` is an owner-only command, only the owner's `!` reaches it. The script sets `confirmed: true`, `label`, `expires_at`, `granted_at`, `granted_by`, `session_id`, then moves the file into the active directory `~/.claude/.sudo-overrides/`.
+
+   **The grant is bound to the session that requested it.** The script reads `CLAUDE_CODE_SESSION_ID` from the environment; without it, it refuses (exit 1) rather than issuing a grant no session can be held to. That is the right default, and it is also the first thing people hit: a tool chain that does not export the variable — or an owner running the script from a plain terminal — gets the refusal, not a grant. For those, `--all-sessions` opts out deliberately and is recorded as such in `granted_by`. Details in `docs/counter-tests/session-binding-gap.md`.
 5. **The hook reads the activated file** and grants the scope until `expires_at`.
 
 `<id>` is tolerant: a file name or agent id, with/without `.json`, with/without the `agent-` prefix. `--minutes` must be between 1 and 1440 (default 120).

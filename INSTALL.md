@@ -170,6 +170,14 @@ override lifts that — by design.
    `! <BIN_DIR>/grant-override <id> --minutes N [--confirm LABEL] [--snapshot ID]`
    Never run it yourself — only their `!` invocation reaches the script, sets
    `confirmed: true` and moves the file into the active directory.
+   Name the paths in `allowed_paths` as precisely as the work needs: a grant
+   covers what it names and what lies below it, not the directory above.
+
+> **If the script exits with "no CLAUDE_CODE_SESSION_ID in the environment"**,
+> it is doing its job: by default a grant is bound to the session that asked
+> for it, and without an id there is nothing to bind to. Tool chains other than
+> Claude Code may not export the variable, and neither does a plain terminal.
+> The deliberate opt-out is `--all-sessions`, which is recorded in `granted_by`.
 
 > Writing that proposal through a shell command often fails, and it looks like
 > a bug but is not: the proposal has to *name* the protected path it asks for,
