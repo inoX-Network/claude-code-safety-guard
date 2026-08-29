@@ -2062,22 +2062,112 @@ def check_sudo(command: str, allowed: list[str],
     return None
 
 
-def grant_covers_path(blocked_path: str, allowed_paths: list[str]) -> bool:
+def concrete_targets_under(command: str, entry: str) -> list[str]:
+    """The paths NAMED IN THE COMMAND that lie at or below a protected entry.
+
+    check_blocked_paths reports WHICH LIST ENTRY matched, not what the command
+    actually touches. For the level decision that is not enough: a grant has to
+    cover the thing being written, not the zone it sits in.
+
+    Both spellings are searched — the entry as written ('~/.ssh') and expanded
+    ('/home/u/.ssh') — because a command may use either. Result is expanded and
+    de-duplicated.
+
+    Empty result means the entry matched in a way this function cannot resolve
+    to a path (docker mount detection, for instance). Callers must treat that as
+    NOT covered — see grant_covers_path.
+    """
+    found: list[str] = []
+    # The command is searched in both spellings too. check_blocked_paths finds
+    # the entry in `$HOME/.ssh/authorized_keys` because it expands before
+    # matching; without the same step here the target would be unresolvable and
+    # every such write would fall to the fail-closed branch below — including
+    # the ones the grant does cover.
+    # Traversal detours are collapsed first, exactly as check_blocked_paths
+    # does before matching. Without it `/opt/./inox/legal/x` finds the entry but
+    # no target, and the fail-closed branch would refuse a write the grant
+    # covers — while a disguised path would look the same as an unresolvable one.
+    roh = _collapse_path_traversal(command)
+    texte = {command, roh, expand_path(command), expand_path(roh)}
+    for spelling in {entry.rstrip("/"), expand_path(entry).rstrip("/")}:
+        if not spelling:
+            continue
+        # The entry, plus whatever path characters follow it. Same start
+        # condition as _names_path, so this sees exactly what that one matched.
+        muster = _PATH_START + "(" + re.escape(spelling) + r"[^\s'\";|&>)]*)"
+        for text in texte:
+            for treffer in re.finditer(muster, text):
+                ziel = expand_path(treffer.group(1).rstrip("/"))
+                if ziel and ziel not in found:
+                    found.append(ziel)
+    return found
+
+
+def _deepest_entry_for(entries: list[str] | None, target: str) -> str:
+    """The most specific list entry that covers this target ('' if none).
+
+    check_blocked_paths reports the OUTERMOST match, so the message stays the
+    one it always was. The level decision needs the opposite: the innermost
+    barrier the target sits behind. With both '/etc' and '/etc/shadow' in the
+    list, a grant on '/etc' would otherwise satisfy H1 through the outer entry
+    and take the inner one with it — the very thing H1 exists to prevent.
+    Found by the counter-direction case of test_grant_below_a_directory_entry.
+    """
+    deepest = ""
+    for e in entries or []:
+        if not isinstance(e, str) or not e:
+            continue
+        ee = expand_path(e).rstrip("/")
+        if (target == ee or target.startswith(ee + "/")) and len(ee) > len(deepest):
+            deepest = ee
+    return deepest
+
+
+def grant_covers_path(blocked_path: str, allowed_paths: list[str],
+                      targets: list[str] | None = None,
+                      entries: list[str] | None = None) -> bool:
     """True if a grant covers the concretely touched protected path.
 
-    Deliberately NARROW (H1): the grant must be at least as specific as the
-    protected path. A broad grant '/etc' does NOT cover '/etc/shadow' — only
-    '/etc/shadow' itself or a path below it. This prevents a harmlessly meant
-    grant from defeating the entire path protection.
+    TWO conditions, and both are needed:
 
-    Rule: grant == blocked_path OR grant lies below blocked_path.
+    1. Deliberately NARROW (H1): the grant must be at least as specific as the
+       protected path. A broad grant '/etc' does NOT cover '/etc/shadow' — only
+       '/etc/shadow' itself or a path below it. This prevents a harmlessly meant
+       grant from defeating the entire path protection.
+    2. The grant must cover what the command actually touches. Without this,
+       condition 1 only narrowed DOWNWARDS: a grant on '~/.ssh/config.d' passed
+       condition 1 for the entry '~/.ssh' and thereby opened the whole zone —
+       authorized_keys, the private key, `rm -rf ~/.ssh`. Measured 2026-08-29,
+       on both editions. The docstring here claimed "the concretely touched
+       protected path" all along; the function never received it.
+
+    `targets` is that concretely touched path (Write/Edit: the exact file; Bash:
+    what concrete_targets_under found). Passing None keeps condition 1 alone —
+    only for callers that genuinely have no target, and none do today.
     """
     bp = expand_path(blocked_path).rstrip("/")
     for ap in allowed_paths:
         if not isinstance(ap, str) or not ap:
             continue
         ap_exp = expand_path(ap).rstrip("/")
-        if ap_exp == bp or ap_exp.startswith(bp + "/"):
+        if targets is None:
+            if ap_exp == bp or ap_exp.startswith(bp + "/"):
+                return True                                 # condition 1 alone
+            continue
+        if not targets:
+            # The entry matched but no concrete path could be resolved. Not
+            # covered — a grant cannot vouch for something nobody can name.
+            return False
+        deckt_alle = True
+        for t in targets:
+            barrier = _deepest_entry_for(entries, t) or bp
+            if not (ap_exp == barrier or ap_exp.startswith(barrier + "/")):
+                deckt_alle = False                          # condition 1
+                break
+            if not (t == ap_exp or t.startswith(ap_exp + "/")):
+                deckt_alle = False                          # condition 2
+                break
+        if deckt_alle:
             return True
     return False
 
@@ -2289,7 +2379,9 @@ def command_hits_self_protect(command: str) -> str | None:
     return None
 
 
-def path_decision(blocked_path: str, level: int, grants: dict) -> tuple[bool, str]:
+def path_decision(blocked_path: str, level: int, grants: dict,
+                  targets: list[str] | None = None,
+                  entries: list[str] | None = None) -> tuple[bool, str]:
     """Level decision for a touched protected path (blocked_paths_write).
 
     Shared logic for Bash check 3 AND the Write/Edit block — avoids drift.
@@ -2304,9 +2396,15 @@ def path_decision(blocked_path: str, level: int, grants: dict) -> tuple[bool, st
     Returns: (allowed, needed_text).
     """
     system_paths_granted = level >= 2
-    granted_single = level >= 1 and grant_covers_path(blocked_path, grants.get("allowed_paths", []))
+    granted_single = level >= 1 and grant_covers_path(
+        blocked_path, grants.get("allowed_paths", []), targets, entries)
     allowed = system_paths_granted or granted_single
-    need = f"level 2 OR an allowed_paths grant for '{blocked_path}'"
+    # Name what the grant would have to cover — the concrete target, not the
+    # zone. Saying "a grant for '/opt/inox'" when the command writes
+    # /opt/inox/billing/app.py invites exactly the too-broad grant this
+    # function refuses.
+    braucht = targets[0] if targets else blocked_path
+    need = f"level 2 OR an allowed_paths grant for '{braucht}'"
     return allowed, need
 
 
@@ -3347,7 +3445,10 @@ def main():
                 override = load_override(agent_id, session_id)
                 level = override.get("override_level", 0) if override else 0
                 grants = override.get("grants", {}) if override else {}
-                allowed, need = path_decision(blocked_path, level, grants)
+                # Here the concrete target is known exactly — no parsing needed.
+                allowed, need = path_decision(blocked_path, level, grants,
+                                              [expanded],
+                                              rules.get("blocked_paths_write", []))
                 if not allowed:
                     _audit(input_data, tool_name, file_path, "block",
                            f"protected_path:{blocked_path}", level)
@@ -3542,7 +3643,14 @@ def main():
         # a write to that path — same level behaviour as `echo x > /etc/passwd`.
         blocked_path = docker_mount_blocked_path(command, rules.get("blocked_paths_write", []))
     if blocked_path:
-        allowed, need = path_decision(blocked_path, level, grants)
+        # WHICH path the command touches, not just which zone it falls into.
+        # The grant is checked against this, so a grant on one subdirectory no
+        # longer vouches for its neighbours.
+        liste = (rules.get("blocked_paths_delete", []) if delete_only
+                 else rules.get("blocked_paths_write", []))
+        allowed, need = path_decision(blocked_path, level, grants,
+                                      concrete_targets_under(command, blocked_path),
+                                      liste)
         if not allowed:
             _audit(input_data, "Bash", command, "block", f"protected_path:{blocked_path}", level)
             print(msg("path.delete_blocked" if delete_only else "path.write_blocked",
