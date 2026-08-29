@@ -1494,6 +1494,36 @@ _FALLBACK_RULES = {
         # Force via a refspec with a leading '+' (e.g. 'git push origin +main').
         r"git\s+push\s+(?:-\S+\s+)*\S+\s+\+\S",
     ],
+    # The approval scripts. Without them here, deleting the rules file was step
+    # one of a chain that ended in the assistant granting ITSELF level 2:
+    # remove the rules directory (its parent is not protected), drop a proposal
+    # in the pending directory (open by design), then run the approval script —
+    # which without this entry is an ordinary command. Every step was allowed,
+    # and the guard said "FALLBACK ruleset active (fail-closed)" while it
+    # happened. Reported 2026-08-29 by an external review.
+    #
+    # The names are the documented defaults. An installation that RENAMES its
+    # approval scripts protects them through its rules file, and loses that
+    # protection while the fallback is active — the fallback cannot know a name
+    # nobody told it. That is a reason to keep the rules file intact, not to
+    # leave the defaults out.
+    "owner_only_commands": ["grant-override", "hook-dev-mode"],
+    # Git safety belongs to the minimal set for the same reason: it is not
+    # about a specific installation, it is about not losing work.
+    "blocked_git_ops": [
+        r"git\s+reset\s+--hard",
+        r"git\s+push\s+(-f|--force(-with-lease)?)(\s|$)",
+        r"git\s+push\s+(?:-\S+\s+)*\S+\s+\+\S",
+        r"git\s+commit.*--no-verify", r"git\s+commit\s+.*--amend",
+        r"git\s+add\s+(-A|--all)(\s|$)", r"git\s+add\s+\.(\s|$)",
+        r"git\s+config\s+(?!(--get|--list|-l)\b)",
+    ],
+    "protected_git_branches": ["main", "master"],
+    # The tool chain's own transcripts and memory. Not self-protection — user
+    # data, deliberately overridable through the rules file — but with the rules
+    # file gone there is nothing left to say "don't throw this away", and this
+    # is the largest irreplaceable thing the chain owns.
+    "blocked_paths_delete": ["~/.claude/projects"],
 }
 
 

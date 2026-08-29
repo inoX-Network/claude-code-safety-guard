@@ -9,6 +9,30 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.08.29-2
+
+### Fixed — the guard
+
+- **security** — The fallback ruleset said "fail-closed" and left three things
+  out. With the rules file missing, `owner_only_commands`, `blocked_git_ops` and
+  `blocked_paths_delete` were simply absent, so the approval scripts became
+  ordinary commands, `git reset --hard` and `--no-verify` ran, and the tool
+  chain's transcripts and memory could be deleted. Worse as a chain: the rules
+  file's parent directory is not protected, the pending directory is open by
+  design, and the approval script was the third step — three allowed operations
+  and the assistant holds a level-2 grant, with the guard printing "FALLBACK
+  ruleset active (fail-closed)" throughout. All three keys are now in the
+  fallback. Reported 2026-08-29 by an external review.
+
+### Changed — the example rules
+
+- `blocked_paths_delete` now also lists the guard's own directories
+  (`~/.claude/hooks`, `bin`, `rules`, `safety-guard`). Self-protection covers
+  the FILES in them; naming the DIRECTORY removed them as a side effect — the
+  documented ancestor-delete limitation, applied to the rules file itself.
+  Measured over 216,972 real commands: 88 delete forms hit `~/.claude/hooks`, 1
+  of which had been allowed.
+
 ## 2026.08.29
 
 ### Fixed — the guard
