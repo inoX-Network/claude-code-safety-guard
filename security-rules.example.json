@@ -58,8 +58,13 @@
     "/bin"
   ],
   "_comment_blocked_paths_delete": "Paths that may be CHANGED but not DESTROYED. Deleting is not the same as writing: 'this data is valuable' almost always means don't throw it away, not don't touch it. Putting ~/.claude/projects into blocked_paths_write would also block writing a single memory entry -- and a barrier that blocks everyday maintenance gets switched off within the week. Covered verbs: rm, rmdir, unlink, shred, truncate, mv, dd, plus find -delete / rsync --delete / git clean and interpreter one-liners (shutil.rmtree and friends). Redirects deliberately do NOT count -- 'echo x > file' is the ordinary maintenance path. Level 1 lifts it for explicitly named paths.",
+  "_comment_blocked_paths_delete": "Deleting is not writing -- these paths may be changed but not thrown away. The guard's own directories are listed because self-protection covers the FILES in them; naming the DIRECTORY removes them as a side effect, and the rules directory is the first step of an escalation chain (delete rules -> fallback ruleset -> approval script no longer owner-only). Measured over 216972 real commands: 88 hit ~/.claude/hooks with a delete form, 1 of which was previously allowed. Adjust the last entry if your rules file lives elsewhere -- guard-config.json says where.",
   "blocked_paths_delete": [
-    "~/.claude/projects"
+    "~/.claude/projects",
+    "~/.claude/hooks",
+    "~/.claude/bin",
+    "~/.claude/rules",
+    "~/.claude/safety-guard"
   ],
   "_comment_allowed_sudo": "Commands allowed with raised rights on level 0. The read-only ones at the end are NOT a relaxation of the read guard: protected_reads applies regardless of this list, so `sudo cat /etc/shadow` stays refused while `sudo cat /var/log/syslog` runs. Measured -- tests/test_readonly_sudo_allowlist.py pins it down. Their absence caused 47 of 910 real refusals without protecting anything.",
   "allowed_sudo": [
