@@ -284,6 +284,92 @@ def check_owner_scripts(rules: dict | None) -> None:
              "Whatever that script grants cannot be granted until it is there.")
 
 
+def check_update_hook(settings: dict) -> None:
+    """The update check needs BOTH halves: the config key and the hook entry.
+
+    The README calls this "the easy mistake" itself: `update_check.enabled` is
+    on, nothing runs, and nothing complains — the quietest possible failure. It
+    is exactly what a verification tool is for, and it was the one place this
+    one did not look.
+
+    Silence is correct when the check is off. A tool that nags about a feature
+    nobody switched on gets ignored, and then it is not read when it matters.
+    """
+    config_path = HOME / ".claude" / "guard-config.json"
+    enabled = False
+    if config_path.is_file():
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            enabled = bool((cfg.get("update_check") or {}).get("enabled"))
+        except Exception:
+            enabled = False
+    if not enabled:
+        return
+
+    registered = any(
+        "update-check" in str(h.get("command", ""))
+        for entry in settings.get("hooks", {}).get("SessionStart", []) or []
+        for h in entry.get("hooks", []) or []
+    )
+    if registered:
+        note(OK, "update check", "enabled and registered as a SessionStart hook")
+    else:
+        note(WARN, "update check",
+             "update_check.enabled is true, but no SessionStart hook runs "
+             "update-check.py — the setting is on and nothing checks. "
+             "See the update section of INSTALL.md.")
+
+    version_file = None
+    for base in (HOME / ".claude" / "hooks", HOME / ".claude" / "safety-guard"):
+        if (base / "VERSION").is_file():
+            version_file = base / "VERSION"
+            break
+    if version_file is None:
+        note(WARN, "update check",
+             "no VERSION file next to the hook — the check has nothing to "
+             "compare against and stays silent, which is indistinguishable "
+             "from 'you are up to date'.")
+
+
+def check_ai_context() -> None:
+    """The rules document the assistant reads to know the approval path.
+
+    Without it the assistant does not know the escalation channel exists and
+    never proposes an override — the guard then reads as a wall rather than a
+    gate, and people switch it off. INSTALL.md section B requires the file;
+    nothing checked for it.
+    """
+    for candidate in (HOME / ".claude" / "rules" / "security-operations.md",
+                      HOME / ".claude" / "rules" / "security-operations.markdown"):
+        if candidate.is_file():
+            note(OK, "AI context", str(candidate))
+            return
+    note(WARN, "AI context",
+         f"{HOME}/.claude/rules/security-operations.md not found — the "
+         "assistant has no description of the approval channel and will not "
+         "propose overrides. INSTALL.md section B.")
+
+
+def check_pending_dir() -> None:
+    """The proposal directory — the one place the AI is SUPPOSED to write.
+
+    It is deliberately not self-protected; that is what makes the channel work.
+    Missing, the AI has nowhere to put a proposal and the documented path ends
+    in an error the owner never sees.
+    """
+    pending = HOME / ".claude" / ".sudo-overrides-pending"
+    if not pending.is_dir():
+        note(WARN, "approval channel",
+             f"{pending} does not exist — the AI has nowhere to write a "
+             "proposal, so the documented approval path is broken. "
+             "mkdir -p it.")
+    elif not os.access(pending, os.W_OK):
+        note(WARN, "approval channel",
+             f"{pending} is not writable — proposals cannot be placed there.")
+    else:
+        note(OK, "approval channel", f"proposal directory ready: {pending}")
+
+
 def check_dev_window() -> bool:
     """An open dev window frees the very paths the probes aim at.
 
@@ -386,6 +472,13 @@ def main() -> int:
     if hook is not None:
         rules = check_rules()
         check_owner_scripts(rules)
+        try:
+            settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
+        except Exception:
+            settings = {}
+        check_update_hook(settings)
+        check_ai_context()
+        check_pending_dir()
         dev_open = check_dev_window()
         if not wiring_only:
             check_behaviour(hook, dev_open, rules)

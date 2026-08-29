@@ -24,6 +24,33 @@ matters to you. Entries marked **security** close a way around the guard.
   ruleset active (fail-closed)" throughout. All three keys are now in the
   fallback. Reported 2026-08-29 by an external review.
 
+### Fixed — the tools, not the guard
+
+- `tools/verify-install.py` now checks the three places where an installation
+  is wrong and **nothing complains**: `update_check.enabled` on with no
+  SessionStart hook running the checker; a missing `VERSION` file next to the
+  hook (the checker then stays silent, which is indistinguishable from "you are
+  up to date"); the assistant's rules document; and the proposal directory,
+  without which the documented approval path ends in an error the owner never
+  sees. Silent when the update check is off — a tool that nags about a feature
+  nobody switched on is not read when it matters.
+- `tools/would-it-help.py` pointed at a "setup dialogue" that does not exist
+  anywhere in the repository. It now names the rules file and the configuration
+  reference.
+
+### Documentation
+
+- The README claimed `sha256sum <protected file> > /tmp/sum.txt` is refused.
+  Measured: it runs — the redirect target is what counts. Copying *onto* a
+  protected path with a harmless redirect appended is still refused. The
+  documented false positive had been fixed and the text never followed.
+- Level 1 now says what a grant covers: what it names and what lies below it,
+  not the directory above.
+- The approval channel section covers session binding and `--all-sessions`.
+  Without it, following the README literally produces an error the README does
+  not explain — and other tool chains, which may not export
+  `CLAUDE_CODE_SESSION_ID`, hit it every time.
+
 ### Changed — the example rules
 
 - `blocked_paths_delete` now also lists the guard's own directories
