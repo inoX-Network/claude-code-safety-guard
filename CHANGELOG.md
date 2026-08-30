@@ -9,6 +9,17 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## Unreleased
+
+### Documentation
+
+- INSTALL.md never mentioned the `VERSION` file. Following the instructions to
+  the letter produced an installation whose update check is silent — and since
+  2026.08.29-2 the installation checker warns about exactly that, so the reader
+  got a warning the instructions did not explain. Measured on the author's own
+  machine, where the check had been quiet for days for this reason. The copy
+  step, the file table and the update-check section now name it.
+
 ## 2026.08.30-3
 
 ### Changed — the guard, without changing a verdict
