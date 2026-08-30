@@ -155,6 +155,30 @@ def check_granted_directory_behind_a_variable_stays_free():
     return _stays_free("echo x > $HOME/.ssh/config.d/work", [f"{SSH}/config.d"])
 
 
+# --- a reading segment must not poison the verdict ---------------------------
+# Found by a live probe on 2026-08-30, not by this file: cleaning up a granted
+# directory and listing its parent in the same line was refused, because the
+# target extraction read the WHOLE line while the path match reads only the
+# writing segments. The guard has drawn that boundary since 2026-08-20; this
+# function was walking around it.
+
+def check_listing_the_parent_alongside_a_granted_write_stays_free():
+    return _stays_free(f"echo x > {SSH}/config.d/work && ls {SSH}",
+                       [f"{SSH}/config.d"])
+
+
+def check_reading_the_parent_after_a_granted_delete_stays_free():
+    return _stays_free(f"rm -rf {SSH}/config.d/old && ls -la {SSH}",
+                       [f"{SSH}/config.d"])
+
+
+def check_a_second_write_segment_is_still_seen():
+    # The boundary must not become a hole: a WRITING segment naming the
+    # neighbour still blocks, grant or no grant.
+    return _blocks(f"echo x > {SSH}/config.d/work && echo y > {SSH}/authorized_keys",
+                   [f"{SSH}/config.d"])
+
+
 def check_traversal_disguised_neighbour_stays_blocked():
     return _blocks(f"cp /tmp/x /tmp/..{HOME}/.ssh/authorized_keys",
                    [f"{SSH}/config.d"])

@@ -9,6 +9,20 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.08.30
+
+### Fixed — the guard
+
+- **security-adjacent (false positive)** — The target extraction added in
+  2026.08.29 read the WHOLE command line, while the path match reads only the
+  segments that write. A reading segment naming the protected parent therefore
+  poisoned the verdict: `rm -rf <granted dir> && ls <parent>` was refused
+  although nothing outside the grant is written. The guard has drawn that
+  segment boundary since 2026.08.20; the new function was walking around it.
+  Both now use one shared helper, so they cannot drift apart again. Found by a
+  live probe against the sharp installation, not by the suite — no test case
+  named a protected path in a reading segment while holding a grant.
+
 ## 2026.08.29-2
 
 ### Fixed — the guard
