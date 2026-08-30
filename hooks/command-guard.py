@@ -1577,6 +1577,38 @@ def check_blocked_patterns(command: str, patterns: list[str]) -> str | None:
     return None
 
 
+def _touching_segments(cleaned: str, touches) -> list[str]:
+    """The parts of a line that actually write (or delete), plus cd context.
+
+    Pulled out of check_blocked_paths on 2026-08-30 so that the target
+    extraction can look at exactly what the path match looked at. When it
+    searched the whole line instead, a READING segment poisoned the verdict:
+    `rm -rf <granted dir> && ls <protected parent>` reported the parent as a
+    touched target, the grant did not cover it, and a refusal followed for a
+    command that writes nowhere near it. Found by a live probe, not by a test —
+    the test suite had no case that names a protected path in a reading segment
+    while holding a grant.
+
+    A directory change counts as write context: `cd <protected> && echo x >
+    file` carries the protected path only in the cd segment.
+
+    If NO single segment reads as a write although the whole line does, the old
+    coarse check on the entire line stays: a false positive beats a hole.
+    """
+    # Line continuations first: a target written on the next physical line
+    # belongs to the same command. Dropping this when the helper was extracted
+    # cost two red cases in test_write_guard_segment_boundary — the suite
+    # caught what the eye did not.
+    cleaned = _join_line_continuations(cleaned)
+    segmente = [s for s in split_segments(cleaned)
+                if touches(s) or _CD_RE.search(s)]
+    if not segmente:
+        segmente = [cleaned]
+    # Substitute assignment values, then drop copy SOURCES (in that order: only
+    # once the variable is resolved can you tell whether it was a source).
+    return [_write_target_text(_with_assignments(s, cleaned)) for s in segmente]
+
+
 def check_blocked_paths(command: str, paths: list[str],
                         detector=None) -> str | None:
     """Check whether the command touches a protected path.
@@ -1618,15 +1650,7 @@ def check_blocked_paths(command: str, paths: list[str],
     #
     # If NO single segment reads as a write although the whole line does, the old
     # coarse check on the entire line stays: a false positive beats a hole.
-    cleaned = _join_line_continuations(cleaned)
-    to_check = [s for s in split_segments(cleaned)
-                if touches(s) or _CD_RE.search(s)]
-    if not to_check:
-        to_check = [cleaned]
-    # Substitute assignment values, then drop copy SOURCES (in that order: only
-    # once the variable is resolved can you tell whether it was a source).
-    to_check = [_write_target_text(_with_assignments(s, cleaned))
-                for s in to_check]
+    to_check = _touching_segments(cleaned, touches)
 
     # Path order stays outermost: a command touching several protected paths
     # still reports the same one as before.
@@ -2092,7 +2116,7 @@ def check_sudo(command: str, allowed: list[str],
     return None
 
 
-def concrete_targets_under(command: str, entry: str) -> list[str]:
+def concrete_targets_under(command: str, entry: str, detector=None) -> list[str]:
     """The paths NAMED IN THE COMMAND that lie at or below a protected entry.
 
     check_blocked_paths reports WHICH LIST ENTRY matched, not what the command
@@ -2108,17 +2132,21 @@ def concrete_targets_under(command: str, entry: str) -> list[str]:
     NOT covered — see grant_covers_path.
     """
     found: list[str] = []
-    # The command is searched in both spellings too. check_blocked_paths finds
-    # the entry in `$HOME/.ssh/authorized_keys` because it expands before
-    # matching; without the same step here the target would be unresolvable and
-    # every such write would fall to the fail-closed branch below — including
-    # the ones the grant does cover.
-    # Traversal detours are collapsed first, exactly as check_blocked_paths
-    # does before matching. Without it `/opt/./inox/legal/x` finds the entry but
-    # no target, and the fail-closed branch would refuse a write the grant
-    # covers — while a disguised path would look the same as an unresolvable one.
+    # ONLY the segments that write. A reading segment naming the protected
+    # parent (`rm -rf <granted> && ls <parent>`) would otherwise contribute a
+    # target the grant cannot cover, and the whole line would be refused —
+    # exactly the segment boundary the write guard has had since 2026-08-20,
+    # which this function was walking around. Measured live on 2026-08-30.
+    #
+    # Both spellings are searched. check_blocked_paths finds the entry in
+    # `$HOME/.ssh/authorized_keys` because it expands before matching; without
+    # the same step here the target would be unresolvable and every such write
+    # would fall to the fail-closed branch below — including the ones the grant
+    # does cover. Traversal detours are collapsed for the same reason.
     roh = _collapse_path_traversal(command)
-    texte = {command, roh, expand_path(command), expand_path(roh)}
+    texte: set[str] = set()
+    for segment in _touching_segments(roh, detector or _command_is_write):
+        texte.update({segment, expand_path(segment)})
     for spelling in {entry.rstrip("/"), expand_path(entry).rstrip("/")}:
         if not spelling:
             continue
@@ -3679,7 +3707,9 @@ def main():
         liste = (rules.get("blocked_paths_delete", []) if delete_only
                  else rules.get("blocked_paths_write", []))
         allowed, need = path_decision(blocked_path, level, grants,
-                                      concrete_targets_under(command, blocked_path),
+                                      concrete_targets_under(
+                                          command, blocked_path,
+                                          _command_deletes if delete_only else None),
                                       liste)
         if not allowed:
             _audit(input_data, "Bash", command, "block", f"protected_path:{blocked_path}", level)
