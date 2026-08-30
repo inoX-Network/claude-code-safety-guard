@@ -2461,7 +2461,17 @@ def path_decision(blocked_path: str, level: int, grants: dict,
     # zone. Saying "a grant for '/opt/inox'" when the command writes
     # /opt/inox/billing/app.py invites exactly the too-broad grant this
     # function refuses.
-    braucht = targets[0] if targets else blocked_path
+    # Name the target that is NOT covered, not simply the first one. A line may
+    # touch several: with a grant on one directory and a write to its
+    # neighbour, saying "you need a grant for <the directory you already
+    # granted>" sends the reader to add a grant that is already there. Measured
+    # live on 2026-08-30 — the refusal was correct and its advice was not.
+    ungedeckt = next(
+        (t for t in (targets or [])
+         if not grant_covers_path(blocked_path, grants.get("allowed_paths", []),
+                                  [t], entries)),
+        None)
+    braucht = ungedeckt or (targets[0] if targets else blocked_path)
     need = f"level 2 OR an allowed_paths grant for '{braucht}'"
     return allowed, need
 

@@ -9,6 +9,17 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.08.30-2
+
+### Fixed — the message, not the verdict
+
+- A refusal named the FIRST target it had found, not the one the grant fails to
+  cover. With a grant on one directory and a write to its neighbour in the same
+  line, it advised "you need an allowed_paths grant for <the directory already
+  granted>" — following that advice changes nothing. The verdict was right and
+  its explanation sent the reader in a circle. Measured live on 2026-08-30; the
+  refusal now names the uncovered target. Nothing about what is blocked changes.
+
 ## 2026.08.30
 
 ### Fixed — the guard
