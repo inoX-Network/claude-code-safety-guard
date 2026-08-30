@@ -2144,10 +2144,20 @@ def concrete_targets_under(command: str, entry: str, detector=None) -> list[str]
     # would fall to the fail-closed branch below — including the ones the grant
     # does cover. Traversal detours are collapsed for the same reason.
     roh = _collapse_path_traversal(command)
-    texte: set[str] = set()
+    # Ordered, not a set. Python randomises set iteration per process, so the
+    # ORDER of the targets found here changed from run to run — and with it
+    # which one the refusal names. Measured 2026-08-30: the same command,
+    # the same guard, three different messages across five runs. The verdict
+    # was never affected (every target has to be covered, order-independent),
+    # but a message that changes when nothing else did is not evidence, and a
+    # test that asserts it is flaky.
+    texte: list[str] = []
     for segment in _touching_segments(roh, detector or _command_is_write):
-        texte.update({segment, expand_path(segment)})
-    for spelling in {entry.rstrip("/"), expand_path(entry).rstrip("/")}:
+        for variante in (segment, expand_path(segment)):
+            if variante not in texte:
+                texte.append(variante)
+    for spelling in dict.fromkeys(
+            [entry.rstrip("/"), expand_path(entry).rstrip("/")]):
         if not spelling:
             continue
         # The entry, plus whatever path characters follow it. Same start

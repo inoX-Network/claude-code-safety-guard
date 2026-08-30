@@ -9,6 +9,21 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.08.30-3
+
+### Changed — the guard, without changing a verdict
+
+- The targets a command touches are collected in ORDER now, not through a set.
+  Python randomises set iteration per process, so with two writing segments the
+  order of the collected targets changed from run to run. The verdict never
+  depended on it — every target has to be covered, which is order-independent,
+  verified across five hash seeds — but the message picked `targets[0]`, and in
+  the edition that still did so the same command produced different advice on
+  different runs (measured 2026-08-30: five of twelve runs disagreed). Since
+  2026.08.30-2 the message names the uncovered target and no longer depends on
+  order at all; this makes the remaining fallback stable too. Hardening, not a
+  fix for a defect measurable on main.
+
 ## 2026.08.30-2
 
 ### Fixed — the message, not the verdict
