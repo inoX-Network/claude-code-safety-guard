@@ -20,6 +20,7 @@ Each repo file has exactly one installation target.
 | Repo file | Installation target | Notes |
 |-----------|---------------------|-------|
 | `hooks/command-guard.py` | `~/.claude/hooks/command-guard.py` | The hook itself. Path is referenced from `settings.json`. |
+| `VERSION` | `~/.claude/hooks/VERSION` | The installed version, read by the update check. **Without it the check stays silent** — which is indistinguishable from "you are up to date". Copy it again on every update; `tools/verify-install.py` warns when it is missing. |
 | `security-rules.example.json` | `~/.claude/safety-guard/security-rules.json` | This is the value of the `RULES_PATH` constant in the hook. Copy the example, then **rename to `security-rules.json`** and customize. The `.example.` file is *not* read at runtime. |
 | `rules/security-operations.md` | `~/.claude/rules/security-operations.md` | The override protocol, loaded as AI context (see [section B](#b-required-ai-context)). |
 | `bin/grant-override` | `~/.claude/bin/grant-override` | Owner-only approval script. `chmod +x` it. |
@@ -54,8 +55,9 @@ mkdir -p ~/.claude/bin
 mkdir -p ~/.claude/.sudo-overrides
 mkdir -p ~/.claude/.sudo-overrides-pending
 
-# 2. The hook
+# 2. The hook, and the version file NEXT TO IT
 cp hooks/command-guard.py ~/.claude/hooks/command-guard.py
+cp VERSION ~/.claude/hooks/VERSION
 
 # 3. The rules file — note the rename from .example.json to .json
 cp security-rules.example.json ~/.claude/safety-guard/security-rules.json
@@ -217,10 +219,16 @@ it stays true on any install.
 ]
 ```
 
-Two halves belong together here and the second one is easy to forget: the entry
-in `settings.json` AND the file at that path. If the setting points somewhere
-the file is not, nothing runs and nothing says so — the check is only "armed"
-once both halves match. It stays off until `update_check.enabled` is `true` in
+**Three** things belong together here, and each one is silent when it is
+missing: the entry in `settings.json`, the file at that path, and `VERSION`
+next to the hook (step 2 above). Without the version file the check has nothing
+to compare against and says nothing — which reads exactly like "you are up to
+date". Measured on the author's own installation, where it had been quiet for
+days for that reason. `tools/verify-install.py` reports all three.
+
+If the setting points somewhere the file is not, nothing runs and nothing says
+so — the check is only "armed" once the halves match. It stays off until
+`update_check.enabled` is `true` in
 `guard-config.json` (see the README section).
 
 
