@@ -9,6 +9,28 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.02-2
+
+### Security — the same hole one level down: `os.open`
+
+- `os.open` takes FLAGS instead of a mode string, so the verb list from
+  2026.09.02 did not match it and a one-liner using it still wrote past
+  `blocked_paths_write`. Found by measuring the **remainder** after the fix was
+  already in place, rather than assuming the list was complete — which is the
+  point: a danger list is never finished, it is measured.
+
+  Only the writing flags count. `os.open(path, os.O_RDONLY)` is a read and
+  stays free; matching the bare function name would block reads too, which is
+  "naming is enough" at a new spot. Both directions are pinned as test cases,
+  and a mutation that drops the flag requirement turns the read case red.
+
+  Still out of reach, and now stated rather than left to be discovered:
+  a one-liner that hands the write to a shell through `subprocess` with
+  `shell=True`, a path assembled from two string literals, and a script
+  executed from a FILE instead of inline. The first is a pass-through concern,
+  the second is the obfuscation boundary named in the threat model, the third
+  is outside what an inline check can see.
+
 ## 2026.09.02
 
 ### Security — an interpreter one-liner wrote past `blocked_paths_write`

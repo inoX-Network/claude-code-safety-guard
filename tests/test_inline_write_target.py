@@ -83,6 +83,12 @@ CASES = [
     # that really works, not a theoretical obfuscation.
     ("shell assignment is substituted",
      f"P={WRITE_PROTECTED}; python3 -c \"open('$P/x','w').write('x')\"", True),
+    # One level below open(): os.open takes FLAGS instead of a mode string.
+    # Measured as a remainder AFTER the fix was already in place -- it still
+    # passed. That is why the verb list is explicitly allowed to grow.
+    ("os.open with write flags",
+     f"python3 -c \"import os; os.open('{WRITE_PROTECTED}/x', "
+     f"os.O_WRONLY|os.O_CREAT)\"", True),
     # Counter-probe on the mechanism: the ordinary route was never open and
     # stays shut. If this were green, the list would be testing the wrong thing.
     ("shell redirect still blocked", f"echo x > {WRITE_PROTECTED}/x", True),
@@ -101,6 +107,11 @@ CASES = [
      False),
     ("writing somewhere free", f"python3 -c \"open('{FREE}/x','w').write('x')\"",
      False),
+    # Without this the case above proves nothing: matching the bare function
+    # name would block reads too, which is "naming is enough" at a new spot.
+    ("os.open with a READ flag",
+     f"python3 -c \"import os; os.open('{WRITE_PROTECTED}/hostname', "
+     f"os.O_RDONLY)\"", False),
     ("an ordinary command", "ls -la /tmp", False),
 
     # --- the two lists mean different things --------------------------------

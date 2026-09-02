@@ -846,6 +846,11 @@ _WRITE_INLINE_RE = re.compile(
     | \bos\.makedirs\b | \bos\.mkdir\b
     | \bos\.chmod\b | \bos\.chown\b | \bchmodSync\b
     | \bos\.truncate\b
+    # One level below open(): os.open takes FLAGS instead of a mode string
+    # and therefore still passed. Measured as a remainder AFTER the fix was
+    # already in place. Only the writing flags count -- an
+    # os.open(path, os.O_RDONLY) is a read and stays free.
+    | \bos\.open\b[^)]*\bos\.O_(?:WRONLY|RDWR|CREAT|APPEND|TRUNC)\b
     """
 )
 
@@ -864,6 +869,7 @@ _INLINE_TARGET_FIRST = re.compile(     # target is the FIRST argument
     | Path\s*\(\s*(?P<t2>['"][^'"]+['"])\s*\)\s*\.\s*write_(?:text|bytes)
     | (?:writeFileSync|appendFileSync|createWriteStream)\s*\(\s*(?P<t3>['"][^'"]+['"])
     | (?:os\.makedirs|os\.mkdir|os\.truncate|os\.chmod|os\.chown)\s*\(\s*(?P<t4>['"][^'"]+['"])
+    | os\.open\s*\(\s*(?P<t5>['"][^'"]+['"])\s*,[^)]*\bos\.O_(?:WRONLY|RDWR|CREAT|APPEND|TRUNC)\b
     """
 )
 _INLINE_TARGET_BOTH = re.compile(      # moving: the source disappears
