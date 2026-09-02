@@ -9,7 +9,38 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
-## Unreleased
+## 2026.09.02
+
+### Security — an interpreter one-liner wrote past `blocked_paths_write`
+
+- `python3 -c "open('/etc/x','w').write('x')"` passed, while `echo x > /etc/x`
+  was blocked and `python3 -c "os.remove(...)"` on a delete-protected path was
+  blocked too. Every path in `blocked_paths_write` was reachable this way, the
+  key directory included — the very class this guard was built against.
+
+  The cause was an asymmetry rather than a missing entry: `_command_deletes`
+  has carried its inline counterpart (`_DELETE_INLINE_RE`) from the start,
+  `_command_is_write` never had one. Pre-existing, measured against nine
+  variants and against an older edition: identical picture.
+
+  What gets checked are the **targets** of the write, not the whole one-liner.
+  A protected path used as a read source, or appearing as text in the content
+  being written, is not a target. That distinction is the fix, not a detail:
+  the blanket form ("naming is enough", as self-protection uses it) costs 47
+  genuine false positives across 32 sessions when applied to this list,
+  because it holds system directories that appear in every shebang. Measured
+  against 220748 real commands from an audit log: **1 newly blocked** (a probe
+  of our own), **0 newly released**.
+
+  If the target cannot be read as a literal — a variable, an f-string — the
+  check falls back to the whole block (fail-closed), so moving the path into a
+  variable is not a way around.
+
+  Delete protection is explicitly excluded from this branch: an `open(...,"w")`
+  under a delete-only path is allowed, and treating the two lists alike would
+  turn one into the other.
+
+  `tests/test_inline_write_target.py`, 19 cases, 10 of them red before.
 
 ### Documentation
 

@@ -814,6 +814,107 @@ _DELETE_FLAG_RE = re.compile(
     r"|\bshred\b")
 
 
+# Inline interpreter forms for WRITING. Counterpart to _DELETE_INLINE_RE, which
+# delete protection has had from the start -- that asymmetry WAS the hole:
+# `python3 -c "open('<protected>/x','w').write('x')"` ran through freely, while
+# the same operation via a shell redirect was blocked, and the same operation
+# as os.remove was blocked too. Measured against nine variants; pre-existing,
+# not introduced by any recent change.
+#
+# WHY A DANGER LIST IS ACCEPTABLE HERE, although one was explicitly rejected for
+# the project-control branch: there it would have RELAXED -- a gap in the list
+# would have released a write path, i.e. opened a new hole. Here it TIGHTENS: a
+# gap means a hole that stays open as before, never a new one. The direction
+# decides, not the shape. This list is therefore deliberately incomplete and may
+# grow without anything being rebuilt.
+#
+# KEPT NARROW, and that is the actual trade-off: `.write(` alone would match
+# almost every Python one-liner's output (sys.stdout.write), which amounts to
+# "naming is enough". Measured against a real audit log (201330 permitted
+# commands, 21290 of them carrying inline code), the blanket form costs 47
+# genuine false positives across 32 sessions and closes exactly one hole -- a
+# probe of our own. Only operations that create, overwrite, move or re-permission
+# a FILE are listed.
+_WRITE_INLINE_RE = re.compile(
+    r"""(?x)
+    open\s*\(\s*[^)]*['"][wax]
+    | \bwrite_text\s*\(
+    | \bwrite_bytes\s*\(
+    | \bwriteFileSync\b | \bappendFileSync\b | \bcreateWriteStream\b
+    | \bos\.rename\b | \bos\.replace\b | \brenameSync\b
+    | \bshutil\.move\b | \bshutil\.copy | \bcopyfile\b | \bcopyFileSync\b
+    | \bos\.makedirs\b | \bos\.mkdir\b
+    | \bos\.chmod\b | \bos\.chown\b | \bchmodSync\b
+    | \bos\.truncate\b
+    """
+)
+
+# WHERE is the target? The operations, grouped by the position of their target
+# argument. This split is the core of the fix, not a detail: without it every
+# one-liner that writes somewhere and NAMES a protected path somewhere gets
+# blocked. Two forms, both measured and both harmless:
+#   open("/tmp/x","w").write(open(<protected>).read())   -- path is the SOURCE
+#   open("/tmp/x","w").write("see <protected>")          -- path is plain TEXT
+# With the coarse version both are rejected, with this one both pass. It is the
+# same failure class this guard exists to avoid ("text is not an action"); a fix
+# that grows it would be a step backwards.
+_INLINE_TARGET_FIRST = re.compile(     # target is the FIRST argument
+    r"""(?x)
+    open\s*\(\s*(?P<t1>['"][^'"]+['"])\s*,\s*['"][wax]
+    | Path\s*\(\s*(?P<t2>['"][^'"]+['"])\s*\)\s*\.\s*write_(?:text|bytes)
+    | (?:writeFileSync|appendFileSync|createWriteStream)\s*\(\s*(?P<t3>['"][^'"]+['"])
+    | (?:os\.makedirs|os\.mkdir|os\.truncate|os\.chmod|os\.chown)\s*\(\s*(?P<t4>['"][^'"]+['"])
+    """
+)
+_INLINE_TARGET_BOTH = re.compile(      # moving: the source disappears
+    r"""(?x)
+    (?:os\.rename|os\.replace|shutil\.move|renameSync)\s*\(
+        \s*(?P<s>['"][^'"]+['"])\s*,\s*(?P<t>['"][^'"]+['"])
+    """
+)
+_INLINE_TARGET_SECOND = re.compile(    # copying: only the target is a write
+    r"""(?x)
+    (?:shutil\.copy2?|shutil\.copyfile|copyFileSync)\s*\(
+        \s*['"][^'"]+['"]\s*,\s*(?P<t>['"][^'"]+['"])
+    """
+)
+
+
+def _inline_write_targets(command: str) -> list[str] | None:
+    """The paths INLINE interpreter code writes to.
+
+    Returns:
+      list -- the targets found. An EMPTY list means: no write in the inline
+              code, nothing to check here.
+      None -- something is written, but the target is not a literal (variable,
+              f-string, concatenation). Then FAIL-CLOSED: the caller checks the
+              whole block.
+
+    The empty/None distinction carries the entire difference between "certainly
+    nothing" and "unknown". Treating both alike builds either a hole (unknown
+    read as nothing) or a permanent false positive (nothing read as unknown).
+
+    Shell variables are already substituted at this point: _inline_code_segments
+    resolves assignments, so `P=<protected>; python3 -c "open('$P/x','w')"`
+    arrives here with the path spelled out.
+    """
+    targets: list[str] = []
+    for block in _inline_code_segments(command):
+        if not _WRITE_INLINE_RE.search(block):
+            continue
+        found = False
+        for regex in (_INLINE_TARGET_FIRST, _INLINE_TARGET_BOTH,
+                      _INLINE_TARGET_SECOND):
+            for hit in regex.finditer(block):
+                for value in hit.groupdict().values():
+                    if value:
+                        targets.append(value.strip("'" + '"'))
+                        found = True
+        if not found:
+            return None          # writes, target unknown -> fail-closed
+    return targets
+
+
 def _command_deletes(command: str) -> bool:
     """Whether the command DESTROYS data (rather than merely changing it).
 
@@ -1628,6 +1729,34 @@ def check_blocked_paths(command: str, paths: list[str],
     # same treatment the self-protect twin already applies (_collapse_path_traversal,
     # not _norm_path -- no filesystem access here).
     cleaned = _collapse_path_traversal(cleaned)
+
+    # Inline interpreter code first: `python3 -c "open(path,'w')"` carries
+    # neither a shell verb nor a redirect, so it falls out of the check below --
+    # every path in blocked_paths_write was reachable that way, the key
+    # directory included. The counterpart for DELETING has existed all along
+    # (_DELETE_INLINE_RE in _command_deletes); that asymmetry was the hole.
+    #
+    # What gets checked are the TARGETS of the write, not the whole block: a
+    # protected path used as a read SOURCE, or appearing as plain text, is not a
+    # write target. If the target cannot be read as a literal, the check falls
+    # back to the whole block (fail-closed).
+    #
+    # WRITE PROTECTION ONLY: this same function also serves delete protection
+    # (detector=_command_deletes). There a WRITE target would be matched against
+    # the DELETE list -- but an open(...,"w") under a delete-only protected path
+    # is explicitly allowed (such data is maintained, not destroyed). Measuring
+    # this very fix, that confusion produced 12 reported "holes", eleven of which
+    # were none.
+    if detector is None or detector is _command_is_write:
+        inline_targets = _inline_write_targets(cleaned)
+        inline_to_check = ([cleaned] if inline_targets is None
+                           else [_collapse_path_traversal(t) for t in inline_targets])
+        for path in paths:
+            expanded = expand_path(path)
+            for target in inline_to_check:
+                if (_names_path(target, path) or _names_path(target, expanded)
+                        or _names_path(expand_path(target), expanded)):
+                    return path
 
     # Detect write resp. delete operations
     touches = detector or _command_is_write
