@@ -88,6 +88,23 @@ CASES = [
     ("wget to a free directory prefix",
      f"wget -P /tmp {URL}", False),
     ("an ordinary command", "ls -la /tmp", False),
+
+    # --- a protected path in nearby TEXT is not a target --------------------
+    # Both measured 2026-09-21 as false positives of a coarser first fix that
+    # checked the whole block when the target was a variable.
+    ("protected path only in a printf message next to a var target",
+     f"BK=/tmp/free; curl -s {URL} -o \"$BK/a\"; "
+     f"printf 'restore to {WRITE_PROTECTED}/x' > \"$BK/info\"", False),
+    ("protected path only in the -w format string",
+     f"/bin/curl -o {FREE}/x -w 'code %{{http_code}} {WRITE_PROTECTED}/hint' {URL}",
+     False),
+    ("var target resolves to a free path",
+     f"D=/tmp/free; curl -o \"$D/x\" {URL}", False),
+    # --- but an assignment to a protected path IS resolved and caught -------
+    ("var target resolves to a protected path via assignment",
+     f"D={WRITE_PROTECTED}; curl -o \"$D/x\" {URL}", True),
+    ("var target resolves onto the guard itself via assignment",
+     f"H={HOME}/.claude/hooks; curl -o \"$H/command-guard.py\" {URL}", True),
 ]
 
 

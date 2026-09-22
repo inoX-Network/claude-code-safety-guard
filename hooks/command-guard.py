@@ -941,25 +941,29 @@ _DL_OUTPUT_FLAG_RE = re.compile(
     r"(?:=|\s+)(?P<target>[^\s;|&]+)")
 
 
-def _downloader_write_targets(command: str) -> list[str] | None:
-    """The paths a curl/wget output flag writes to.
+def _downloader_write_targets(command: str) -> list[str]:
+    """The paths a curl/wget output flag writes to (empty = no downloader write).
 
-    Same contract as _inline_write_targets:
-      list  -- the targets found (EMPTY = no downloader write, nothing here).
-      None  -- writes, but the target is not a plain literal (a variable, a
-               command substitution). Then FAIL-CLOSED: the caller checks the
-               whole block.
+    Shell assignments in the SAME command are resolved, so `BK=/x; curl -o
+    "$BK/f"` yields /x/f and faces the path gate precisely. A target that stays
+    a variable (a loop variable, an external env var) is returned as-is and
+    simply names no protected literal.
+
+    Deliberately NOT fail-closed on the whole block: an earlier version returned
+    None for a non-literal target, and the caller then checked the entire
+    command -- which matched a protected path sitting in nearby TEXT (a `-w`
+    format string, a printf message, curl's own `/usr/bin` path). Measured
+    2026-09-21 against the real audit log, that cost two false positives out of
+    12267 touched commands. Only the flag argument is ever a target; a target
+    hidden in an external variable is a named remainder, like the composed-path
+    case of the interpreter write guard, not a reason to search the whole line.
     """
     if not _DOWNLOADER_RE.search(command):
         return []
     targets: list[str] = []
     for hit in _DL_OUTPUT_FLAG_RE.finditer(command):
         target = hit.group("target").strip("'\"")
-        # A shell variable or command substitution is not resolved here, so the
-        # literal target is unknown -> fail-closed on the whole block.
-        if "$" in target or "`" in target:
-            return None
-        targets.append(target)
+        targets.append(_with_assignments(target, command))
     return targets
 
 
@@ -1807,15 +1811,13 @@ def check_blocked_paths(command: str, paths: list[str],
                     return path
 
         # Downloader output flag: same precise-target treatment. Only the flag
-        # ARGUMENT is checked, so a protected path inside the URL is not a
-        # target. An empty list means no downloader write here; None means the
-        # target is not a literal -> fail-closed on the whole block.
-        dl_targets = _downloader_write_targets(cleaned)
-        dl_to_check = ([cleaned] if dl_targets is None
-                       else [_collapse_path_traversal(t) for t in dl_targets])
+        # ARGUMENT is a target (never the URL, never a protected path in nearby
+        # text), and assignments in the line are resolved so `$BK/f` becomes a
+        # real path.
         for path in paths:
             expanded = expand_path(path)
-            for target in dl_to_check:
+            for target in _downloader_write_targets(cleaned):
+                target = _collapse_path_traversal(target)
                 if (_names_path(target, path) or _names_path(target, expanded)
                         or _names_path(expand_path(target), expanded)):
                     return path
@@ -2587,17 +2589,14 @@ def command_hits_self_protect(command: str) -> str | None:
     # Downloader output flag onto a self-protected path: same precise-target
     # extraction as check_blocked_paths. `curl -o <hook>` / `wget -O <hook>`
     # went through because _command_is_write does not know these flags. Only the
-    # flag argument is a target; None (target not a literal) blocks the whole
-    # line, fail-closed.
-    dl_targets = _downloader_write_targets(command)
-    if dl_targets is None or dl_targets:
-        dl_self = [command] if dl_targets is None else dl_targets
-        for target in dl_self:
-            te = expand_path(target)
-            for prot in SELF_PROTECT_PATHS:
-                p = re.escape(expand_path(prot).rstrip("/"))
-                if re.search(p + _PATH_BOUNDARY, te) and not _dev_unlocked(prot):
-                    return prot
+    # flag argument is a target, with assignments resolved; a target left as an
+    # external variable is the named remainder.
+    for target in _downloader_write_targets(command):
+        te = expand_path(target)
+        for prot in SELF_PROTECT_PATHS:
+            p = re.escape(expand_path(prot).rstrip("/"))
+            if re.search(p + _PATH_BOUNDARY, te) and not _dev_unlocked(prot):
+                return prot
 
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
