@@ -921,6 +921,48 @@ def _inline_write_targets(command: str) -> list[str] | None:
     return targets
 
 
+# A downloader's output flag is a write: `curl -o FILE`, `wget -O FILE`,
+# `--output(-document)=FILE`, `-P DIR`/`--directory-prefix=DIR`. _command_is_write
+# knew none of them (curl/wget appear only as the pipe-to-shell pattern), so the
+# target never faced the path gate -- every write- and self-protected path was
+# reachable this way, the guard's own file included. Measured 2026-09-21.
+#
+# Only the flag ARGUMENT is the target, never the URL: `curl -o /tmp/x
+# https://evil.tld/etc/passwd` writes to the free path, and the /etc/passwd in
+# the URL must not read as a target. That is why this is a precise extraction
+# next to _inline_write_targets, not a coarse "_command_is_write says curl".
+_DOWNLOADER_RE = re.compile(r"\b(?:curl|wget)\b")
+# curl -o / --output ; wget -O / --output-document ; wget -P / --directory-prefix.
+# The argument follows after '=' or whitespace. curl's -O (remote name) takes no
+# path, wget's -o is a logfile -- both still WRITE where they are pointed, so
+# treating the argument as a target errs in the safe (stricter) direction.
+_DL_OUTPUT_FLAG_RE = re.compile(
+    r"(?:^|\s)(?:-o|-O|-P|--output|--output-document|--directory-prefix)"
+    r"(?:=|\s+)(?P<target>[^\s;|&]+)")
+
+
+def _downloader_write_targets(command: str) -> list[str] | None:
+    """The paths a curl/wget output flag writes to.
+
+    Same contract as _inline_write_targets:
+      list  -- the targets found (EMPTY = no downloader write, nothing here).
+      None  -- writes, but the target is not a plain literal (a variable, a
+               command substitution). Then FAIL-CLOSED: the caller checks the
+               whole block.
+    """
+    if not _DOWNLOADER_RE.search(command):
+        return []
+    targets: list[str] = []
+    for hit in _DL_OUTPUT_FLAG_RE.finditer(command):
+        target = hit.group("target").strip("'\"")
+        # A shell variable or command substitution is not resolved here, so the
+        # literal target is unknown -> fail-closed on the whole block.
+        if "$" in target or "`" in target:
+            return None
+        targets.append(target)
+    return targets
+
+
 def _command_deletes(command: str) -> bool:
     """Whether the command DESTROYS data (rather than merely changing it).
 
@@ -1764,6 +1806,20 @@ def check_blocked_paths(command: str, paths: list[str],
                         or _names_path(expand_path(target), expanded)):
                     return path
 
+        # Downloader output flag: same precise-target treatment. Only the flag
+        # ARGUMENT is checked, so a protected path inside the URL is not a
+        # target. An empty list means no downloader write here; None means the
+        # target is not a literal -> fail-closed on the whole block.
+        dl_targets = _downloader_write_targets(cleaned)
+        dl_to_check = ([cleaned] if dl_targets is None
+                       else [_collapse_path_traversal(t) for t in dl_targets])
+        for path in paths:
+            expanded = expand_path(path)
+            for target in dl_to_check:
+                if (_names_path(target, path) or _names_path(target, expanded)
+                        or _names_path(expand_path(target), expanded)):
+                    return path
+
     # Detect write resp. delete operations
     touches = detector or _command_is_write
     if not touches(cleaned):
@@ -2526,6 +2582,21 @@ def command_hits_self_protect(command: str) -> str | None:
             for prot in SELF_PROTECT_PATHS:
                 pe = expand_path(prot).rstrip("/")
                 if _glob_touches_tree(candidate, pe) and not _dev_unlocked(prot):
+                    return prot
+
+    # Downloader output flag onto a self-protected path: same precise-target
+    # extraction as check_blocked_paths. `curl -o <hook>` / `wget -O <hook>`
+    # went through because _command_is_write does not know these flags. Only the
+    # flag argument is a target; None (target not a literal) blocks the whole
+    # line, fail-closed.
+    dl_targets = _downloader_write_targets(command)
+    if dl_targets is None or dl_targets:
+        dl_self = [command] if dl_targets is None else dl_targets
+        for target in dl_self:
+            te = expand_path(target)
+            for prot in SELF_PROTECT_PATHS:
+                p = re.escape(expand_path(prot).rstrip("/"))
+                if re.search(p + _PATH_BOUNDARY, te) and not _dev_unlocked(prot):
                     return prot
 
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
