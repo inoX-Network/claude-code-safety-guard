@@ -3427,7 +3427,19 @@ def command_hits_protected_read(command: str, rules: dict,
     tokens = []
     for raw in cleaned.split():
         tok = raw.strip("'\"").lstrip("<>|&;()")
+        # A long option with '=' can carry a path as its value:
+        # --upload-file=PATH, --post-file=PATH. Take the part after the first
+        # '=' so the token loop (which skips '-' tokens) still sees the path.
+        # Without this a credential path behind --flag= slipped through the read
+        # gate. Measured 2026-09-21 (finding A2).
+        if tok.startswith("-") and "=" in tok:
+            tok = tok.split("=", 1)[1]
         tok = re.sub(r'^[a-zA-Z_]+=', '', tok)   # strip if=/of=/VAR=
+        # curl's '@file' syntax (-d @path, -F field=@path, --data-binary @path)
+        # names a file to read. The '@' was not stripped, so '@.env' had
+        # basename '@.env' and '@~/.ssh/id_rsa' did not start with the home
+        # path -- the read slipped through. Measured 2026-09-21 (finding A3).
+        tok = tok.lstrip("@")
         if tok:
             tokens.append(tok)
 
