@@ -21,7 +21,7 @@ For WebSearch/URL fetching:
 ## The protection system is armed (command-guard.py)
 
 The PreToolUse hook `command-guard.py` enforces these rules technically — for
-**Bash, Read, Write, Edit, MultiEdit, NotebookEdit**. The rules below are therefore
+**Bash, Read, Write, Edit, MultiEdit, NotebookEdit and MCP tools**. The rules below are therefore
 not just convention; they are enforced by the hook. The **JSON override file + the
 hook are the authority — not the prompt.** You cannot grant yourself any rights.
 
