@@ -9,6 +9,37 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.22-3
+
+### Security — curl and wget slipped past write-, self- and read-protection
+
+- **Downloader output was not a write.** The write gate knew write verbs,
+  redirects, awk, `find -delete`, rsync, git clean and remote copy, but no
+  downloader output flag (`-o`, `-O`, `--output`, `--output-document`, `-P`,
+  `--directory-prefix`). Such a command was judged read-only, so neither
+  `blocked_paths_write` nor the hardcoded self-protection list was consulted.
+  The worst case: a file dropped straight into the active override directory,
+  taking the approval channel with it. The output flag's ARGUMENT is now a
+  write target; the URL never is, so a protected path inside a URL stays free.
+  A target that is an assignment on the same line is resolved; a target that
+  stays an external variable names no protected literal and is a named
+  remainder, the same boundary the interpreter write guard draws.
+- **`--option=PATH` hid a path from the read gate.** Tokens starting with `-`
+  were skipped whole, so a credential path behind `--upload-file=` or
+  `--post-file=` was never checked. The value after the first `=` is now a
+  path candidate.
+- **A leading `@` hid a path from the read gate.** curl reads a file given as
+  `@path`; the normalisation did not strip the `@`, so `@.env` or a home path
+  with `@` in front passed. A leading `@` is now stripped for every command,
+  not as a curl special case.
+
+Changes what the guard blocks: yes, only in the direction of blocking these
+three forms. Measured against 12,268 real commands from an audit log that
+touched a downloader or a read option: 0 newly blocked. The first version of
+the fix did block two there (a protected path in nearby text) and was narrowed
+before merge. 36 cases, bypass forms and controls, pinned in
+`test_downloader_write_target.py` and `test_read_option_normalization.py`.
+
 ## 2026.09.02-2
 
 ### Security — the same hole one level down: `os.open`
