@@ -64,6 +64,16 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/update-check.py"
+          }
+        ]
+      }
     ]
   }
 }

@@ -17,6 +17,7 @@
 # in, which also keeps a test klaxon out of the production code: there is no
 # "test source" env var to be abused.
 # ============================================================================
+import ast
 import importlib.util
 import json
 import os
@@ -35,15 +36,16 @@ def _load(config_path: Path, state_path: Path):
     os.environ["CLAUDE_UPDATE_CONFIG"] = str(config_path)
     os.environ["CLAUDE_UPDATE_STATE"] = str(state_path)
     spec = importlib.util.spec_from_file_location("update_check_under_test", SCRIPT)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.CONFIG_PATH = config_path
-    module.STATE_PATH = state_path
+    setattr(module, "CONFIG_PATH", config_path)
+    setattr(module, "STATE_PATH", state_path)
     return module
 
 
 def _run(config: dict | None, published: str | None, *,
-         state: dict | None = None, installed: str = "2026.08.21"):
+         state: dict | None = None, installed: str | None = "2026.08.21"):
     """Run main() with a stand-in fetcher. Returns (output, state_after)."""
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -61,8 +63,8 @@ def _run(config: dict | None, published: str | None, *,
             calls.append(source)
             return published
 
-        module._fetch_published = _stand_in
-        module._installed_version = lambda: installed
+        setattr(module, "_fetch_published", _stand_in)
+        setattr(module, "_installed_version", lambda: installed)
 
         import io
         from contextlib import redirect_stdout
@@ -351,6 +353,134 @@ def check_script_runs_and_exits_zero():
     return p.returncode == 0, f"exit {p.returncode}: {p.stderr[:120]}"
 
 
+# --- 9. HOME cannot be moved through the environment (B1) -------------------
+# Same vector as command-guard.py: Path.home() reads $HOME, and $HOME is
+# settable. A redirected HOME would make this script read its config from,
+# and write its state to, a directory the caller controls.
+
+def check_home_comes_from_the_password_database():
+    module = _load_bare()
+    missing = [n for n in ("_real_home", "HOME") if not hasattr(module, n)]
+    if missing:
+        return False, f"the fix is present ({', '.join(missing)} missing)"
+    # Only the marker line itself may assign HOME; no live call to Path.home()
+    # may remain after it (a mention inside the docstring above it is fine).
+    source = SCRIPT.read_text(encoding="utf-8")
+    after_assignment = source.split("HOME = _real_home()", 1)[1]
+    return "Path.home()" not in after_assignment, \
+        "Path.home() is still read directly after the fix"
+
+
+def check_real_home_ignores_a_redirected_home_env():
+    """The password-database lookup must not move when $HOME does."""
+    module = _load_bare()
+    real = module._real_home()
+    env = dict(os.environ)
+    env["HOME"] = "/nowhere/fake-home"
+    p = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, {str(SCRIPT.parent)!r}); "
+         "import importlib.util as u; "
+         f"spec = u.spec_from_file_location('m', {str(SCRIPT)!r}); "
+         "m = u.module_from_spec(spec); spec.loader.exec_module(m); "
+         "print(m._real_home())"],
+        capture_output=True, text=True, env=env, timeout=20)
+    reported = p.stdout.strip()
+    return reported == str(real) and reported != "/nowhere/fake-home", \
+        f"HOME redirect changed the result: {reported!r} (expected {real})"
+
+
+# --- 10. the three env switches are gated the same way as the guard's (B2) --
+# CLAUDE_UPDATE_CONFIG, CLAUDE_GUARD_CONFIG and CLAUDE_UPDATE_STATE were test
+# switches without a production gate: whoever set one decided where this
+# script reads its config from and writes its state to, even at the real
+# installed location.
+
+def _load_bare():
+    """Load the module without pre-seeding the env-var paths (unlike _load)."""
+    spec = importlib.util.spec_from_file_location(
+        "update_check_gate_under_test", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_production_gate_helpers_exist():
+    module = _load_bare()
+    missing = [n for n in ("_is_production", "_env", "_ENV_ALLOWED",
+                           "_PRODUCTION_HOOK") if not hasattr(module, n)]
+    return not missing, f"missing: {missing}"
+
+
+def check_production_location_recognised_correctly():
+    module = _load_bare()
+    is_production_file = False
+    try:
+        is_production_file = SCRIPT.resolve() == module._PRODUCTION_HOOK.resolve()
+    except OSError:
+        pass
+    return module._is_production() is is_production_file, \
+        "a repo checkout was mistaken for the installed location"
+
+
+def check_same_file_counts_as_production():
+    module = _load_bare()
+    keep = module._PRODUCTION_HOOK
+    try:
+        setattr(module, "_PRODUCTION_HOOK", SCRIPT)
+        return module._is_production() is True, "not recognised as production"
+    finally:
+        setattr(module, "_PRODUCTION_HOOK", keep)
+
+
+def check_another_location_does_not_count_as_production():
+    module = _load_bare()
+    keep = module._PRODUCTION_HOOK
+    try:
+        setattr(module, "_PRODUCTION_HOOK", Path("/nowhere/update-check.py"))
+        return module._is_production() is False, "wrongly recognised as production"
+    finally:
+        setattr(module, "_PRODUCTION_HOOK", keep)
+
+
+def check_env_switches_are_read_outside_production():
+    module = _load_bare()
+    setattr(module, "_ENV_ALLOWED", True)
+    os.environ["CLAUDE_UPDATE_CONFIG_TEST_PROBE"] = "set"
+    try:
+        return module._env("CLAUDE_UPDATE_CONFIG_TEST_PROBE") == "set", \
+            "not readable outside production"
+    finally:
+        del os.environ["CLAUDE_UPDATE_CONFIG_TEST_PROBE"]
+
+
+def check_env_switches_yield_nothing_at_production_location():
+    module = _load_bare()
+    setattr(module, "_ENV_ALLOWED", False)
+    os.environ["CLAUDE_UPDATE_CONFIG_TEST_PROBE"] = "set"
+    try:
+        return module._env("CLAUDE_UPDATE_CONFIG_TEST_PROBE") is None, \
+            "still readable at the production location"
+    finally:
+        del os.environ["CLAUDE_UPDATE_CONFIG_TEST_PROBE"]
+
+
+def check_no_direct_environ_get_outside_the_helper():
+    """No call site may reach past _env() — same check as the guard's."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    direct = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "get" \
+                and isinstance(node.func.value, ast.Attribute) \
+                and node.func.value.attr == "environ":
+            if "_ENV_ALLOWED" not in lines[node.lineno - 1]:
+                direct.append(node.lineno)
+    return not direct, f"direct os.environ.get() outside _env(): {direct}"
+
+
 CASES = [
     ("disabled makes no request", check_disabled_makes_no_request),
     ("missing key makes no request", check_missing_key_makes_no_request),
@@ -388,6 +518,20 @@ CASES = [
     ("language does not change the decision", check_language_does_not_change_whether_it_reports),
     ("absurd language code is ignored", check_absurd_language_code_is_ignored),
     ("script runs and exits zero", check_script_runs_and_exits_zero),
+    ("HOME comes from the password database", check_home_comes_from_the_password_database),
+    ("_real_home ignores a redirected HOME", check_real_home_ignores_a_redirected_home_env),
+    ("production-gate helpers exist", check_production_gate_helpers_exist),
+    ("production location recognised correctly",
+     check_production_location_recognised_correctly),
+    ("the same file counts as production", check_same_file_counts_as_production),
+    ("another location does not count as production",
+     check_another_location_does_not_count_as_production),
+    ("env switches are read outside production",
+     check_env_switches_are_read_outside_production),
+    ("env switches yield nothing at the production location",
+     check_env_switches_yield_nothing_at_production_location),
+    ("no direct os.environ.get() outside the helper",
+     check_no_direct_environ_get_outside_the_helper),
 ]
 
 try:

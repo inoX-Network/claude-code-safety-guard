@@ -40,13 +40,61 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-HOME = Path.home()
+try:
+    import pwd                      # Unix: home directory from the password database
+except ImportError:                 # pragma: no cover — non-Unix
+    pwd = None
 
-CONFIG_PATH = Path(os.environ.get("CLAUDE_UPDATE_CONFIG")
-                   or os.environ.get("CLAUDE_GUARD_CONFIG")
+HERE = Path(__file__).resolve().parent
+
+
+def _real_home() -> Path:
+    """The home directory from the password database, not from the environment.
+
+    Same mechanism and the same reasoning as command-guard.py's `_real_home()`
+    (measured 2026-07-30): `Path.home()` reads the HOME environment variable,
+    and that is settable. A redirected HOME would make this script read its
+    config and write its state under a directory the caller controls instead
+    of the real one. The password database cannot be redirected that way.
+    """
+    if pwd is not None:
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (KeyError, OSError):
+            pass
+    return Path(os.path.expanduser("~"))
+
+
+HOME = _real_home()
+
+# Where this hook lives in production (INSTALL.md, "Optional: the update
+# check"). When the running file is there, the three variables below are
+# ignored — same reasoning as command-guard.py's _is_production(): they were
+# meant as test switches, but whoever sets one decides where this script reads
+# its config from and writes its state to.
+_PRODUCTION_HOOK = HOME / ".claude" / "hooks" / "update-check.py"
+
+
+def _is_production() -> bool:
+    """Is this file running from its production location? When in doubt: yes."""
+    try:
+        return Path(__file__).resolve() == _PRODUCTION_HOOK.resolve()
+    except OSError:
+        return True
+
+
+_ENV_ALLOWED = not _is_production()
+
+
+def _env(name: str) -> str | None:
+    """Read an environment variable — always None at the production location."""
+    return os.environ.get(name) if _ENV_ALLOWED else None
+
+
+CONFIG_PATH = Path(_env("CLAUDE_UPDATE_CONFIG")
+                   or _env("CLAUDE_GUARD_CONFIG")
                    or HOME / ".claude" / "guard-config.json")
-STATE_PATH = Path(os.environ.get("CLAUDE_UPDATE_STATE")
+STATE_PATH = Path(_env("CLAUDE_UPDATE_STATE")
                   or HOME / ".claude" / ".update-check-state.json")
 
 # The published version is read from the latest RELEASE, not from the tip of a
