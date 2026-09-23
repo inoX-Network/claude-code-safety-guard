@@ -229,7 +229,9 @@ def check_rules() -> dict | None:
     if not path.is_file():
         note(FAIL, "rules file",
              f"the hook expects rules at {path} — nothing there. "
-             "Without them it runs fail-closed and refuses everything.")
+             "Without them it runs on a small built-in fallback ruleset: the "
+             "catastrophic patterns, system paths and credential reads hold, "
+             "everything you would configure yourself does not.")
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -238,10 +240,40 @@ def check_rules() -> dict | None:
         return None
     keys = [k for k in data if not k.startswith("_")]
     note(OK, "rules file", f"{path}, {len(keys)} keys")
+    check_rule_sections(data)
     if not data.get("blocked_paths_write"):
         note(WARN, "rules content",
              "blocked_paths_write is empty — nothing is write-protected by rule")
     return data
+
+
+EXAMPLE_RULES = Path(__file__).resolve().parent.parent / "security-rules.example.json"
+
+
+def check_rule_sections(data: dict) -> None:
+    """Name the sections the example file has and the rules file lacks.
+
+    Counting keys said "13 keys" and nothing else — the exact spot where an
+    outdated rules file would have shown. An update changes the example file,
+    never the user's (it is self-protected), so every section added since the
+    install is missing there. The hook fills critical ones with a built-in
+    default and tells the model once per session; this is where a human sees
+    the full list.
+    """
+    try:
+        example = json.loads(EXAMPLE_RULES.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        note(WARN, "rule sections",
+             f"cannot compare: {EXAMPLE_RULES} unreadable ({type(e).__name__})")
+        return
+    missing = [k for k in example if not k.startswith("_") and k not in data]
+    if missing:
+        note(WARN, "rule sections",
+             f"missing compared to security-rules.example.json: "
+             f"{', '.join(missing)}. Critical ones run on the hook's built-in "
+             f"default until you copy them in; see INSTALL.md, 'After an update'.")
+    else:
+        note(OK, "rule sections", "every section of the example file is present")
 
 
 def check_owner_scripts(rules: dict | None) -> None:

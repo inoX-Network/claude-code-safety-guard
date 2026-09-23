@@ -32,7 +32,7 @@ SOUND_RULES = {"blocked_paths_write": ["/etc"], "blocked_patterns": [],
 
 
 def _build(home: Path, *, update_enabled=False, update_hook=False,
-           version_file=False, rules_doc=True, pending=True):
+           version_file=False, rules_doc=True, pending=True, rules=None):
     """A wired-up install, with the four optional pieces switched per case."""
     (home / ".claude" / "hooks").mkdir(parents=True, exist_ok=True)
     (home / ".claude" / "safety-guard").mkdir(parents=True, exist_ok=True)
@@ -51,7 +51,7 @@ def _build(home: Path, *, update_enabled=False, update_hook=False,
         (home / ".claude" / "hooks" / "VERSION").write_text(
             "2026.08.29", encoding="utf-8")
     (home / ".claude" / "safety-guard" / "security-rules.json").write_text(
-        json.dumps(SOUND_RULES), encoding="utf-8")
+        json.dumps(rules if rules is not None else SOUND_RULES), encoding="utf-8")
 
     hooks = {"PreToolUse": [{"hooks": [
         {"type": "command", "command": f"python3 {hook_path}"}]}]}
@@ -126,6 +126,22 @@ def check_missing_pending_directory_is_reported():
 
 def check_present_pending_directory_is_accepted():
     return _says({"pending": True}, "proposal directory ready")
+
+
+# --- sections an update added ----------------------------------------------
+# An update changes the example file, never the user's rules file. Counting
+# keys ("13 keys") was the spot where that would have shown, and did not.
+
+EXAMPLE = json.loads((REPO / "security-rules.example.json").read_text(encoding="utf-8"))
+
+
+def check_section_missing_from_the_rules_file_is_named():
+    older = {k: v for k, v in EXAMPLE.items() if k != "mcp_policy"}
+    return _says({"rules": older}, "missing compared to security-rules.example.json: mcp_policy")
+
+
+def check_complete_rules_file_is_accepted():
+    return _says({"rules": EXAMPLE}, "every section of the example file is present")
 
 
 CHECKS = [(name, fn) for name, fn in sorted(globals().items())

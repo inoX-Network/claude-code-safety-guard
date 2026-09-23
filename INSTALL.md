@@ -381,3 +381,59 @@ tail -f ~/.claude/.agent-audit/actions.jsonl
 Each line records `tool`, `target` (secret-redacted), `decision`, `reason`, and
 `level`. If you see `allow`/`block` lines appear as you test, the hook is wired
 in correctly.
+
+---
+
+## F. After an update
+
+An update replaces the code. It never touches **your rules file** — that file
+is self-protected, and an updater that could write it would be a way around the
+guard. So every section a release adds to `security-rules.example.json` is
+missing from your file until you add it yourself.
+
+### What the hook does with a missing section
+
+- **Critical sections get a built-in default.** `blocked_patterns`,
+  `blocked_paths_write`, `blocked_paths_delete`, `protected_reads`,
+  `blocked_bash_patterns_force_push`, `owner_only_commands`, `blocked_git_ops`,
+  `protected_git_branches` and `mcp_policy`: if one is **missing**, the hook uses
+  the same minimal value it falls back to when the whole file is gone. Before
+  2026.09.23 a missing section simply switched its protection off.
+- **An explicit entry is respected, even an empty one.** `"blocked_git_ops": []`
+  is a decision and stays in force; only a key that is not there at all gets
+  the default. This is the way to turn a section off on purpose.
+- **Optional sections have no default.** `allowed_sudo`, `require_confirmation`,
+  `prompt_injection_keywords` and `docker` mean "not configured" when missing
+  (for `docker`, the escape flags are hardcoded and hold anyway).
+- **You are told once per session.** On the first allowed tool call, the hook
+  hands the model a note naming the missing sections, and asks it to tell you.
+  Claude Code has no channel from an allowing hook straight to your screen;
+  other tool chains (opencode, Antigravity) do not read the note at all. The
+  audit log gets a `rules_incomplete` line either way.
+
+The built-in default keeps you protected, but it is not your configuration —
+it may block less, or more, than what you would have written.
+
+### Update steps
+
+```bash
+# 1. The code and the version file, as in section A
+cp hooks/command-guard.py ~/.claude/hooks/command-guard.py
+cp VERSION ~/.claude/hooks/VERSION
+cp -r hooks/lang ~/.claude/hooks/          # if you use a translation
+
+# 2. What changed, and whether it matters to you
+less CHANGELOG.md
+
+# 3. Which sections your rules file lacks
+python3 tools/verify-install.py
+```
+
+Do **not** copy `security-rules.example.json` over your rules file — that
+throws away everything you configured. Instead, take each section
+`verify-install` lists as missing from the example file and add it to yours by
+hand, adjusted to your machine. The rules file is self-protected, so this is an
+owner step: edit it yourself, or via `!` from the session.
+
+Run `verify-install` again until it reports every section present, then do the
+manual check in [section E](#e-verify-its-armed).

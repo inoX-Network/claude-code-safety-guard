@@ -9,6 +9,45 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.23
+
+### Security — a missing rules section switched its protection off
+
+- Updates add sections to `security-rules.example.json`; your rules file is
+  never touched (it is self-protected). With one section missing, its
+  protection was simply gone: a hard git reset, the approval script, delete
+  protection, credential reads and MCP writes all ran free on an older rules
+  file. With the rules file missing entirely, MCP writes ran free too — the
+  fallback ruleset had no MCP part.
+
+  Now a **missing** critical section takes the built-in default, the same one
+  the fallback uses; `mcp_policy` is new there and equals the example file. An
+  **explicit** entry is kept, even an empty one — that is how you turn a
+  section off on purpose. See INSTALL.md, section F, "After an update".
+
+Changes what the guard blocks: yes, but only on rules files that lack a
+section — a file with every section behaves exactly as before. Cost of the MCP
+default, measured on 3119 real allowed MCP calls from an installation that has
+the section: 45 would need an override without it, all code execution.
+
+### Visible — what the rules file lacks now reaches someone
+
+- The hook tells the model once per session which sections are missing, and
+  asks it to tell you. Before, the only message was "FALLBACK ruleset active"
+  on stderr — which, for a hook that allows the call, goes to Claude Code's
+  debug log and nowhere else. It now uses `additionalContext`, the one
+  documented channel for that case, and sets no permission decision. Other
+  tool chains do not read it; `verify-install` covers them.
+- `tools/verify-install.py` lists the sections the example file has and yours
+  lacks. It used to count keys.
+
+### Hardening — the update checker (merged earlier, released now)
+
+- `update-check.py` took HOME from `$HOME`; it now reads the password
+  database, like the guard. Its three environment switches are ignored at the
+  installed location, like the guard's. `settings.example.json` carries the
+  SessionStart entry, so merging the example wires the checker in.
+
 ## 2026.09.22-3
 
 ### Security — curl and wget slipped past write-, self- and read-protection

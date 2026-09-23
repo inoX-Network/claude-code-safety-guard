@@ -9,6 +9,7 @@ License: MIT
 """
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -254,6 +255,21 @@ _MESSAGES = {
         "WARNING: {path} unreadable ({error}) — FALLBACK ruleset active"
     ),
     "rules.invalid": "WARNING: {path} empty/invalid — FALLBACK ruleset active",
+    "rules.section_defaulted": (
+        "command-guard: {path} has no section(s) {sections} — the built-in "
+        "default applies to them, so protection holds but may differ from "
+        "what you would have configured."
+    ),
+    "rules.section_unset": (
+        "command-guard: {path} has no section(s) {sections} — these are not "
+        "configured and have no built-in default."
+    ),
+    "rules.notice_tail": (
+        "Usually the rules file predates an update: updates never change it. "
+        "Compare it with security-rules.example.json (tools/verify-install.py "
+        "lists the gaps) and copy the missing sections in. Please tell the "
+        "user about this once."
+    ),
     # --- MCP tools ---
     "mcp.blocked": "BLOCKED: {reason}",
     "mcp.gated": (
@@ -1677,7 +1693,40 @@ _FALLBACK_RULES = {
     # file gone there is nothing left to say "don't throw this away", and this
     # is the largest irreplaceable thing the chain owns.
     "blocked_paths_delete": ["~/.claude/projects"],
+    # MCP writes need an override, reads stay free. Without this entry a missing
+    # rules file let every MCP write through: the fallback announced
+    # "fail-closed" while the MCP branch passed on an empty policy.
+    # Same values as security-rules.example.json, so a missing section behaves
+    # like a fresh install. Measured 2026-09-23 on 3119 allowed MCP calls: with
+    # no safe servers, 100 documentation lookups would have needed an override.
+    "mcp_policy": {
+        "gate_servers": ["postgres"],
+        "safe_servers": ["context7", "sequential-thinking"],
+        "read_verb_prefixes": ["get", "list", "search", "read", "view",
+                               "status", "preview", "describe", "fetch"],
+    },
 }
+
+# Sections the guard reads that have NO hardcoded default. A missing one means
+# "not configured" and is reported, not filled in: allowed_sudo missing is
+# stricter (no sudo allowed), docker keeps its hardcoded escape flags, and the
+# other two only add prompts. Every other section the guard reads is a key of
+# _FALLBACK_RULES.
+_OPTIONAL_SECTIONS = ("allowed_sudo", "require_confirmation",
+                      "prompt_injection_keywords", "docker")
+
+# What the rules file lacks, collected while this call runs and handed to the
+# model once per session (see _emit_rules_notice). load_rules() runs several
+# times per call, so entries are kept unique.
+_RULES_NOTICE: list[str] = []
+# The payload of this call, kept so the notice can be emitted after main()
+# returned its verdict.
+_CALL: dict = {}
+
+
+def _note_rules(text: str) -> None:
+    if text not in _RULES_NOTICE:
+        _RULES_NOTICE.append(text)
 
 
 def load_rules() -> dict:
@@ -1686,20 +1735,76 @@ def load_rules() -> dict:
     Fail-CLOSED: if the file is missing, unreadable, or empty/invalid, fall back
     to _FALLBACK_RULES (a hardcoded minimal ruleset) instead of returning {} —
     otherwise deleting/corrupting the rules file would silently disable the guard.
+
+    The same holds per SECTION. An update adds sections to the example file, but
+    never touches the user's rules file (it is self-protected). Measured
+    2026-09-23: with one section missing, its protection was simply gone —
+    git reset --hard, the approval script, delete protection, credential reads,
+    MCP writes. A missing critical section now takes the fallback's value. An
+    EXPLICIT entry, even an empty one, is kept: that is a decision, a missing
+    key is an old file.
     """
     if not RULES_PATH.exists():
         print(msg("rules.missing", path=RULES_PATH), file=sys.stderr)
+        _note_rules(msg("rules.missing", path=RULES_PATH))
         return dict(_FALLBACK_RULES)
     try:
         with open(RULES_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
         print(msg("rules.unreadable", path=RULES_PATH, error=exc), file=sys.stderr)
+        _note_rules(msg("rules.unreadable", path=RULES_PATH, error=exc))
         return dict(_FALLBACK_RULES)
     if not isinstance(data, dict) or not data:
         print(msg("rules.invalid", path=RULES_PATH), file=sys.stderr)
+        _note_rules(msg("rules.invalid", path=RULES_PATH))
         return dict(_FALLBACK_RULES)
+
+    filled = [k for k in _FALLBACK_RULES if k not in data]
+    for key in filled:
+        data[key] = _FALLBACK_RULES[key]
+    if filled:
+        _note_rules(msg("rules.section_defaulted", path=RULES_PATH,
+                        sections=", ".join(filled)))
+    unset = [k for k in _OPTIONAL_SECTIONS if k not in data]
+    if unset:
+        _note_rules(msg("rules.section_unset", path=RULES_PATH,
+                        sections=", ".join(unset)))
     return data
+
+
+def _emit_rules_notice(input_data: dict) -> None:
+    """Tell the model, once per session, what the rules file lacks.
+
+    Only on an ALLOWED call: for PreToolUse, stderr on exit 0 goes to the debug
+    log only, and systemMessage is discarded. hookSpecificOutput.
+    additionalContext is the one documented channel that reaches anyone. No
+    permissionDecision is set — that would skip the user's permission prompt.
+
+    Other tool chains ignore this output; verify-install reports the same gaps.
+    Nothing here may break the guard, so every failure is swallowed.
+    """
+    if not _RULES_NOTICE:
+        return
+    try:
+        text = " ".join(_RULES_NOTICE) + " " + msg("rules.notice_tail")
+        dir_env = _env("CLAUDE_AUDIT_DIR")
+        audit_dir = Path(dir_env) if dir_env else (_HOME / ".claude" / ".agent-audit")
+        seen_dir = audit_dir / "rules-notice"
+        seen_dir.mkdir(parents=True, exist_ok=True)
+        key = f"{input_data.get('session_id')}\n{text}"
+        marker = seen_dir / hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+        if marker.exists():
+            return
+        marker.touch()
+        _audit(input_data, input_data.get("tool_name", ""), str(RULES_PATH),
+               "notice", "rules_incomplete")
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": text[:2000],
+        }}, ensure_ascii=False))
+    except Exception:
+        pass
 
 
 _REGEX_METACHARS = re.compile(r"[.*+?^${}()|\[\]\\]")
@@ -3674,6 +3779,7 @@ def main():
         print(msg("guard.unreadable_input", error=type(exc).__name__),
               file=sys.stderr)
         sys.exit(2)
+    _CALL["input"] = input_data
 
     # Before ANY check: a relative target can only be judged against the
     # directory the command runs in.
@@ -4046,7 +4152,9 @@ if __name__ == "__main__":
     # into a denial.
     try:
         main()
-    except SystemExit:
+    except SystemExit as done:
+        if done.code in (0, None) and isinstance(_CALL.get("input"), dict):
+            _emit_rules_notice(_CALL["input"])
         raise
     except BaseException as exc:
         _guard_stumbled(exc)
