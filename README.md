@@ -236,6 +236,13 @@ delete". Knowing this contract avoids surprise:
   the general obfuscation limit named in THREAT-MODEL.md: no substring layer
   tames a Turing-complete shell. Sandbox and least privilege are the answer to
   that one, not the hook.
+- **A downloader's output target must be readable as text.** Since 2026.09.22-3
+  the output flag of `curl`/`wget` (`-o`, `-O`, `--output`, `-P`, …) counts as a
+  write, and its argument is held against the write and self-protection lists;
+  an assignment on the same line is resolved first. A target that stays an
+  *external* variable — set in an earlier command, or in the environment —
+  names no protected path the hook could see, and passes. Same boundary as the
+  interpreter branch above: text in, text out.
 - **Delete protection names a path, not its ancestors.** `blocked_paths_delete`
   — and the self-protection of the guard's own files — refuses destroying a
   *named* path and everything under it, but naming an **ancestor directory**
@@ -676,7 +683,15 @@ nothing runs, and nothing complains.
 What it does: compares the `VERSION` file next to the hook against the latest
 **release**, and prints one line if that one is newer. What it does not do:
 download anything, change anything, or run with elevated rights. It reads,
-compares, and speaks.
+compares, and speaks. It takes its home directory from the password database,
+not from `$HOME`, and ignores its path-changing environment variables at the
+installed location — the same two rules the guard follows, for the same reason.
+
+Updating is yours to do, and it has one step that is easy to miss: the update
+replaces the code but never your rules file, so sections added since your
+install are missing there. The guard fills critical ones with a built-in
+default and says so once per session; `tools/verify-install.py` lists them.
+The steps are in [INSTALL.md, section F](INSTALL.md#f-after-an-update).
 
 The published version is read from a release rather than from the tip of
 `main`, because "a newer version exists" has to mean something you can go and
@@ -726,7 +741,10 @@ A: Rewriting history on a primary branch is almost always a mistake when done by
 A: Not without an explicit level-1+ override. Public keys (`*.pub`) and `~/.ssh/config` are always allowed. This now also covers the Bash path — `cat`/`base64`/`cp`-source/`dd if=`/`xxd`/`head` on a protected path are blocked, not just the Read tool. It also covers **directory-level exfiltration**: handing a whole credential directory to a recursive reader (`tar`/`zip`/`rsync`/`gpg`/`scp`/`grep -r ~/.ssh` …) is blocked even though no individual key file is named, while metadata-only commands (`ls`/`find`/`stat` on the directory) stay allowed. The Bash check resolves **direct** path references; variable indirection (`X=key; cat $X`) and interpreter string literals (`python -c "open(...)"`) stay outside its scope — the same inherent limit as `blocked_patterns`. It's defense-in-depth covering the realistic attack path, not a watertight guarantee.
 
 **Q: Does prompt-injection detection block anything?**
-A: No — it only writes a warning to stderr. It's a heads-up, not a hard block.
+A: No — it only writes a warning to stderr, and for a call the hook allows,
+Claude Code sends that to its debug log, not to you or the model (`claude
+--debug` shows it). Treat it as a trace in the log, not as a heads-up anyone
+will see.
 
 ### Changed, but not destroyed
 

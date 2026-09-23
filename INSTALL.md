@@ -134,13 +134,22 @@ your install** — everything else applies as written:
 ## Safety guard — how to work with it
 
 A PreToolUse hook (`command-guard.py`) checks every tool call before it runs,
-for Bash, Read, Write, Edit, MultiEdit and NotebookEdit. **The hook and its
-override files are the authority — not this prompt.** You cannot grant
+for Bash, Read, Write, Edit, MultiEdit, NotebookEdit and MCP tools. **The hook
+and its override files are the authority — not this prompt.** You cannot grant
 yourself any rights. It is not an obstacle course; it is the reason you can be
 trusted with this machine.
 
-**Reading is free.** Listing, `cat`, `grep` and searching protected paths all
-work. Only writing, deleting and privilege escalation are gated.
+**Reading is free — except credentials.** Listing, `cat`, `grep` and searching
+work almost everywhere, the guard's own files included. The exception is
+secrets: private keys, `.env` files and cloud credentials need a level-1
+override, and a recursive read over a directory that holds them (searching the
+whole home directory, packing `~/.ssh`) counts as reading them. A few system
+files, such as the shadow password file, are never readable. A block there is
+the guard doing its job, not a malfunction — ask for the override if the task
+really needs the secret, and say why.
+
+**Writing, deleting and privilege escalation are gated.** So are MCP tools that
+are not clearly read-only.
 
 **A block is a signal, not a hurdle.** If the guard refuses something:
 stop, re-read the message, rephrase — and if the refusal is wrong, report it.
