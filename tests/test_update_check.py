@@ -36,15 +36,16 @@ def _load(config_path: Path, state_path: Path):
     os.environ["CLAUDE_UPDATE_CONFIG"] = str(config_path)
     os.environ["CLAUDE_UPDATE_STATE"] = str(state_path)
     spec = importlib.util.spec_from_file_location("update_check_under_test", SCRIPT)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.CONFIG_PATH = config_path
-    module.STATE_PATH = state_path
+    setattr(module, "CONFIG_PATH", config_path)
+    setattr(module, "STATE_PATH", state_path)
     return module
 
 
 def _run(config: dict | None, published: str | None, *,
-         state: dict | None = None, installed: str = "2026.08.21"):
+         state: dict | None = None, installed: str | None = "2026.08.21"):
     """Run main() with a stand-in fetcher. Returns (output, state_after)."""
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -62,8 +63,8 @@ def _run(config: dict | None, published: str | None, *,
             calls.append(source)
             return published
 
-        module._fetch_published = _stand_in
-        module._installed_version = lambda: installed
+        setattr(module, "_fetch_published", _stand_in)
+        setattr(module, "_installed_version", lambda: installed)
 
         import io
         from contextlib import redirect_stdout
@@ -399,6 +400,7 @@ def _load_bare():
     """Load the module without pre-seeding the env-var paths (unlike _load)."""
     spec = importlib.util.spec_from_file_location(
         "update_check_gate_under_test", SCRIPT)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -426,25 +428,25 @@ def check_same_file_counts_as_production():
     module = _load_bare()
     keep = module._PRODUCTION_HOOK
     try:
-        module._PRODUCTION_HOOK = SCRIPT
+        setattr(module, "_PRODUCTION_HOOK", SCRIPT)
         return module._is_production() is True, "not recognised as production"
     finally:
-        module._PRODUCTION_HOOK = keep
+        setattr(module, "_PRODUCTION_HOOK", keep)
 
 
 def check_another_location_does_not_count_as_production():
     module = _load_bare()
     keep = module._PRODUCTION_HOOK
     try:
-        module._PRODUCTION_HOOK = Path("/nowhere/update-check.py")
+        setattr(module, "_PRODUCTION_HOOK", Path("/nowhere/update-check.py"))
         return module._is_production() is False, "wrongly recognised as production"
     finally:
-        module._PRODUCTION_HOOK = keep
+        setattr(module, "_PRODUCTION_HOOK", keep)
 
 
 def check_env_switches_are_read_outside_production():
     module = _load_bare()
-    module._ENV_ALLOWED = True
+    setattr(module, "_ENV_ALLOWED", True)
     os.environ["CLAUDE_UPDATE_CONFIG_TEST_PROBE"] = "set"
     try:
         return module._env("CLAUDE_UPDATE_CONFIG_TEST_PROBE") == "set", \
@@ -455,7 +457,7 @@ def check_env_switches_are_read_outside_production():
 
 def check_env_switches_yield_nothing_at_production_location():
     module = _load_bare()
-    module._ENV_ALLOWED = False
+    setattr(module, "_ENV_ALLOWED", False)
     os.environ["CLAUDE_UPDATE_CONFIG_TEST_PROBE"] = "set"
     try:
         return module._env("CLAUDE_UPDATE_CONFIG_TEST_PROBE") is None, \
