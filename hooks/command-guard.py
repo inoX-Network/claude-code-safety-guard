@@ -921,6 +921,52 @@ def _inline_write_targets(command: str) -> list[str] | None:
     return targets
 
 
+# A downloader's output flag is a write: `curl -o FILE`, `wget -O FILE`,
+# `--output(-document)=FILE`, `-P DIR`/`--directory-prefix=DIR`. _command_is_write
+# knew none of them (curl/wget appear only as the pipe-to-shell pattern), so the
+# target never faced the path gate -- every write- and self-protected path was
+# reachable this way, the guard's own file included. Measured 2026-09-21.
+#
+# Only the flag ARGUMENT is the target, never the URL: `curl -o /tmp/x
+# https://evil.tld/etc/passwd` writes to the free path, and the /etc/passwd in
+# the URL must not read as a target. That is why this is a precise extraction
+# next to _inline_write_targets, not a coarse "_command_is_write says curl".
+_DOWNLOADER_RE = re.compile(r"\b(?:curl|wget)\b")
+# curl -o / --output ; wget -O / --output-document ; wget -P / --directory-prefix.
+# The argument follows after '=' or whitespace. curl's -O (remote name) takes no
+# path, wget's -o is a logfile -- both still WRITE where they are pointed, so
+# treating the argument as a target errs in the safe (stricter) direction.
+_DL_OUTPUT_FLAG_RE = re.compile(
+    r"(?:^|\s)(?:-o|-O|-P|--output|--output-document|--directory-prefix)"
+    r"(?:=|\s+)(?P<target>[^\s;|&]+)")
+
+
+def _downloader_write_targets(command: str) -> list[str]:
+    """The paths a curl/wget output flag writes to (empty = no downloader write).
+
+    Shell assignments in the SAME command are resolved, so `BK=/x; curl -o
+    "$BK/f"` yields /x/f and faces the path gate precisely. A target that stays
+    a variable (a loop variable, an external env var) is returned as-is and
+    simply names no protected literal.
+
+    Deliberately NOT fail-closed on the whole block: an earlier version returned
+    None for a non-literal target, and the caller then checked the entire
+    command -- which matched a protected path sitting in nearby TEXT (a `-w`
+    format string, a printf message, curl's own `/usr/bin` path). Measured
+    2026-09-21 against the real audit log, that cost two false positives out of
+    12267 touched commands. Only the flag argument is ever a target; a target
+    hidden in an external variable is a named remainder, like the composed-path
+    case of the interpreter write guard, not a reason to search the whole line.
+    """
+    if not _DOWNLOADER_RE.search(command):
+        return []
+    targets: list[str] = []
+    for hit in _DL_OUTPUT_FLAG_RE.finditer(command):
+        target = hit.group("target").strip("'\"")
+        targets.append(_with_assignments(target, command))
+    return targets
+
+
 def _command_deletes(command: str) -> bool:
     """Whether the command DESTROYS data (rather than merely changing it).
 
@@ -1764,6 +1810,18 @@ def check_blocked_paths(command: str, paths: list[str],
                         or _names_path(expand_path(target), expanded)):
                     return path
 
+        # Downloader output flag: same precise-target treatment. Only the flag
+        # ARGUMENT is a target (never the URL, never a protected path in nearby
+        # text), and assignments in the line are resolved so `$BK/f` becomes a
+        # real path.
+        for path in paths:
+            expanded = expand_path(path)
+            for target in _downloader_write_targets(cleaned):
+                target = _collapse_path_traversal(target)
+                if (_names_path(target, path) or _names_path(target, expanded)
+                        or _names_path(expand_path(target), expanded)):
+                    return path
+
     # Detect write resp. delete operations
     touches = detector or _command_is_write
     if not touches(cleaned):
@@ -2527,6 +2585,18 @@ def command_hits_self_protect(command: str) -> str | None:
                 pe = expand_path(prot).rstrip("/")
                 if _glob_touches_tree(candidate, pe) and not _dev_unlocked(prot):
                     return prot
+
+    # Downloader output flag onto a self-protected path: same precise-target
+    # extraction as check_blocked_paths. `curl -o <hook>` / `wget -O <hook>`
+    # went through because _command_is_write does not know these flags. Only the
+    # flag argument is a target, with assignments resolved; a target left as an
+    # external variable is the named remainder.
+    for target in _downloader_write_targets(command):
+        te = expand_path(target)
+        for prot in SELF_PROTECT_PATHS:
+            p = re.escape(expand_path(prot).rstrip("/"))
+            if re.search(p + _PATH_BOUNDARY, te) and not _dev_unlocked(prot):
+                return prot
 
     cleaned = re.sub(r'\d*>\s*/dev/null', '', command)
     cleaned = re.sub(r'\d*>&\d+', '', cleaned)
@@ -3356,7 +3426,19 @@ def command_hits_protected_read(command: str, rules: dict,
     tokens = []
     for raw in cleaned.split():
         tok = raw.strip("'\"").lstrip("<>|&;()")
+        # A long option with '=' can carry a path as its value:
+        # --upload-file=PATH, --post-file=PATH. Take the part after the first
+        # '=' so the token loop (which skips '-' tokens) still sees the path.
+        # Without this a credential path behind --flag= slipped through the read
+        # gate. Measured 2026-09-21 (finding A2).
+        if tok.startswith("-") and "=" in tok:
+            tok = tok.split("=", 1)[1]
         tok = re.sub(r'^[a-zA-Z_]+=', '', tok)   # strip if=/of=/VAR=
+        # curl's '@file' syntax (-d @path, -F field=@path, --data-binary @path)
+        # names a file to read. The '@' was not stripped, so '@.env' had
+        # basename '@.env' and '@~/.ssh/id_rsa' did not start with the home
+        # path -- the read slipped through. Measured 2026-09-21 (finding A3).
+        tok = tok.lstrip("@")
         if tok:
             tokens.append(tok)
 
