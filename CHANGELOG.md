@@ -9,6 +9,31 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.23-2
+
+### Security — the Grep tool read past every read protection
+
+- **Not wired.** The example settings had no PreToolUse matcher for `Grep`, so
+  the hook never saw it. Grep prints file contents: a private key or a `.env`
+  file was one search away, whatever the rules said. `settings.example.json`
+  now has eight matchers. **If you installed earlier, add the `Grep` matcher to
+  your own settings** — updating the hook does not touch them.
+  `tools/verify-install.py` reports it when it is missing.
+- **Not closed once wired.** The hook compared Grep's path by prefix, as it does
+  for Read: a key file was caught, its directory was not. Grep on the key
+  directory, on the cloud-credentials directory, on the whole home directory,
+  or on a project with a filter for `.env` files passed — while `grep -r` on
+  the same directory in Bash was refused. A Grep call is now translated into
+  its Bash counterpart and judged by the same recursive-read check; there is
+  one rule, not two. The search pattern plays no part: what is searched for
+  does not change what is read.
+- Glob stays free. It lists names, like `ls`, and reads nothing.
+
+Changes what the guard blocks: yes, for Grep. Cost could not be measured on
+real calls — none of 83 available session transcripts from the author's
+installation contains a Grep call. The rule itself is the one Bash has applied
+to `grep -r` for weeks.
+
 ## 2026.09.23
 
 ### Security — a missing rules section switched its protection off

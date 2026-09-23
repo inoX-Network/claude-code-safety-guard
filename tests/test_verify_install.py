@@ -40,7 +40,7 @@ SOUND_RULES = {
 
 
 ALL_MATCHERS = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
-                "mcp__.*"]
+                "Grep", "mcp__.*"]
 
 
 def _build(home: Path, *, settings=True, hook_exists=True, rules_exist=True,
@@ -151,9 +151,16 @@ def check_missing_mcp_matcher_is_caught():
                  "every tool but the mcp__* family")
 
 
+def check_missing_grep_matcher_is_caught():
+    # Grep prints file contents. Unguarded, it read past every read protection
+    # (measured 2026-09-23) — and the example settings had no matcher for it.
+    return _case(lambda h: _build(h, matchers=[m for m in ALL_MATCHERS if m != "Grep"]),
+                 True, "every tool but Grep")
+
+
 def check_all_matchers_pass():
     return _case(lambda h: _build(h, matchers=ALL_MATCHERS), False,
-                 "all seven matchers")
+                 "all eight matchers")
 
 
 def check_absent_matcher_covers_everything():
@@ -217,7 +224,8 @@ CASES = [
     ("a sound install passes", check_sound_install_passes),
     ("a Bash-only install is caught", check_bash_only_install_is_caught),
     ("a missing mcp__* matcher is caught", check_missing_mcp_matcher_is_caught),
-    ("all seven matchers pass", check_all_matchers_pass),
+    ("a missing Grep matcher is caught", check_missing_grep_matcher_is_caught),
+    ("all eight matchers pass", check_all_matchers_pass),
     ("an absent matcher covers everything", check_absent_matcher_covers_everything),
     ("an empty matcher covers everything", check_empty_matcher_covers_everything),
     ("owner scripts are looked up by their configured names",

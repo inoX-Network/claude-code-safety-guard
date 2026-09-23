@@ -68,11 +68,12 @@ def check_session_start_command_matches_install_md():
 
 
 def check_pretooluse_matchers_are_still_untouched():
-    """The fix adds SessionStart; it must not disturb the 7 existing matchers
-    (README/INSTALL.md both count on exactly seven)."""
+    """The fix adds SessionStart; it must not disturb the PreToolUse matchers
+    (INSTALL.md counts on exactly eight: Grep joined on 2026-09-23)."""
     data = json.loads(SETTINGS.read_text(encoding="utf-8"))
     matchers = [e.get("matcher") for e in data["hooks"]["PreToolUse"]]
-    expected = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "mcp__.*"]
+    expected = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Grep",
+                "mcp__.*"]
     return matchers == expected, f"PreToolUse matchers changed: {matchers}"
 
 
@@ -81,7 +82,7 @@ CASES = [
     ("a SessionStart section exists", check_session_start_section_exists),
     ("SessionStart wires update-check.py", check_session_start_points_at_update_check),
     ("the command matches INSTALL.md", check_session_start_command_matches_install_md),
-    ("the 7 PreToolUse matchers are untouched",
+    ("the 8 PreToolUse matchers are untouched",
      check_pretooluse_matchers_are_still_untouched),
 ]
 
