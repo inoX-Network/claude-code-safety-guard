@@ -25,6 +25,16 @@ The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see 
 
 > The self-protection path list is **not** in this file — it is hardcoded in the hook so it cannot be edited through itself.
 
+**A missing key is not the same as an empty one.** If one of `blocked_patterns`,
+`blocked_paths_write`, `blocked_paths_delete`, `protected_reads`,
+`blocked_bash_patterns_force_push`, `owner_only_commands`, `blocked_git_ops`,
+`protected_git_branches` or `mcp_policy` is **absent**, the hook uses its
+built-in default for it and tells the model once per session. An explicit
+empty value (`[]`, `{}`) is kept as written — that is the way to switch a
+section off. `allowed_sudo`, `require_confirmation`, `prompt_injection_keywords`
+and `docker` have no default; absent means "not configured". This matters after
+an update, which never changes your rules file: see INSTALL.md, section F.
+
 ### Override file format
 
 A proposal you write into the pending directory:
