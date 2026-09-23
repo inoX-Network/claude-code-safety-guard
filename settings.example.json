@@ -56,6 +56,15 @@
         ]
       },
       {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/hooks/command-guard.py"
+          }
+        ]
+      },
+      {
         "matcher": "mcp__.*",
         "hooks": [
           {

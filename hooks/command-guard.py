@@ -3736,6 +3736,43 @@ def enforce_read_protection(input_data: dict, tool_name: str, rules: dict,
             sys.exit(2)
 
 
+def enforce_grep_read_protection(input_data: dict, rules: dict,
+                                 agent_id: str | None, session_id: str | None) -> None:
+    """The Grep tool reads file CONTENTS — judge it like the grep it is. Exits on block.
+
+    enforce_read_protection compares the named path by prefix: a key FILE is
+    caught, its DIRECTORY is not. For Read that is right — Read opens one file.
+    Grep opens everything under the path. Measured 2026-09-23: Grep on the
+    credential directory, or on a project with a filter for .env files, passed,
+    while `grep -r` on the same directory in Bash was refused. Same act, two
+    verdicts.
+
+    So the call is translated into its Bash counterpart and handed to the one
+    check that already understands recursive reads — no second copy of the rule
+    to drift from the first. The pattern is left out on purpose: what is being
+    searched for does not change what is being read.
+
+    Limit: the Bash check splits on whitespace, so a search path containing a
+    space is seen in pieces. Named, not fixed — the credential directories this
+    protects do not contain spaces.
+    """
+    tool_input = input_data.get("tool_input", {}) or {}
+    base = input_data.get("cwd") or os.getcwd()
+    path = tool_input.get("path") or base
+    if not os.path.isabs(os.path.expanduser(path)):
+        path = os.path.join(base, path)
+    command = f"grep -r x {path}"
+    file_filter = tool_input.get("glob")
+    if isinstance(file_filter, str) and file_filter:
+        command += f" --include={file_filter}"
+    blocked, reason, _ = command_hits_protected_read(command, rules, agent_id,
+                                                     session_id)
+    if blocked:
+        _audit(input_data, "Grep", path, "block", "protected_read", 0)
+        print(msg("read.protected", reason=reason, tool="Grep"), file=sys.stderr)
+        sys.exit(2)
+
+
 def enforce_project_control_files(input_data: dict, tool_name: str,
                                   agent_id: str | None, session_id: str | None) -> None:
     """CHOKE POINT, second gate: project-local control files. Exits on block.
@@ -3800,6 +3837,9 @@ def main():
         if choke_rules:
             enforce_read_protection(input_data, tool_name, choke_rules,
                                     input_data.get("agent_id"), session_id)
+            if tool_name == "Grep":
+                enforce_grep_read_protection(input_data, choke_rules,
+                                             input_data.get("agent_id"), session_id)
 
     # Read tool: the protection itself ran in the choke point above — for every
     # tool, not just this one. What remains here is the audit trail.

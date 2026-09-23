@@ -60,9 +60,10 @@ def note(state: str, check: str, detail: str) -> None:
 # ---------------------------------------------------------------- part 1
 # The tools the guard is meant to stand in front of. The last one is a stand-in
 # for the whole mcp__* family: a matcher has to cover a name of that shape, not
-# the literal string.
+# the literal string. Grep is here because it prints file CONTENTS: unguarded,
+# it read past every read protection (measured 2026-09-23).
 EXPECTED_TOOLS = ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
-                  "mcp__example__tool"]
+                  "Grep", "mcp__example__tool"]
 
 
 def _covers(matcher: str | None, tool: str) -> bool:
