@@ -9,6 +9,26 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.29-2
+
+### Visible — the prompt-injection warning now reaches the model
+
+- The warning went to stderr only. For a call the hook allows, Claude Code
+  sends that to its debug log, so nobody saw it. It now travels through
+  `additionalContext`, in the same JSON object as the rules notice, and asks
+  the model to check where the instruction came from. It comes on every call
+  that trips it, not once per session — it is about that command.
+- Keywords now match as **whole words**, and an all-caps keyword (an acronym)
+  only in capitals. `override` is gone from the example list: it is the
+  guard's own approval vocabulary. Measured on 204,087 allowed commands from
+  the author's audit log: the old matching would have told the model 3,726
+  times in 340 sessions, real injections among them: none. The new one: 31
+  times in 8 sessions, all from work on injection detection itself.
+- **If you copied the example earlier**, your rules file still lists
+  `override`. Remove it by hand — updates never touch your rules file.
+
+Changes what the guard blocks: no. It changes what the model is told.
+
 ## 2026.09.29
 
 ### Security — environment files named `name.env` were readable

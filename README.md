@@ -45,7 +45,7 @@ cp security-rules.example.json ~/.claude/safety-guard/security-rules.json
 - **3-level, agent-scoped override system** — Scoped, explicit, auditable, and per-instance.
 - **Audit log** — Every allow/block decision is logged (JSONL) with secret redaction.
 - **Desktop notifications** — Optional heads-up on package installs.
-- **Prompt injection detection** — Warns (doesn't block) when suspicious keywords appear in a command.
+- **Prompt injection detection** — Warns the model (doesn't block) when a suspicious keyword appears in a command as a whole word.
 - **Diagnostics register** — A second hook (`Stop` + `SessionStart`) that records language-server warnings the AI would otherwise file away, and asks for a reason instead of an acknowledgement. Five states; `fixed` is measured, not claimed. See [docs/diagnostics-register.md](docs/diagnostics-register.md).
 - **Update check** — Optional, off by default: one line at session start when a newer version has been published. Reads and compares, nothing else.
 
