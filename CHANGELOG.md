@@ -11,6 +11,25 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ## Unreleased
 
+### Security — a redirection or quotes no longer get a command past the sudo allowlist
+
+- Since 2026.08.27-2 the sudo check stopped at the first shell operator it
+  saw, redirections included. But a redirection does not end a command — the
+  shell allows it anywhere, before the command name too. So
+  `sudo 2>/dev/null <anything>` ran whatever followed with raised rights, past
+  the allowlist. The same held for a name in quotes (`sudo "systemctl" stop …`)
+  and for a redirection glued to the name (`sudo systemctl>/dev/null stop …`
+  skipped the subcommand check).
+- The words after sudo are now read as the shell runs them: quotes and
+  backslashes removed, redirections dropped together with their target (and a
+  descriptor number like the `2` in `2>&1`), and the command ends only at
+  `;`, `|`, `&`, `&&`, `||`, parentheses or a newline.
+- In the other direction, `sudo -S -v; echo done` and `sudo -v;echo done` are
+  no longer refused: `echo` runs without raised rights.
+
+Changes what the guard blocks: yes. **Update** if you rely on the sudo
+allowlist.
+
 ### Security — startup files moved by the environment are protected too
 
 - The shell's startup files were protected at their fixed places only. With

@@ -2404,10 +2404,95 @@ def check_lifecycle(command: str) -> str | None:
     return None
 
 
-# Tokens that end a command instead of being one: redirections (`2>&1`, `>file`),
-# pipes, list operators, grouping, and a stray quote. Matched at the START of the
-# token, because that is where a shell would see the operator.
-_SUDO_STOP_RE = re.compile(r"[|&;()<>\"']|\d+>")
+_OPERATOR_CHARS = "|&;()<>"
+
+
+def _operator_ends_command(op: str) -> bool:
+    """Does this operator end the command, or is it a redirection?
+
+    ; | & && || and parentheses end it. >, >>, 2>&1, &>, <, <<, <<< and >| do
+    NOT: a shell allows a redirection anywhere, before the command name too.
+    """
+    if ";" in op or "&&" in op or "(" in op or ")" in op:
+        return True
+    if "|" in op and op != ">|":
+        return True
+    return not ("<" in op or ">" in op)
+
+
+def _sudo_words(text: str) -> list[str]:
+    """The words of the command after sudo, as the shell runs it.
+
+    Quotes and backslashes go, as in the shell: `sudo "systemctl" stop` runs
+    systemctl. Redirections go together with their target, and so does a file
+    descriptor number right in front (`2>&1`). The words end at the first
+    operator that ends the command — what follows runs WITHOUT raised rights. A
+    newline ends it too.
+
+    Why this needs its own split, measured: stopping at EVERY operator (this
+    guard from 2026.08.27-2 up to this fix) let `sudo 2>/dev/null <anything>`
+    past the allowlist, and a name in quotes as well. Not stopping at all read
+    `2>&1` and `-v;` as command names — `sudo -l | grep` was refused.
+
+    An unbalanced quote takes the rest of the text as the word's content instead
+    of giving up: that word then matches no allowed name (fail-closed).
+    """
+    words: list[str] = []
+    parts: list[str] = []
+    open_word = False    # a word has begun, an empty "" included
+    quoted = False       # it contains quotes — then it is no descriptor number
+    target_next = False  # the next word is the target of a redirection
+    i, n = 0, len(text)
+
+    def finish() -> None:
+        nonlocal parts, open_word, quoted, target_next
+        if open_word:
+            if target_next:
+                target_next = False
+            else:
+                words.append("".join(parts))
+        parts, open_word, quoted = [], False, False
+
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            break
+        if c in " \t":
+            finish()
+            i += 1
+            continue
+        if c in _OPERATOR_CHARS:
+            j = i
+            while j < n and text[j] in _OPERATOR_CHARS:
+                j += 1
+            op = text[i:j]
+            if _operator_ends_command(op):
+                break
+            if open_word and not quoted and not target_next and "".join(parts).isdigit():
+                parts, open_word = [], False     # descriptor number (2>&1), no word
+            else:
+                finish()
+            target_next = True
+            i = j
+            continue
+        if c in "\"'":
+            end = text.find(c, i + 1)
+            if end == -1:
+                end = n
+            parts.append(text[i + 1:end])
+            open_word = quoted = True
+            i = end + 1
+            continue
+        if c == "\\" and i + 1 < n:
+            parts.append(text[i + 1])
+            open_word = True
+            i += 2
+            continue
+        parts.append(c)
+        open_word = True
+        i += 1
+    finish()
+    return words
 
 
 def check_sudo(command: str, allowed: list[str],
@@ -2426,35 +2511,20 @@ def check_sudo(command: str, allowed: list[str],
         return None
 
     for m in matches:
-        tokens = command[m.end():].split()
+        # The words as the shell runs them (see _sudo_words). `sudo -n -l 2>&1`
+        # lists one's own rights and changes nothing — measured 26 real refusals
+        # of that shape when `2>&1` was taken for the command. `sudo -l | rm -rf
+        # x` runs the rm WITHOUT raised rights, so blaming it on this sudo would
+        # be a false claim. A later `sudo` in the line is a match of its own and
+        # is still examined.
+        words = _sudo_words(command[m.end():])
         cmd_after_sudo = ""
         rest_tokens: list[str] = []
-        for idx, token in enumerate(tokens):
-            if token.startswith("-"):  # skip sudo flags (-S, -E, -u, -n)
+        for idx, word in enumerate(words):
+            if word.startswith("-"):  # skip sudo flags (-S, -E, -u, -n)
                 continue
-            # A shell operator is not a command. `sudo -n -l 2>&1` lists one's own
-            # rights and changes nothing, yet `2>&1` was taken for the command and
-            # refused — measured 26 real refusals of that shape.
-            #
-            # An operator also STICKS to the name: `sudo true; echo done` arrives
-            # as the token `true;`, which matches no allowlist entry however
-            # complete that list is. So the name is the part in FRONT of the
-            # operator. Found live, one command after the read-only entries were
-            # added — the list was right and the comparison still failed.
-            #
-            # Nothing left in front means the operator leads: STOP, do not skip
-            # on. In `sudo -l | rm -rf x` the rm runs WITHOUT raised rights, so
-            # blaming it on this sudo would be a false claim. A later `sudo` in
-            # the line is a match of its own and is still examined.
-            name = _SUDO_STOP_RE.split(token, 1)[0]
-            if not name:
-                break
-            cmd_after_sudo = name
-            # Trug das Token selbst einen Operator (`docker;rm -f x`), endet der
-            # Befehl dort: Was dahinter steht, gehoert zum NAECHSTEN Befehl und
-            # laeuft nicht mit erhoehten Rechten. Es ihm zuzurechnen waere
-            # dieselbe Falschaussage wie beim Ueberspringen des Operators.
-            rest_tokens = tokens[idx + 1:] if name == token else []
+            cmd_after_sudo = word
+            rest_tokens = words[idx + 1:]
             break
         if cmd_after_sudo and cmd_after_sudo not in allowed:
             return cmd_after_sudo
@@ -2465,12 +2535,10 @@ def check_sudo(command: str, allowed: list[str],
         table = _SUDO_READONLY_SUBCOMMANDS.get(cmd_after_sudo) \
             if check_subcommands else None
         if table is not None:
-            # By POSITION, not by searching for the value: with the operator
-            # stripped, the name no longer appears in the token list, and a
-            # value search silently found nothing — which switched the
-            # subcommand gate off exactly where a command carried an operator.
-            rest = rest_tokens
-            sub = _first_subcommand(rest, flags_count=(cmd_after_sudo == "pacman"))
+            # By POSITION, not by searching for the value: a value search
+            # silently found nothing once the name had been cleaned of quotes or
+            # operators — which switched the subcommand gate off exactly there.
+            sub = _first_subcommand(rest_tokens, flags_count=(cmd_after_sudo == "pacman"))
             if sub and sub not in table:
                 return f"{cmd_after_sudo} {sub}"
     return None
