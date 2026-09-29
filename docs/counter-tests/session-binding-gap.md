@@ -8,6 +8,8 @@ hook active).
 - **Changed files:** `hooks/command-guard.py`, `tests/test_command_guard.py`, `SESSION-BINDING-GAP.md`
 - **Expected hook behaviour:** exit `0` = allowed, exit `2` = blocked
 
+> **Status 2026-09-29.** The cases below still hold. In this repository the grant script is `bin/grant-override`. `SESSION-BINDING-GAP.md` is this file. The hand probes below do not set `CLAUDE_AUDIT_DIR` or `CLAUDE_GUARD_CONFIG`: on a real installation they write to the real audit log and answer in your configured language. Point both at a temporary directory / an empty file first.
+
 ---
 
 ## 1. What is this about?
@@ -125,7 +127,7 @@ call "S2 (other)"  '{"tool_name":"Bash","tool_input":{"command":"sudo htop"},"se
 ## 5. Automated suite
 
 ```bash
-python3 tests/test_command_guard.py   # expected: 187 passed, 0 failed
+python3 tests/test_command_guard.py   # expected: all passed, 0 failed
 python3 tests/test_grant_override.py  # default session-binding of the approval script
 python3 tests/test_fail_closed.py     # fail-closed ruleset fallback
 python3 tests/test_freigabe_e2e.py    # approve -> apply flow (session-consistent)
