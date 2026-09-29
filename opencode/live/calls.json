@@ -1,0 +1,8 @@
+[
+  {"name": "shell", "arguments": {"command": "touch @T@/harmless"}},
+  {"name": "shell", "arguments": {"command": "touch @T@/home/.claude/settings.json"}},
+  {"name": "write", "arguments": {"path": "@T@/home/.claude/settings.local.json", "content": "x"}},
+  {"name": "read", "arguments": {"path": "prod.env"}},
+  {"name": "execute", "arguments": {"code": "1"}},
+  {"name": "subagent", "arguments": {"agent": "general", "description": "Live child", "prompt": "child-task"}}
+]

@@ -9,6 +9,31 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.29-4
+
+### Security — opencode 2 ran without the guard
+
+- opencode 2 loads plugins only in a new format (a directory, an Effect
+  program, refusal through `Tool.Error`) and renamed its tools (`bash` →
+  `shell`, `apply_patch` → `patch`, `filePath` → `path`). The 1.x plugin is
+  not loaded at all — measured against 2.0.8, it stays silent. Anyone who
+  updated opencode kept a plugin that checks nothing.
+- New: `opencode/v2/`, an adapter for opencode 2. It maps `shell`, `read`,
+  `write`, `edit`, `patch`, `grep`, `glob`, `webfetch`, `websearch` and MCP
+  tools onto the guard, lets `skill`, `question` and `subagent` through (a
+  subagent's own calls reach the hook one by one — measured), and **refuses
+  `execute` and every unknown tool**. Code Mode reaches the network and 44
+  built-in browser tools that cannot be checked one by one.
+- Every path reaches the guard absolute, so a bare `prod.env` relative to the
+  project is recognised as a path.
+- Measured with a stand-in model (`opencode/live/`): 9/9 live, 42/42 cases,
+  21/21 mutations killed. The same cases through the 1.x plugin: 23 of 24
+  blocking cases pass.
+
+Changes what the guard blocks: yes, **if you use opencode 2**. Install
+`opencode/v2/` and list it under `plugins` — see `opencode/README.md`. The
+1.x plugin stays for opencode 1.x. Claude Code is not affected.
+
 ## 2026.09.29-3
 
 ### Security — a redirection or quotes no longer get a command past the sudo allowlist

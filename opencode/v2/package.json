@@ -1,0 +1,16 @@
+{
+  "name": "safety-guard-opencode-v2",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./server.js",
+  "exports": {
+    "./server": {
+      "import": "./server.js"
+    }
+  },
+  "dependencies": {
+    "@opencode/schema": "2.0.8",
+    "effect": "4.0.0-rc.112"
+  }
+}

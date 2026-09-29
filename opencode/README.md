@@ -1,4 +1,117 @@
-# Safety-Guard für opencode
+# Safety guard for opencode
+
+**Which adapter you need depends on your opencode version** (`opencode --version`):
+
+| opencode | adapter | status |
+|---|---|---|
+| **2.x** | `opencode/v2/` (plugin directory, this section) | measured against 2.0.8 |
+| 1.x | `opencode/plugin/safety-guard.ts` (German section below) | measured against 1.17.7 |
+
+**opencode 2 does not load the 1.x plugin.** It expects a plugin *directory*
+in a new format, and the tools changed their names (`bash` → `shell`,
+`apply_patch` → `patch`) and arguments (`filePath` → `path`). If you updated
+opencode and kept the old plugin, your tool calls are not checked — measured:
+the old plugin stays silent, and even if it loaded, 23 of the 24 blocking
+cases of `test_v2_adapter.mjs --v1` pass through it (the one it holds is the
+empty guard file, caught by its size check).
+
+## opencode 2.x
+
+### Install
+
+```sh
+cd opencode/v2
+npm ci --ignore-scripts --omit=optional   # two pinned packages, no install scripts
+```
+
+Then list the directory under `plugins` in your opencode configuration
+(`~/.config/opencode/opencode.json` or the project's `opencode.json`), with
+an absolute path:
+
+```json
+{ "plugins": ["/path/to/this/repo/opencode/v2"] }
+```
+
+`SAFETY_GUARD_PATH`, `CLAUDE_SECURITY_RULES` work as for 1.x (below).
+
+**Why two packages:** `@opencode/schema` supplies `Tool.Error` — in opencode 2
+a hook can refuse a call only with that error, anything else is treated as a
+crash. `effect` is the runtime opencode 2 plugins are written in. Both are
+pinned to the versions opencode 2.0.8 itself ships with. `@opencode/plugin`
+is deliberately not used: its `define()` returns its argument unchanged, and
+it pulls in a large dependency tree (cloud SDKs, npm internals) for nothing.
+
+### What it does
+
+| opencode 2 tool | checked as | notes |
+|---|---|---|
+| `shell` | `Bash` | `workdir` becomes the guard's `cwd` |
+| `read`, `write`, `edit` | `Read`, `Write`, `Edit` | path made absolute first |
+| `patch` | `Write`, once per target | `Add/Update/Delete File` and `Move to`; one refusal blocks the patch |
+| `grep` | `Grep` | ripgrep with `--hidden` reads file contents; the guard checks it as a recursive read |
+| `glob` | `Glob` | |
+| `webfetch`, `websearch` | `WebFetch`, `WebSearch` | |
+| MCP tools | `mcp__<server>__<tool>` | server taken from the tool list opencode hands the plugin, not guessed from the name |
+| `skill`, `question`, `subagent` | not checked — harmless list | a subagent's own calls pass through the hook one by one (measured) |
+| `execute` (Code Mode) | **refused** | reaches the network through `fetch` and, through its catalog, the built-in browser tools, `opencode_session_move` and MCP servers |
+| anything else | **refused** | a tool nobody mapped is not let through unchecked |
+
+**Every path reaches the guard absolute.** The guard recognises a path only
+when it contains a slash or starts with `~`; a bare `prod.env` relative to the
+project would be plain text to it.
+
+**`execute` is the large one.** The tool list opencode hands a plugin holds
+59 tools in 2.0.8, not the 12 the model sees directly: 44 of them control a
+built-in browser (`browser_evaluate`, `browser_files_upload`, …), all reachable
+only through Code Mode. MCP tools, too, are Code-Mode-only by default
+(`codemode: true`). Refusing `execute` closes that whole surface at once.
+
+The contract from `docs/tool-chains.md` holds unchanged: only exit 0 allows,
+an empty guard file blocks, a missing guard warns once and passes, and an
+error inside the adapter blocks.
+
+### What was measured, and how
+
+Nothing here is taken from documentation. opencode 2 was driven by a
+stand-in model (`live/fake_model.py`, an OpenAI-format server on 127.0.0.1
+playing fixed tool calls) — no real model, no cost:
+
+- The plugin directory is loaded; `execute.before` fires before every tool
+  call of the model **and before opencode's own permission prompt**.
+- A subagent's calls — foreground and background — reach the hook one by one.
+- The server's shell endpoint (a command the *human* types, like `!` in
+  Claude Code) does not trigger the hook. Intended, not a gap.
+- The old configuration form `mcp.<name>` silently drops `codemode` when
+  opencode converts it; only `mcp.servers.<name>` keeps it.
+
+**Not measured:** a direct MCP call. Even with `codemode: false`, opencode
+2.0.8 did not offer the MCP tool to the model. The adapter maps it through the
+tool list and blocks what it cannot attribute.
+
+**Side effect worth knowing:** opencode CLI subcommands such as
+`opencode debug config` start a background `opencode serve --service` that
+keeps running. Check with `pgrep -af "opencode serve"` after you try things.
+
+### Tests
+
+```sh
+node opencode/test_v2_adapter.mjs          # 42 cases against a guard copy
+node opencode/test_v2_adapter.mjs --v1     # the same cases against the 1.x plugin
+python3 opencode/mutate_v2_adapter.py      # one mutation per rule, all must be killed
+sh opencode/live/live_check.sh "$(mktemp -d)"   # real opencode, stand-in model
+```
+
+The live check seals everything off: empty XDG directories, `HOME` pointing
+into the throwaway directory, a guard copy, and the configuration passed in
+`OPENCODE_CONFIG_CONTENT` — no config file is written. The read probe uses a
+relative env file with dummy content, never real keys: the guard resolves `~`
+through the real account, not through `HOME`. Run it once with
+`ADAPTER_DIR=<empty directory>`: the "blocked" checks must then fail, or the
+check proves nothing.
+
+---
+
+# Safety-Guard für opencode 1.x
 
 Port des deterministischen `hooks/command-guard.py`-Gates für
 [opencode](https://github.com/sst/opencode). Dasselbe Python-Skript, das unter

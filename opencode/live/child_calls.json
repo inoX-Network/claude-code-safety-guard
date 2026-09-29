@@ -1,0 +1,4 @@
+[
+  {"name": "shell", "arguments": {"command": "touch @T@/child-harmless"}},
+  {"name": "shell", "arguments": {"command": "echo x > @T@/home/.claude/settings.json"}}
+]

@@ -4,15 +4,19 @@ One guard, several front ends. The guard itself never changes for a new CLI —
 what changes is the thin adapter that translates that CLI's dialect into the
 guard's, and back.
 
-| | Claude Code | opencode | Antigravity (`agy`) |
-|---|---|---|---|
-| **How it hooks in** | native `PreToolUse` hook | plugin (TypeScript) | adapter (Python) |
-| **Where it lives** | `hooks/command-guard.py` | `opencode/plugin/safety-guard.ts` | not published yet — see below |
-| **How "blocked" is said** | exit code `2` | thrown error | `{"decision":"deny"}` on stdout |
-| **Tools mapped by name** | all (native payload) | 4 (`bash`, `read`, `write`, `edit`) | 21 of 57 |
-| **Unmapped tools** | — | pass through | fail-closed if they carry a path, command or code argument |
-| **Its own control files protected** | yes | yes | yes |
-| **Far side is fail-closed** | yes | yes | yes, measured |
+| | Claude Code | opencode 2.x | opencode 1.x | Antigravity (`agy`) |
+|---|---|---|---|---|
+| **How it hooks in** | native `PreToolUse` hook | plugin directory (JavaScript, Effect) | plugin (TypeScript) | adapter (Python) |
+| **Where it lives** | `hooks/command-guard.py` | `opencode/v2/` | `opencode/plugin/safety-guard.ts` | not published yet — see below |
+| **How "blocked" is said** | exit code `2` | `Tool.Error` | thrown error | `{"decision":"deny"}` on stdout |
+| **Tools mapped by name** | all (native payload) | 8 of 12 plus `patch` and MCP; 3 harmless, `execute` refused | 4 (`bash`, `read`, `write`, `edit`) | 21 of 57 |
+| **Unmapped tools** | — | refused | pass through | fail-closed if they carry a path, command or code argument |
+| **Its own control files protected** | yes | yes | yes | yes |
+| **Far side is fail-closed** | yes | yes, measured | yes | yes, measured |
+
+**opencode 2 does not load the 1.x plugin** — it expects a plugin directory in
+a new format, and its tools were renamed. An opencode updated past 1.x with
+the old plugin in place runs unchecked. See `opencode/README.md`.
 
 **"Tools mapped by name" is not a quality score.** A chain with four tools needs
 four mappings. Antigravity exposes 57, and mapping every one of them would be
@@ -185,6 +189,21 @@ Its tests are the more useful part to copy:
 `opencode/test_broken_guard_denies.mjs` drives the **real** plugin function
 against deliberately damaged guard copies. A rebuilt call path would not have
 found any of the holes above, because the hole was in the real one.
+
+`opencode/v2/server.js` is the same adapter for opencode 2, and the first one
+built on duty 4 from the start: three tools on the harmless list, `execute`
+refused, everything unknown refused. Two things it adds are worth copying:
+
+- **Measure the host with a stand-in model.** `opencode/live/fake_model.py`
+  speaks the OpenAI chat format on 127.0.0.1 and plays fixed tool calls. That
+  answered, without a real model, every question documentation could not:
+  does the hook fire, does it fire for subagents, does a refusal really stop
+  the tool, what does the model actually get offered. The first request also
+  hands over the argument schema of every tool — the authoritative names, as
+  `agy` gives them with its first event.
+- **Let the test run against the old adapter too.** `test_v2_adapter.mjs --v1`
+  replays the same cases through the 1.x plugin with opencode 2's tool names.
+  23 of 24 blocking cases pass there — the before picture, in numbers.
 
 ---
 
