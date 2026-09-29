@@ -127,13 +127,24 @@ def run_all(hook=None):
         # No call site may reach past the helper.
         source = hook.read_text(encoding="utf-8")
         lines = source.splitlines()
+        tree = ast.parse(source)
+        # One named exception: a reading that can only ADD protection. The
+        # startup-file redirects (ZDOTDIR, ENV, BASH_ENV, XDG_CONFIG_HOME) must
+        # be read at the production location — through _env() they would be
+        # dead exactly there. That they only add and never replace the fixed
+        # list is pinned in test_shell_startup_redirect.py.
+        grows_only: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_redirected_startup_files":
+                grows_only.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
         direct = []
-        for node in ast.walk(ast.parse(source)):
+        for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                     and node.func.attr == "get" \
                     and isinstance(node.func.value, ast.Attribute) \
                     and node.func.value.attr == "environ":
-                if "_ENV_ALLOWED" not in lines[node.lineno - 1]:
+                if "_ENV_ALLOWED" not in lines[node.lineno - 1] \
+                        and node.lineno not in grows_only:
                     direct.append(node.lineno)
         results.append((f"no direct environment access outside the helper"
                         f"{' (lines ' + str(direct) + ')' if direct else ''}",

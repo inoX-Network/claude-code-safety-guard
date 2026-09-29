@@ -30,6 +30,17 @@ matters to you. Entries marked **security** close a way around the guard.
 Changes what the guard blocks: yes. **Update** if you rely on the sudo
 allowlist.
 
+### Visible — clearer refusal texts
+
+- An interpreter one-liner that names a self-protected path is refused even
+  when it only reads. The refusal said "write access" — it now says a
+  one-liner named the path, and that `cat` or `grep` reads it.
+- The German update notice still claimed the changes were "almost always
+  security fixes"; it now points to this file, like the English one. Both
+  German update texts now use proper umlauts.
+
+Changes what the guard blocks: no.
+
 ### Security — startup files moved by the environment are protected too
 
 - The shell's startup files were protected at their fixed places only. With

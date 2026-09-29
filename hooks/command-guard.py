@@ -215,6 +215,11 @@ _MESSAGES = {
         "BLOCKED: self-protection — write access to '{hit}' (security system). "
         "No override possible, only the owner via !."
     ),
+    "self_protect.inline": (
+        "BLOCKED: self-protection — an interpreter one-liner names '{hit}' "
+        "(security system). There every access is blocked, reading too; read "
+        "it with cat or grep instead. No override possible, only the owner via !."
+    ),
     # --- protected paths, level dependent ---
     "path.write_blocked": (
         "BLOCKED: write access (Write/Edit) to protected path '{path}'. {extra}"
@@ -2772,6 +2777,12 @@ def _glob_touches_tree(pattern: str, protected: str) -> bool:
     return True
 
 
+def _inline_names(command: str, prot: str) -> bool:
+    """Does an interpreter one-liner name this self-protected path? Message only."""
+    p = re.escape(expand_path(prot).rstrip("/")) + _PATH_BOUNDARY
+    return any(re.search(p, expand_path(block)) for block in _inline_code_segments(command))
+
+
 def command_hits_self_protect(command: str) -> str | None:
     """Return the self-protection path a Bash write command targets.
 
@@ -4138,7 +4149,12 @@ def main():
     self_protect_hit = command_hits_self_protect(command)
     if self_protect_hit:
         _audit(input_data, "Bash", command, "block", f"self_protect:{self_protect_hit}", "hard")
-        print(msg("self_protect.command", hit=self_protect_hit), file=sys.stderr)
+        # A one-liner naming the path is blocked even when it only READS.
+        # "write access" sent people looking for a write that is not there, and
+        # hid the way out.
+        key = ("self_protect.inline" if _inline_names(command, self_protect_hit)
+               else "self_protect.command")
+        print(msg(key, hit=self_protect_hit), file=sys.stderr)
         sys.exit(2)
 
     # 2d. Project-local control files. Same reasoning as 2c, but bound to a
