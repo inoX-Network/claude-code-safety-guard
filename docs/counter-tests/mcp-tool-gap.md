@@ -8,6 +8,8 @@ for **counter-testing on a local machine** (Claude Code with the
 - **Changed files:** `hooks/command-guard.py`, `security-rules.example.json`, `tests/test_command_guard.py`, `MCP-TOOL-GAP.md`
 - **Expected hook behaviour:** exit `0` = allowed, exit `2` = blocked
 
+> **Status 2026-09-29.** The cases below still hold. Changed since this was written: a MISSING `mcp_policy` section no longer lets MCP calls through — since 2026.09.23 a missing section falls back to the built-in default, and only an explicitly empty section allows. Paths in MCP arguments are read-checked as well. `MCP-TOOL-GAP.md` is this file. The hand probes below do not set `CLAUDE_AUDIT_DIR` or `CLAUDE_GUARD_CONFIG`: on a real installation they write to the real audit log and answer in your configured language. Point both at a temporary directory / an empty file first.
+
 ---
 
 ## 1. What is this about?
@@ -73,8 +75,8 @@ Step 4 is the default-deny: an unknown future MCP server's write tools are
 gated automatically until classified. Override level 1+ lifts cases 1 and 4 —
 the same gate already used for `allowed_paths` and `.env` write protection.
 
-If `mcp_policy` is entirely absent (older `security-rules.json`), the hook
-passes MCP calls through, so an out-of-sync deployment does not unexpectedly
+*Superseded since 2026.09.23, see the status note above:* If `mcp_policy` is entirely absent (older `security-rules.json`), the hook
+passed MCP calls through, so an out-of-sync deployment does not unexpectedly
 break existing workflows. The policy IS the protection.
 
 ---
@@ -145,7 +147,7 @@ check "ctx docs"  '{"tool_name":"mcp__context7__query-docs","tool_input":{}}'
 ## 8. Automated suite
 
 ```bash
-python3 tests/test_command_guard.py   # expected: 187 passed, 0 failed
+python3 tests/test_command_guard.py   # expected: all passed, 0 failed
 python3 tests/test_freigabe_e2e.py    # expected:  25 passed, 0 failed
 ```
 
