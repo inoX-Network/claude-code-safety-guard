@@ -9,7 +9,7 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
-## Unreleased
+## 2026.09.29-3
 
 ### Security — a redirection or quotes no longer get a command past the sudo allowlist
 
