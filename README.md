@@ -8,7 +8,7 @@
 A **deterministic tool-call guard** for AI coding agents. It sees every tool call *before* it runs and blocks the catastrophic ones — `rm -rf /`, reading `~/.ssh`, writing `/etc`, force-push to `main`, credential exfiltration — with a **3-level, agent-scoped override** for when you genuinely need elevated rights, and a self-protection layer so the AI can never disarm its own guard. Same input, same verdict, every time. No LLM in the loop: it's the net for when the model's judgment (or the permission prompt) fails or gets subverted by prompt injection.
 
 - **Claude Code:** runs as a `PreToolUse` hook.
-- **opencode:** runs as a plugin that bridges to the same guard — see [opencode/README.md](opencode/README.md).
+- **opencode:** runs as a plugin that bridges to the same guard — `opencode/v2/` for opencode 2.x, the older plugin for 1.x. **opencode 2 does not load the 1.x plugin**; if you updated opencode, install the v2 adapter. See [opencode/README.md](opencode/README.md).
 - **Antigravity (`agy`):** runs as a `PreToolUse` adapter against the same guard — see [Supported tool chains](docs/tool-chains.md).
 
 > **Born from a real incident.** This started after [Claude Code executed a destructive `chown -R` on `/etc/`](https://github.com/anthropics/claude-code/issues/39283) — a multi-hour recovery. The built-in permission system wasn't enough. This is defense-in-depth.
@@ -22,7 +22,8 @@ A **deterministic tool-call guard** for AI coding agents. It sees every tool cal
 cp security-rules.example.json ~/.claude/safety-guard/security-rules.json
 # then register hooks/command-guard.py as a PreToolUse hook in ~/.claude/settings.json
 
-# opencode: drop the plugin in and reuse the same rules — see opencode/README.md
+# opencode 2.x: copy opencode/v2 to ~/.config/opencode/plugins/safety-guard and run
+#   npm ci --ignore-scripts --omit=optional there — see opencode/README.md (1.x: the older plugin)
 ```
 
 > **Install:** A full, from-scratch setup guide lives in [INSTALL.md](INSTALL.md). This README explains *what* the guard does and *why*; INSTALL.md explains *how* to deploy it.
@@ -465,8 +466,10 @@ week; its counterweight is version control — see THREAT-MODEL.
 If another agent CLI runs on the same machine, its control files are a way
 around this guard too — crosswise: Claude Code writes, the other CLI executes.
 For opencode that is not theoretical, because this project ships the adapter
-itself, and `~/.config/opencode/plugin/safety-guard.ts` is what establishes the
-protection over there:
+itself, and the plugin directory is what establishes the protection over
+there — `~/.config/opencode/plugins/safety-guard/` for opencode 2 (loaded from
+there without any config entry — measured), `~/.config/opencode/plugin/safety-guard.ts`
+for 1.x:
 
 | Pattern (project-local `.opencode/` and global `~/.config/opencode/`) | Strength |
 |---|---|
@@ -481,7 +484,9 @@ too.
 **What this costs you:** installing or updating the opencode adapter is now an
 owner action — `!` or dev mode — because it writes into a hard-protected
 directory. That is the point rather than a side effect: nothing else should be
-able to replace the file that does the guarding.
+able to replace the file that does the guarding. **Install it as a copy, not
+as a symlink:** a symlink into a repository checkout leaves the adapter's code
+where the AI can still write it.
 
 ### The third tool chain — Antigravity (`agy`)
 
