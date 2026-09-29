@@ -560,7 +560,7 @@ The hook intercepts Read (and `.env` writes) and applies tiers:
 |------|----------|----------|----------|
 | **Always allowed** | no restriction | `~/.ssh/*.pub`, `~/.ssh/config`, `~/.ssh/known_hosts`, `~/.ssh/authorized_keys` | not needed |
 | **Override required** | blocked without level 1+ | `~/.ssh/id_*`, `~/.aws/credentials`, `~/.aws/config`, `~/.npmrc`, `~/.docker/config.json`, `~/.gnupg/` | level 1+ |
-| **`.env` files** | read **and** write require level 1+ | `.env`, `.env.local`, `.env.development`, `.env.production` (matched by basename, any directory) | level 1+ |
+| **`.env` files** | read **and** write require level 1+ | `.env`, `.env.local`, `.env.development`, `.env.production`, and `name.env` as read by docker compose (`billing-db.env`) — matched by basename, any directory; `process.env` and templates like `.env.example` stay free | level 1+ |
 | **Always blocked** | cannot be read | `/etc/shadow`, `/etc/gshadow` | none |
 
 Without this, a prompt-injection or confused-deputy attack could trick the AI into reading your private key or `.env` and exfiltrating it via a later command.

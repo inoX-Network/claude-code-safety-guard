@@ -3387,6 +3387,10 @@ _ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist",
 # was needed most.
 _TRAILING_PUNCT = "\"'`,;:)]}>"
 
+# Expressions shaped like `name.env` that mean environment variables in code,
+# not a file — Node and Vite.
+_ENV_JS_EXPRESSIONS = ("process.env", "import.meta.env", "meta.env")
+
 
 def check_env_file_read(file_path: str, env_patterns: list[str]) -> bool:
     """Check whether a path points to a .env file.
@@ -3400,9 +3404,15 @@ def check_env_file_read(file_path: str, env_patterns: list[str]) -> bool:
     # Follow the naming convention rather than any prefix match: `.env`,
     # `.env.anything` and `.envrc` are environment files — `.env-files` is prose
     # and `.environment` is a word.
+    #
+    # Plus `name.env` — the form docker compose reads through env_file
+    # (`billing-db.env`, `mail.env`). The docstring always promised it, the code
+    # never checked it: measured 2026-09-29, `cat config/prod.env` ran free.
     is_env_file = (basename == ".env"
                    or basename.startswith(".env.")
-                   or basename == ".envrc")
+                   or basename == ".envrc"
+                   or (basename.endswith(".env")
+                       and basename not in _ENV_JS_EXPRESSIONS))
     for pattern in env_patterns:
         # Exact filename OR following the convention (.env.production)
         if basename == pattern:

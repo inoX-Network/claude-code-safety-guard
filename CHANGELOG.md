@@ -9,6 +9,24 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.29
+
+### Security — environment files named `name.env` were readable
+
+- The read protection matched `.env`, `.env.*` and `.envrc`, but not the form
+  docker compose reads through `env_file:` — `billing-db.env`, `mail.env`,
+  `api-keys.env`. `cat config/prod.env` ran free, over ssh too, and so did the
+  Read tool. The function's own docstring had promised ".env at the end of the
+  filename" all along. It now holds.
+- `process.env` and `import.meta.env` are code, not files, and stay free.
+  Templates (`prod.env.example`) stay free as before.
+
+Changes what the guard blocks: yes. Measured on the author's audit log (210k
+allowed Bash calls): 228 calls in 48 sessions would now need a level-1
+override, against 1678 env denials that already happened. They mix real reads
+of key files with the same prose false positives `.env.local` already has —
+a file name mentioned in a search pattern, a test file the agent just wrote.
+
 ## 2026.09.23-2
 
 ### Security — the Grep tool read past every read protection
