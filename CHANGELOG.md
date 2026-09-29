@@ -9,6 +9,25 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## Unreleased
+
+### Security — startup files moved by the environment are protected too
+
+- The shell's startup files were protected at their fixed places only. With
+  `ZDOTDIR` (zsh), `ENV` (sh), `BASH_ENV` (bash) or `XDG_CONFIG_HOME` (fish)
+  set, the shell reads its startup code from somewhere else — a file nobody
+  protected. The guard now reads these variables from its own environment and
+  protects their targets **as well**. Never instead: setting a variable to a
+  harmless value does not free `~/.zshrc`.
+- Only absolute values or values starting with `~` count. `ENV` is a common
+  name (`ENV=production`), and a relative value says nothing about where the
+  shell looks. A directory in `ENV` or `BASH_ENV` is skipped — a startup file
+  is a file.
+- Reading stays free, as for the fixed startup files.
+
+Changes what the guard blocks: yes, but only if one of the four variables is
+set in the environment the guard runs in. If none is set, nothing changes.
+
 ## 2026.09.29-2
 
 ### Visible — the prompt-injection warning now reaches the model

@@ -529,8 +529,51 @@ _SHELL_STARTUP_FILES = [
     "~/.config/fish/conf.d",
 ]
 
+
+def _redirected_startup_files() -> list[str]:
+    """Startup files at the place the environment moves them to.
+
+    ZDOTDIR (zsh), ENV (sh), BASH_ENV (bash) and XDG_CONFIG_HOME (fish) move
+    the startup files. With such a variable set, the fixed list above misses:
+    the shell loads a file nobody protects.
+
+    The targets are ADDED, never substituted: through the environment the
+    block may only grow. That is why this reads os.environ directly and not
+    _env() -- at the production location _env() always returns None, and that
+    is exactly where this protection has to work. Setting a variable to a
+    harmless value gains nothing: the fixed list still applies.
+
+    It reads the GUARD's environment, not the command text. An assignment in a
+    command only affects that one invocation; measured, it has no traffic
+    (0 real ones in 210,625 allowed commands).
+
+    Only absolute paths or paths starting with ~ count. ENV is a common name
+    (ENV=production), and a relative value would hang on the guard's working
+    directory instead of the shell's. A directory is not a startup file -- for
+    ENV and BASH_ENV it is skipped, otherwise a misset variable would lock a
+    whole tree.
+    """
+    def value(name: str) -> str:
+        raw = os.environ.get(name, "").strip()
+        return raw if raw.startswith(("/", "~")) else ""
+
+    targets: list[str] = []
+    zdotdir = value("ZDOTDIR")
+    if zdotdir:
+        targets += [f"{zdotdir}/{name}" for name in
+                    (".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout")]
+    for name in ("ENV", "BASH_ENV"):
+        path = value(name)
+        if path and not os.path.isdir(expand_path(path)):
+            targets.append(path)
+    xdg = value("XDG_CONFIG_HOME")
+    if xdg:
+        targets += [f"{xdg}/fish/config.fish", f"{xdg}/fish/conf.d"]
+    return targets
+
+
 SELF_PROTECT_PATHS = (_BUILTIN_SELF_PROTECT + _SHELL_STARTUP_FILES
-                      + _installation_self_protect())
+                      + _redirected_startup_files() + _installation_self_protect())
 
 # Project-local control files — a RULE, not a list of places.
 #
