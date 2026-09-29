@@ -16,7 +16,7 @@ The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see 
 | `protected_reads.always_blocked_reads` | `string[]` | Never readable, no override. |
 | `protected_reads.env_files_require_override_1` | `string[]` | `.env` filenames whose read **and** write need level 1+. |
 | `blocked_bash_patterns_force_push` | `string[]` | Regexes blocking force-push on `main`/`master`. |
-| `prompt_injection_keywords` | `string[]` | Keywords that emit a stderr warning (no block). |
+| `prompt_injection_keywords` | `string[]` | Keywords that warn the model (no block). Matched as whole words, case-insensitive — except an all-caps keyword, which matches only in capitals. |
 | `protected_git_branches` | `string[]` | Branches on which `git commit` is refused outright. The hook asks git for the real branch (`rev-parse`), so `git -C <path>` and `cd <path> && git commit` are covered. Merge and pull stay free. |
 | `docker.blocked_flags` | `string[]` | Extra container flags to refuse, **added to** a built-in list (`--privileged`, `--pid=host`, `--net=host`, `--ipc=host`, `--uts=host`, `--cap-add=ALL`, `--cap-add=SYS_ADMIN`, the container socket, `seccomp=unconfined`, `apparmor=unconfined`). Matched case-insensitively, since the container tool treats `--cap-add=all` and `=ALL` alike. The built-in list cannot be shortened from the rules file. |
 | `mcp_policy.gate_servers` | `string[]` | MCP servers whose every tool call needs a level-1+ override. |

@@ -45,7 +45,7 @@ cp security-rules.example.json ~/.claude/safety-guard/security-rules.json
 - **3-level, agent-scoped override system** — Scoped, explicit, auditable, and per-instance.
 - **Audit log** — Every allow/block decision is logged (JSONL) with secret redaction.
 - **Desktop notifications** — Optional heads-up on package installs.
-- **Prompt injection detection** — Warns (doesn't block) when suspicious keywords appear in a command.
+- **Prompt injection detection** — Warns the model (doesn't block) when a suspicious keyword appears in a command as a whole word.
 - **Diagnostics register** — A second hook (`Stop` + `SessionStart`) that records language-server warnings the AI would otherwise file away, and asks for a reason instead of an acknowledgement. Five states; `fixed` is measured, not claimed. See [docs/diagnostics-register.md](docs/diagnostics-register.md).
 - **Update check** — Optional, off by default: one line at session start when a newer version has been published. Reads and compares, nothing else.
 
@@ -741,10 +741,12 @@ A: Rewriting history on a primary branch is almost always a mistake when done by
 A: Not without an explicit level-1+ override. Public keys (`*.pub`) and `~/.ssh/config` are always allowed. This now also covers the Bash path — `cat`/`base64`/`cp`-source/`dd if=`/`xxd`/`head` on a protected path are blocked, not just the Read tool. It also covers **directory-level exfiltration**: handing a whole credential directory to a recursive reader (`tar`/`zip`/`rsync`/`gpg`/`scp`/`grep -r ~/.ssh` …) is blocked even though no individual key file is named, while metadata-only commands (`ls`/`find`/`stat` on the directory) stay allowed. The Bash check resolves **direct** path references; variable indirection (`X=key; cat $X`) and interpreter string literals (`python -c "open(...)"`) stay outside its scope — the same inherent limit as `blocked_patterns`. It's defense-in-depth covering the realistic attack path, not a watertight guarantee.
 
 **Q: Does prompt-injection detection block anything?**
-A: No — it only writes a warning to stderr, and for a call the hook allows,
-Claude Code sends that to its debug log, not to you or the model (`claude
---debug` shows it). Treat it as a trace in the log, not as a heads-up anyone
-will see.
+A: No. On a call it allows, it tells the model — through `additionalContext`,
+the one PreToolUse channel that reaches it — that the command contains words
+common in prompt injections, and asks it to check where the instruction came
+from. Keywords match as whole words, and an all-caps keyword such as an acronym
+only in capitals; a substring match hit ordinary words thousands of times.
+Other tool chains ignore `additionalContext`; there the warning stays on stderr.
 
 ### Changed, but not destroyed
 
