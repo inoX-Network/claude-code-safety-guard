@@ -3099,6 +3099,11 @@ _DOCKER_FALLBACK_FLAGS = [
     "--cap-add=SYS_ADMIN", "--cap-add SYS_ADMIN",
     "seccomp=unconfined", "apparmor=unconfined",
 ]
+# ALL or SYS_ADMIN as the value of --cap-add, however written: with or without
+# 'CAP_', '=' or a blank, quoted, or as part of a comma list.
+_DOCKER_CAP_ADD_RE = re.compile(
+    r"--cap-add(?:=|\s+)[\"']?(?:[\w]+,)*(?:cap_)?(all|sys_admin)\b",
+    re.IGNORECASE)
 
 
 # The working directory a command runs in. Set once in main() from the tool
@@ -3323,6 +3328,13 @@ def check_docker_always(command: str, rules: dict) -> tuple[bool, str]:
     for flag in flags:
         if flag and flag.lower() in cl:
             return True, flag
+    # The capability itself, not one spelling of it: Docker takes it with and
+    # without the 'CAP_' prefix, with '=' or a blank, quoted too. The list above
+    # knows two spellings each -- '--cap-add=CAP_SYS_ADMIN' passed (measured
+    # 2026-09-30).
+    cap = _DOCKER_CAP_ADD_RE.search(command)
+    if cap:
+        return True, f"--cap-add={cap.group(1).upper()}"
 
     for src in _docker_bind_sources(command):
         for prot in SELF_PROTECT_PATHS:
@@ -3500,12 +3512,83 @@ def check_read_protection(file_path: str, rules: dict, agent_id: str | None = No
     return False, "", False
 
 
-def check_force_push(command: str, patterns: list[str]) -> str | None:
-    """Check whether a force-push to main/master is attempted."""
+# Global git options BEFORE the subcommand. The git patterns in the rules file
+# expect 'git' right before the subcommand ('git\s+reset\s+--hard'), so
+# 'git -C <path> reset --hard' walked past the entire git safety, and so did
+# push --force, commit --no-verify/--amend and config (measured 2026-09-30).
+# Values may be quoted: '-C "/path with spaces"'.
+_GIT_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""
+_GIT_GLOBAL_OPTION = (
+    r"(?:-[Cc]\s+" + _GIT_VALUE
+    + r"|--(?:git-dir|work-tree|namespace|super-prefix|config-env)(?:=|\s+)" + _GIT_VALUE
+    + r"|--exec-path=" + _GIT_VALUE
+    + r"|--no-pager|--paginate|-[pP]|--bare|--no-replace-objects|--no-optional-locks"
+    + r"|--(?:literal|glob|noglob|icase)-pathspecs)")
+_GIT_GLOBAL_RE = re.compile(r"\bgit(?:\s+" + _GIT_GLOBAL_OPTION + r")+(?=\s)")
+# Git accepts options AFTER the refspec too: 'git push origin main --force' is a
+# force-push to main, yet it passed both rules -- one wants the flag right after
+# 'push', the other before the branch. In the normal form the flags go first.
+_GIT_PUSH_RE = re.compile(r"\bgit\s+push((?:\s+[^\s;&|()]+)+)")
+# 'git add' on the whole working tree in any spelling: flags in front, '--',
+# './', './/', ':/' (pathspec magic for the repository root). The rules pattern
+# only knows 'git add .' -- 'git add ./' passed. Likewise '-A'/'--all' behind
+# another flag ('git add -v -A').
+_GIT_ADD_WHOLE_RE = re.compile(
+    r"\bgit\s+add(?:\s+-\S+)*\s+(?:\.|:)/*(?=\s|$|[;&|)])")
+_GIT_ADD_ALL_RE = re.compile(
+    r"\bgit\s+add(?:\s+-\S+)*?\s+(?:-A|--all)(?=\s|$|[;&|)])")
+
+
+# 'git config <key>' with exactly ONE argument READS the value -- only a
+# second one (the value) writes. Without this distinction the normal form
+# would newly block real reads ('git -C <repo> config core.hooksPath';
+# replayed against a real audit log on 2026-09-30: 4 of 12,208, all reads).
+_GIT_CONFIG_RE = re.compile(r"\bgit\s+config((?:\s+(?!\d*[<>])[^\s;&|()<>]+)*)")
+_GIT_CONFIG_SCOPE = {"--global", "--system", "--local", "--worktree"}
+
+
+def _git_config_read(m: re.Match) -> str:
+    parts = m.group(1).split()
+    flags = [t for t in parts if t.startswith("-")]
+    keys = [t for t in parts if not t.startswith("-")]
+    if len(keys) == 1 and all(f in _GIT_CONFIG_SCOPE for f in flags):
+        return "git config --get " + " ".join(flags + keys)
+    return m.group(0)
+
+
+def _git_push_flags_first(m: re.Match) -> str:
+    parts = m.group(1).split()
+    flags = [t for t in parts if t.startswith("-")]
+    return "git push " + " ".join(flags + [t for t in parts if not t.startswith("-")])
+
+
+def _git_normal_form(command: str) -> str:
+    """The command the way the git patterns expect it: no global options,
+    'git push' flags in front of remote and branch, a reading 'git config
+    <key>' as 'git config --get <key>', 'git add' on the whole tree as
+    'git add .' or 'git add -A'.
+
+    Complements the raw text, never replaces it -- both are matched, so no
+    pattern that hits the raw text today is lost to the rewrite.
+    """
+    norm = _GIT_GLOBAL_RE.sub("git", command)
+    norm = _GIT_PUSH_RE.sub(_git_push_flags_first, norm)
+    norm = _GIT_CONFIG_RE.sub(_git_config_read, norm)
+    norm = _GIT_ADD_ALL_RE.sub("git add -A", norm)
+    return _GIT_ADD_WHOLE_RE.sub("git add .", norm)
+
+
+def _git_patterns_hit(command: str, patterns: list[str]) -> str | None:
+    forms = (command, _git_normal_form(command))
     for pattern in patterns:
-        if re.search(pattern, command):
+        if any(re.search(pattern, f) for f in forms):
             return pattern
     return None
+
+
+def check_force_push(command: str, patterns: list[str]) -> str | None:
+    """Check whether a force-push to main/master is attempted."""
+    return _git_patterns_hit(command, patterns)
 
 
 # Tools that only PRINT or READ their arguments. When one of these sits at the
@@ -3652,10 +3735,7 @@ def check_git_safety(command: str, patterns: list[str]) -> str | None:
     --amend, git add -A/., git config). These patterns are ALWAYS blocked (even
     with an override).
     """
-    for pattern in patterns:
-        if re.search(pattern, command):
-            return pattern
-    return None
+    return _git_patterns_hit(command, patterns)
 
 
 # Template and example files are the OPPOSITE of a secret: they show which keys

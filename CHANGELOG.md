@@ -9,6 +9,38 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.30-2
+
+### Security — git safety behind `git -C`, flags after the refspec, `--cap-add=CAP_SYS_ADMIN`
+
+- The git patterns expect `git` right before the subcommand. With a global
+  option in between, the whole "always blocked" git group ran through
+  without any approval — measured against 2026.09.30 with the example rules:
+  `git -C <path> reset --hard`, `git -C <path> push --force`,
+  `git -c k=v commit --amend`, `git -C <path> commit --no-verify`,
+  `git -C <path> config user.name x`, `git --no-pager reset --hard`.
+- Git also takes options **after** the refspec: `git push origin main --force`
+  is a force-push to main and passed both the git-safety and the dedicated
+  force-push rule.
+- `git add` on the whole tree was recognised in two spellings only:
+  `./`, `.//`, `-- .`, `-v .`, `:/` and `-v -A` passed.
+- `--cap-add` was a substring check with two spellings per capability:
+  `CAP_SYS_ADMIN`, two blanks, quotes, `cap_all` and a comma list passed.
+- Fix, without touching the rules file: the git patterns are matched against
+  the raw command **and** a normal form of it — global options removed,
+  `git push` flags in front, a whole-tree `git add` written as `git add .` /
+  `git add -A`, and a reading `git config <key>` (one argument, no write
+  flag) written as `git config --get <key>` so that reads behind `-C` stay
+  free. Capabilities are matched as a value.
+- New test `tests/test_git_normal_form_and_cap_add.py`: 47 cases, both
+  directions — 18/47 before, 47/47 after. 15/15 mutations killed.
+
+Changes what the guard blocks: **yes**, the spellings above. Replayed in the
+maintainer's own guard against 12,215 previously allowed commands containing
+`git` or `cap-add` from a real audit log: **0 newly blocked**. (A first
+version without the `git config` read rule cost 4 real reads — that rule
+exists because of them.)
+
 ## 2026.09.30
 
 ### Security — deleting the root or the home directory, in any spelling
