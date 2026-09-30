@@ -590,8 +590,9 @@ No override unlocks any of these:
 | Recursive on system paths | `chown -R` / `chmod -R` / `chgrp -R` on `/etc`, `/usr`, `/var`, `/lib`, `/bin`, `/sbin`, `/boot` — the exact pattern from [the incident](https://github.com/anthropics/claude-code/issues/39283) |
 | Remote-code execution | `curl … \| sh`, `wget … \| bash`, `eval … base64`, `python -c … import os … system` |
 | Fork bomb | `:(){ :\|:& };:` |
-| Git safety | `git reset --hard`, force-push (`-f` / `--force` / `--force-with-lease`), `commit --no-verify`, `commit --amend`, `git add -A` / `git add .`, writing `git config` |
+| Git safety | `git reset --hard`, force-push (`-f` / `--force` / `--force-with-lease`), `commit --no-verify`, `commit --amend`, `git add -A` / `git add .`, writing `git config` — also behind global options (`git -C <path> …`, `-c`, `--no-pager`), with push flags after the refspec (`git push origin main --force`) and for every whole-tree spelling of `git add` (`./`, `-- .`, `:/`). The patterns are matched against the raw command and a normal form of it (since 2026.09.30-2) |
 | Force-push to primary | `git push --force` / `-f` / `--force-with-lease` to `main` / `master` (dedicated rule) |
+| Dangerous container capabilities | `--cap-add` with `ALL` or `SYS_ADMIN` in any spelling — with or without `CAP_`, `=` or a blank, quoted, inside a comma list |
 | Commit on a protected branch | `git commit` while the repository is on a branch in `protected_git_branches` (`main` by default) — see the note below |
 | Self-protection paths | the hook, rules file, rules doc, active override dir, `bin/` (see above) |
 | Owner-only commands | `grant-override`, `hook-dev-mode` (AI Bash calls) |
