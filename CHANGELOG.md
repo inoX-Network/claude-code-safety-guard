@@ -9,6 +9,39 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.09.30
+
+### Security — deleting the root or the home directory, in any spelling
+
+- The only barrier was the pattern `rm\s+-rf?\s+/` in `blocked_patterns`:
+  exactly one spelling. Measured against 2026.09.29-4 with the example rules,
+  these ran through **without any approval**: `rm -fr /`, `rm -r -f /`,
+  `rm --recursive --force /`, `rm -R /`, `/*`, `/.`, `//`, `-- /`,
+  `--no-preserve-root /`, `find / -delete`, `echo go; rm -fr /` (a delete in a
+  later segment), the spelled-out home directory, `rm -fr ~`, `rm -fr $HOME`,
+  `mv <home> /tmp/x`, and `rm -fr /home`, `/usr`, `/opt`, `/etc`.
+- Four causes: the normalised root `/` is the empty string and was read as
+  "no target"; no rules file names `/` or the home directory; a segment after
+  `; ` kept its leading blank, so the verb pattern never matched it; and
+  `--recursive` did not count as recursive.
+- New fixed rule, independent of the rules file: `/` or the home directory
+  **itself** is refused at every level, also with an approval (only the owner
+  via `!`). A recursive delete **one level below `/`** needs level 2.
+  `rm -rf ~/something`, single files, `find` without a delete action and
+  relative targets stay free.
+- New test `tests/test_root_and_home_delete.py`: 38 commands × two rule sets
+  (as shipped, and with every `rm` pattern stripped) × levels 0 and 2 —
+  64/152 before, 152/152 after. 11/11 mutations killed.
+- Known limit: a relative target after `cd /` is not resolved against the
+  working directory yet (README, Known limitations).
+
+Changes what the guard blocks: **yes**. Commands that delete or move `/`, the
+home directory or a first-level directory like `/usr` are now refused. The
+same rule, replayed in the maintainer's own guard against 7,578 previously
+allowed delete commands from a real audit log, blocked 6 more — `rm -rf` of
+`/usr`, `/var`, `/lib`, `/opt`, `/home/*` and `/mnt/*`, all of them guard
+probes. No everyday command was affected.
+
 ## 2026.09.29-4
 
 ### Security — opencode 2 ran without the guard
