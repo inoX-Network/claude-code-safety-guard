@@ -237,6 +237,18 @@ _MESSAGES = {
         "Needed: {needed}. ESCALATION: agent asks the coordinator → coordinator "
         "decides with the owner about adjusting the override file."
     ),
+    # --- the root and the home directory (fixed rule, see check_root_delete) ---
+    "root_delete.always": (
+        "BLOCKED: deleting or moving away '{path}' — the file-system root or "
+        "the home directory, in whatever spelling. ALWAYS blocked (no "
+        "override); only the owner via !."
+    ),
+    "root_delete.first_level": (
+        "BLOCKED: recursively deleting '{path}' — a whole tree directly below "
+        "the file-system root. {extra}Needed: {needed}. ESCALATION: agent asks "
+        "the coordinator → coordinator decides with the owner about adjusting "
+        "the override file."
+    ),
     # --- who is asking, and which approval is in force ---
     # These are BUILDING BLOCKS: they go into other messages. Without them in
     # the catalogue a translated refusal stays half English.
@@ -2777,6 +2789,132 @@ def _glob_touches_tree(pattern: str, protected: str) -> bool:
     return True
 
 
+# --- Deleting the file-system root or the home directory --------------------
+# Until 2026.09.30 the only barrier was the text pattern `rm\s+-rf?\s+/` in
+# blocked_patterns -- exactly ONE spelling. '-fr', '-r -f', '--recursive',
+# '/*', '/.', '//', 'find / -delete', a delete in the second segment, the
+# spelled-out home directory, '/home', '/usr' and '/etc' all ran through
+# without any approval (measured against release 2026.09.29-4 with the example
+# rules). Two structural reasons: _norm_path('/') is the EMPTY string, which a
+# path comparison reads as "no target", and no rules file names '/' or the
+# home directory.
+#
+# So this is a fixed rule, not a rules-file entry:
+#   '/'  protects itself and the first level below it (/usr, /home, /etc, ...)
+#   '~'  protects only itself -- `rm -rf ~/something` is everyday work
+# The root and the home directory stay blocked even with an approval; the
+# first level below '/' follows the level like any protected path.
+#
+# What decides is the command, not the disk: "is this a directory" would make
+# the verdict depend on a state that can change between check and execution.
+# At depth 0 every delete verb blocks -- whoever names the root itself means
+# the whole tree. At depth 1 only a RECURSIVE delete does; a single file there
+# stays free.
+FIXED_TREE_ROOTS_ALWAYS = ("/", "~")
+_TREE_DEPTH_FREE_FROM = 2        # below '/', from this depth on the rule is off
+
+# Short form with r/R inside a flag group (-r, -fr, -Rf) OR the long form.
+_RECURSIVE_FLAG_RE = re.compile(
+    r"(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?=\s|$|=)")
+_RECURSIVE_OTHER_RE = re.compile(
+    r"\bfind\b[^|;&]*(?:-delete\b|-exec\s+rm\b)"
+    r"|\brsync\b[^|;&]*--delete\b")
+# The actions that turn a search into a delete. Everything else about 'find'
+# is listing -- and listing is allowed. Checked against the WHOLE command,
+# because the pipe in 'find <tree> | xargs rm' separates the two segments.
+_FIND_DELETES_RE = re.compile(
+    r"-delete\b|-exec(?:dir)?\s+rm\b|-ok(?:dir)?\s+rm\b"
+    r"|\|\s*xargs\b[^|;&]*\b(?:rm|rmdir|unlink|shred)\b")
+# Verbs at a COMMAND position. A verb in running text is not a call.
+_TREE_VERB_RE = re.compile(
+    r"(?:^|[;&|]\s*|\(\s*|\bsudo\s+|\bxargs\s+|&&\s*|\|\|\s*)"
+    r"\b(rm|rmdir|unlink|shred|mv|find)\b")
+
+
+def _glob_depth(pattern: str, root: str) -> int | None:
+    """Depth at which a path PATTERN would land below a root, None if it cannot.
+
+    Component by component, like _glob_touches_tree: a glob never matches
+    across a slash. Without a glob this is the plain equality/prefix compare.
+    """
+    p = [t for t in pattern.strip("/").split("/") if t]
+    r = [t for t in root.strip("/").split("/") if t]
+    if len(p) < len(r):
+        return None
+    for i, part in enumerate(r):
+        if not fnmatch.fnmatchcase(part, p[i]):
+            return None
+    return len(p) - len(r)
+
+
+def _tree_delete_targets(segment: str, whole_command: str = "") -> list:
+    """Paths that are an ARGUMENT of a delete verb -- not merely mentioned.
+
+    From the verb to the end of the segment, flags skipped. A path BEFORE the
+    verb (say the target of a cd) does not count.
+    """
+    targets = []
+    for hit in _TREE_VERB_RE.finditer(segment):
+        # 'find' only LISTS unless a delete action stands beside it.
+        if (hit.group(1) == "find"
+                and not _FIND_DELETES_RE.search(whole_command or segment)):
+            continue
+        for piece in segment[hit.end():].split():
+            if piece == "--" or piece.startswith("-"):
+                continue
+            targets.append(piece.strip("'\""))
+    return targets
+
+
+def check_root_delete(command: str) -> str:
+    """The fixed root the command deletes or moves away, or "".
+
+    Returns '/' or '~' for the root or the home directory ITSELF -- always
+    blocked. For the first level below '/' the touched path comes back (say
+    '/usr'), so the approval check sees it instead of '/'.
+    """
+    roots = [("/", "", _TREE_DEPTH_FREE_FROM), ("~", _norm_path("~"), 1)]
+    for segment in split_segments(command):
+        # split_segments keeps the leading blank after '; ', and the verb
+        # pattern wants the verb at the start: without strip() every delete in
+        # a later segment slipped past.
+        segment = segment.strip()
+        recursive = bool(_RECURSIVE_FLAG_RE.search(segment)
+                         or _RECURSIVE_OTHER_RE.search(segment))
+        for target in _tree_delete_targets(segment, command):
+            if not target:
+                continue
+            # "<root>/*" means the contents of the root, not a child of it.
+            clean = target.rstrip("/")
+            if clean.endswith("/*"):
+                clean = clean[:-2]
+            clean = clean.rstrip("/")
+            if not clean:
+                # Only slashes (and a '/*'): that is the root, not "no target".
+                if not target.startswith("/"):
+                    continue
+                path = ""
+            else:
+                try:
+                    path = _norm_path(clean).rstrip("/")
+                except Exception:
+                    continue
+            for shown, root, free_from in roots:
+                # The fixed root '/' judges only absolute targets: a relative
+                # 'build' or '.' would otherwise seem to sit on the first
+                # level. Relative targets depend on the working directory.
+                if shown == "/" and path and not path.startswith("/"):
+                    continue
+                depth = _glob_depth(path, root)
+                if depth is None:
+                    continue
+                if depth == 0:
+                    return shown
+                if depth < free_from and recursive:
+                    return (path or "/") if shown == "/" else shown
+    return ""
+
+
 def _inline_names(command: str, prot: str) -> bool:
     """Does an interpreter one-liner name this self-protected path? Message only."""
     p = re.escape(expand_path(prot).rstrip("/")) + _PATH_BOUNDARY
@@ -4243,6 +4381,27 @@ def main():
             detector=_command_deletes)
         # Remember WHICH list matched, so the message can say the right thing.
         delete_only = bool(blocked_path)
+    if not blocked_path:
+        # The root or the home directory, in any spelling -- a fixed rule, not
+        # a rules-file entry. Its own branch with its own message: the path
+        # messages would claim a write block, while writing there stays free.
+        root_hit = check_root_delete(command)
+        if root_hit in FIXED_TREE_ROOTS_ALWAYS:
+            # The root or the home directory ITSELF: no approval turns this
+            # into a maintenance task.
+            _audit(input_data, "Bash", command, "block",
+                   f"root_delete:{root_hit}", "hard")
+            print(msg("root_delete.always", path=root_hit), file=sys.stderr)
+            sys.exit(2)
+        if root_hit:
+            allowed, need = path_decision(root_hit, level, grants)
+            if not allowed:
+                _audit(input_data, "Bash", command, "block",
+                       f"root_delete:{root_hit}", level)
+                print(msg("root_delete.first_level", path=root_hit, needed=need,
+                          extra=_override_note(override, level, agent_id)),
+                      file=sys.stderr)
+                sys.exit(2)
     if not blocked_path:
         # A docker bind-mount onto a blocked_paths_write entry is, security-wise,
         # a write to that path — same level behaviour as `echo x > /etc/passwd`.

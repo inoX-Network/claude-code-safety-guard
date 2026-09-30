@@ -16,6 +16,11 @@ do, and which layer is responsible for the rest.
 - **Catastrophic patterns** — `rm -rf /`, `mkfs`, `chmod 777`, fork bombs,
   pipe-to-shell, recursive `chown`/`chmod`/`chgrp` on system paths. Always
   blocked, no override.
+- **Deleting the root or the home directory** — `/` or the home directory
+  itself, deleted or moved in any spelling (flag order, long form, `/*`, `//`,
+  `find -delete`, a later segment, the spelled-out path). A fixed rule, not a
+  rules-file entry; always blocked. One level below `/` a recursive delete
+  needs level 2. Relative targets after `cd /` are not resolved yet.
 - **Force-push & destructive git** — `git push --force` to `main`/`master` and
   configured git-safety violations. Always blocked.
 - **Credential reads** — Read tool *and* Bash-side (`cat`, `base64`, `cp`,

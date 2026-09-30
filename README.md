@@ -141,7 +141,7 @@ The first group runs **always** — an active override never weakens it:
 
 Only after those does the hook load the override for the calling context and run the **level-dependent** checks:
 
-6. **Protected paths** — level 0: none; level 1: only explicitly granted paths; level 2+: all protected paths (single ops — recursive-on-system stays hard-blocked above)
+6. **Protected paths** — level 0: none; level 1: only explicitly granted paths; level 2+: all protected paths (single ops — recursive-on-system stays hard-blocked above). Then the fixed **root rule**: deleting `/` or the home directory itself is refused at every level, a recursive delete one level below `/` needs level 2
 7. **Sudo allowlist** — base allowlist plus `additional_sudo` grants; level 2+ (or `additional_sudo: "all"`) allows all sudo
 8. **Confirmation** desktop notification, then **prompt-injection** warning
 
@@ -256,6 +256,11 @@ delete". Knowing this contract avoids surprise:
   tree while single-file deletes underneath stay free, so everyday maintenance is
   untouched. Until then, an OS sandbox / least privilege is the hard boundary —
   as for every row in THREAT-MODEL.md.
+- **The root rule judges absolute targets.** `rm -fr /usr` is refused, but a
+  *relative* target after `cd /` (`cd / && rm -fr usr`) is not resolved against
+  the working directory yet — the hook reads the text, not the shell's state.
+  The root and the home directory themselves are covered in every spelling
+  measured; the relative form is tracked for the planned command parser.
 
 ---
 
@@ -579,6 +584,7 @@ No override unlocks any of these:
 | Category | Examples / patterns |
 |----------|---------------------|
 | Catastrophic `rm` | `rm -rf /`, `rm -rf ~`, `rm -rf /*`, `rm -rf .`, `rm -rf $HOME` |
+| Deleting the root or home itself | `/` or the home directory deleted or moved away in **any** spelling — `-fr`, `-r -f`, `--recursive`, `/*`, `/.`, `//`, `find / -delete`, a later segment, the spelled-out home path. A fixed rule, independent of the rules file (since 2026.09.30; before, only the one spelling in the row above held). One level below `/` (`/usr`, `/home`, `/etc`, …) a recursive delete needs level 2 |
 | Permission destruction | `chmod 777`, `chmod -R 777` |
 | Drive overwrite | `mkfs`, `dd if=… of=/dev/{sd,nvme,hd}`, `> /dev/sd` |
 | Recursive on system paths | `chown -R` / `chmod -R` / `chgrp -R` on `/etc`, `/usr`, `/var`, `/lib`, `/bin`, `/sbin`, `/boot` — the exact pattern from [the incident](https://github.com/anthropics/claude-code/issues/39283) |
