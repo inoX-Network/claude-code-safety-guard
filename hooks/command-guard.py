@@ -1289,6 +1289,37 @@ def _with_assignments(segment: str, command: str) -> str:
     return _VARIABLE_RE.sub(substitute, segment)
 
 
+# Variables the line sets without `NAME=`: loops and read.
+_SET_WITHOUT_ASSIGNMENT_RE = re.compile(
+    r"\b(?:for|select)\s+([A-Za-z_]\w*)\s+in\b|\bread\s+(?:-\w+\s+)*([A-Za-z_]\w*)")
+
+
+def _unknown_variables_empty(segment: str, command: str) -> str:
+    """Substitute every variable the line does not set itself as EMPTY.
+
+    That is what the shell does: `cp x $UNSET/etc/file` writes to /etc/file.
+    The path comparison saw a word character in front and took /etc for the
+    tail of another path — measured 2026-10-01 in both copies of the guard.
+    `$HOME` stands for the real home directory. What the line sets in a loop
+    or via read stays. Assignments (`NAME=value`) are already substituted here
+    (_with_assignments), so they are not a case any more.
+
+    Cost measured before building it: in 103,591 logged commands a variable the
+    line did not assign stood in front of a protected path 6 times, none of
+    them a write.
+    """
+    known = {loop or read
+             for loop, read in _SET_WITHOUT_ASSIGNMENT_RE.findall(command)}
+
+    def substitute(match):
+        name = match.group(1) or match.group(2)
+        if name == "HOME":
+            return str(_HOME)
+        return match.group(0) if name in known else ""
+
+    return _VARIABLE_RE.sub(substitute, segment)
+
+
 def _remote_copy_writes(command: str) -> bool:
     """Whether scp/rsync writes to a remote path (destination = last argument).
 
@@ -2030,6 +2061,11 @@ def check_blocked_paths(command: str, paths: list[str],
     # If NO single segment reads as a write although the whole line does, the old
     # coarse check on the entire line stays: a false positive beats a hole.
     to_check = _touching_segments(cleaned, touches)
+    # Plus every segment the way the shell sees it with empty variables
+    # (_unknown_variables_empty). Only checked IN ADDITION: no new hole is
+    # possible, at most a false positive.
+    to_check += [v for v in (_unknown_variables_empty(s, cleaned) for s in to_check)
+                 if v not in to_check]
 
     # Path order stays outermost: a command touching several protected paths
     # still reports the same one as before.
@@ -2053,7 +2089,10 @@ def check_blocked_paths(command: str, paths: list[str],
 # without it. When in doubt this list errs on the LONG side — an extra character
 # means the guard looks in one more place, which is the safe direction. A
 # missing one is a way past it.
-_PATH_START = r"(?:^|[\s;|&(){}\[\],=:'\"<>!])"
+#
+# The backslash was the next one: the shell turns `\/etc/x` into `/etc/x`, and
+# `cp x \/etc/x` ran through (measured 2026-10-01).
+_PATH_START = r"(?:^|[\s;|&(){}\[\],=:'\"<>!\\])"
 
 
 def _names_path(text: str, path: str) -> bool:
@@ -4399,7 +4438,10 @@ def main():
             # C. Protected paths — level-dependent (identical logic to Bash check 3).
             #    For Write we have the exact target path: prefix comparison with a
             #    path boundary instead of substring.
-            expanded = expand_path(file_path).rstrip("/")
+            #    _norm_path (a real single file_path): collapses ../ ./ // so a
+            #    traversal detour (/tmp/../etc/x) does not get around the write
+            #    guard. With expand_path alone it did (measured 2026-10-01).
+            expanded = _norm_path(file_path).rstrip("/")
             blocked_path = None
             for p in rules.get("blocked_paths_write", []):
                 pe = expand_path(p).rstrip("/")
