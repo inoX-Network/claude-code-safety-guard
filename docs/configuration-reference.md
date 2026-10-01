@@ -10,7 +10,7 @@ The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see 
 | `blocked_paths_write` | `string[]` | Paths protected from writes (supports `~`); level-dependent. |
 | `blocked_paths_delete` | `string[]` | Paths that may be **changed but not destroyed** (supports `~`); level-dependent. See below. |
 | `blocked_recursive_delete` | `string[]` | Tree roots that must not be deleted **as a whole** (supports `~` and globs in the command). The root itself blocks with every delete verb (`rm`, `rmdir`, `mv` away), one level below only a recursive delete (`rm -rf`, `find -delete`, `find | xargs rm`); from two levels down the rule is off. Single files, writing and editing stay free. Level 1+ with a matching `allowed_paths` entry lifts it. `/` and `~` themselves are protected without an entry. |
-| `allowed_sudo` | `string[]` | Base allowlist of commands permitted after `sudo`. |
+| `allowed_sudo` | `string[]` | Base allowlist of commands permitted after `sudo`. Some entries are narrowed in the code: `systemctl`, `ufw` and `pacman` only with read-only subcommands, `find` only without its actions that run or write (`-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*`, `-fls`). Every listed command runs as root without an approval — what `cp`, `mv` or `tee` may write is limited only by `blocked_paths_write`. |
 | `require_confirmation` | `string[]` | Substrings that trigger a desktop notification. |
 | `protected_reads.always_allowed` | `string[]` | Read tool may always access (supports `*` globs). |
 | `protected_reads.require_override_1` | `string[]` | Read needs a level-1+ override. |

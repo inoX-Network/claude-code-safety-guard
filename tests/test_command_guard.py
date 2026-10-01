@@ -241,9 +241,11 @@ CASES = [
     # === ADVERSARIAL CASES from security review 2026-06-07 ===
 
     # H1: grant matching on path boundaries (a too-broad grant must not defeat protection)
-    ("H1: level1, grant '/etc' (too broad), write /etc/fstab -> blocked",
-     lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 1, allowed_paths=["/etc"])),
-     "echo x > /etc/fstab", AID, 2),
+    # A grant on the PARENT of a protected entry does not cover the entry
+    # (here /usr above /usr/bin; the example rules protect /etc as a whole).
+    ("H1: level1, grant '/usr' (too broad), write /usr/bin/x -> blocked",
+     lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 1, allowed_paths=["/usr"])),
+     "echo x > /usr/bin/x", AID, 2),
     ("H1: level1, grant 'fstab' (not a path), write /etc/fstab -> blocked",
      lambda d: write_override(d, f"agent-{AID}.json", agent_override(AID, 1, allowed_paths=["fstab"])),
      "echo x > /etc/fstab", AID, 2),
