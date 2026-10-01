@@ -9,6 +9,25 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01-9
+
+### Messages — the last English pieces inside a translated refusal
+
+- The "Needed: …" part of a path refusal was built in the code, so a German
+  refusal read "Benötigt: level 2 OR an allowed_paths grant for '…'" — half
+  English, in the sentence that tells the reader what to do. It comes from the
+  catalogue now (`path.needed`).
+- The write refusal said "(Write/Edit)" also for a refused Bash command. Gone,
+  in English and German.
+- The desktop notification for `require_confirmation` commands takes its title
+  and text from the catalogue (`notify.confirm_title`, `notify.confirm_body`).
+
+New test `tests/test_needed_text_is_catalogued.py` — 1/3 before, 3/3 after.
+`tests/test_refusal_names_the_uncovered_target.py` set a `CLAUDE_GUARD_LANG`
+variable the guard never read; it now runs without a configuration, so it is
+English on every machine (it failed on a machine configured for German).
+Changes what the guard blocks: **no**, only wording.
+
 ## 2026.10.01-8
 
 ### New, off by default — the chain approval channel

@@ -221,8 +221,14 @@ _MESSAGES = {
         "it with cat or grep instead. No override possible, only the owner via !."
     ),
     # --- protected paths, level dependent ---
+    # Desktop notification for require_confirmation commands.
+    "notify.confirm_title": "Claude Code — Package Installation",
+    "notify.confirm_body": "Command being executed:\n{command}",
+    # What a refusal names as the way out. A building block of the path
+    # messages: built in the code, it stayed English inside a German refusal.
+    "path.needed": "level 2 OR an allowed_paths grant for '{path}'",
     "path.write_blocked": (
-        "BLOCKED: write access (Write/Edit) to protected path '{path}'. {extra}"
+        "BLOCKED: write access to protected path '{path}'. {extra}"
         "Needed: {needed}. ESCALATION: agent asks the coordinator → coordinator "
         "decides with the owner about adjusting the override file."
     ),
@@ -3255,8 +3261,7 @@ def path_decision(blocked_path: str, level: int, grants: dict,
                                   [t], entries)),
         None)
     braucht = ungedeckt or (targets[0] if targets else blocked_path)
-    need = f"level 2 OR an allowed_paths grant for '{braucht}'"
-    return allowed, need
+    return allowed, msg("path.needed", path=braucht)
 
 
 # --- Docker / Podman bind-mount + flag protection ---------------------------
@@ -4862,8 +4867,8 @@ def main():
                  # deliberately far above what a session's counter reaches,
                  # so this cannot replace another application's notification.
                  "-r", _NOTIFY_REPLACE_ID,
-                 "Claude Code — Package Installation",
-                 f"Command being executed:\n{command[:200]}"],
+                 msg("notify.confirm_title"),
+                 msg("notify.confirm_body", command=command[:200])],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

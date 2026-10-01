@@ -47,7 +47,10 @@ def _refusal(command, allowed_paths):
         env["CLAUDE_SUDO_OVERRIDES_DIR"] = tmp
         env["CLAUDE_AUDIT_DIR"] = tmp
         env["CLAUDE_HOOK_DEV_FLAG"] = tmp + "/_none"
-        env["CLAUDE_GUARD_LANG"] = "en"
+        # No configuration: the messages are English on every machine. (A
+        # CLAUDE_GUARD_LANG variable stood here; the guard never read it, and the
+        # test passed only because this sentence used to be built in English.)
+        env["CLAUDE_GUARD_CONFIG"] = tmp + "/_no_config.json"
         p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env, timeout=60,
                            cwd=tmp)
