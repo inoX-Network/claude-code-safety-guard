@@ -1395,9 +1395,21 @@ _FIND_EXEC_RE = re.compile(r"\bfind\b[^|;&]*?\s-(?:exec|execdir|ok|okdir)\b")
 
 # Words that stand IN FRONT of the actual command without being one: escalation
 # and environment wrappers. Without skipping them, `sudo tar ~/.ssh` hides its
-# reading command behind the first token.
+# reading command behind the first token. ONE list for every check that looks
+# for the command position (recursive read, remote call, container, owner-only
+# commands): two lists had drifted apart. None of those checks relies on the
+# list being complete — a word it lacks costs a false alarm, not a hole.
 _COMMAND_PREFIXES = {"sudo", "doas", "env", "nice", "ionice", "nohup", "time",
                      "stdbuf", "command", "exec"}
+
+# Command and process substitution open a new command position INSIDE a word:
+# `echo $(tar czf - ~/.ssh)`, `diff <(tar …) x`, `echo \`tar …\``.
+_SUBSTITUTION_RE = re.compile(r"\$\(|[<>]\(|`")
+
+
+def _read_word(tok: str) -> str:
+    """A word as the read gate compares it: quotes, parens and braces dropped."""
+    return tok.strip("'\"(){}`")
 
 
 def _recursive_read_targets(command: str) -> list[str]:
@@ -1412,37 +1424,43 @@ def _recursive_read_targets(command: str) -> list[str]:
     of real work: 16 of 16 refusals of this shape were exactly that, not one of
     them read any contents.
 
-    So each segment is asked on its own: does a reading command sit here, and is
+    So each segment is asked on its own: does a reading command LEAD it, and is
     the directory ITS argument? Everything after that command in the same segment
     counts as its argument — which keeps `sudo tar czf x ~/.ssh` caught.
+
+    When some other word leads the segment and a reading command sits further
+    in, the gate cannot tell a wrapper (`timeout 60 tar …`, `bash -c 'tar …'`,
+    `do tar …`) from a command that only mentions one. It then counts EVERY
+    argument of the segment, plus those of the segments piping into it
+    (`find ~/.ssh | xargs tar …`). Skipping such segments let 23 measured forms
+    through (2026-10-01): `xargs`, `timeout` and shell keywords led hundreds of
+    real commands, none of them on the wrapper list. A missing list entry must
+    cost a false alarm, never a hole.
     """
     targets = []
-    for segment in split_segments(command):
-        tokens = [t.strip("'\"()") for t in segment.split()]
-        tokens = [t for t in tokens if t]
-        reading = False
-        for tok in tokens:
-            name = os.path.basename(tok)
-            if not reading:
-                if name in RECURSIVE_READ_CMDS:
-                    reading = True
-                elif name == "find" and _FIND_EXEC_RE.search(segment):
-                    # `find` is deliberately NOT in RECURSIVE_READ_CMDS: listing a
-                    # protected directory stays allowed. With `-exec` it is no
-                    # longer listing — every file found is handed to a command,
-                    # which reads the search path recursively. Measured
-                    # 2026-08-20: `find /etc -name shadow -exec cat {} \;` ran
-                    # free while `cat /etc/shadow` was refused, so the detour was
-                    # the weaker door — exactly as directory packing once was.
-                    reading = True
-                elif name in _COMMAND_PREFIXES or tok.startswith("-") \
-                        or re.match(r"^[A-Za-z_]\w*=", tok):
-                    continue          # wrapper, flag or VAR=value in front
-                else:
-                    break             # some other command leads this segment
-                continue
-            if not tok.startswith("-"):
-                targets.append(tok)
+    piped_in = []             # arguments of the segments piping into this one
+    parts = split_segments(command, keep=True)
+    for k in range(0, len(parts), 2):
+        segment = _SUBSTITUTION_RE.sub(" ", parts[k])
+        words = [w for w in (_read_word(t) for t in segment.split()) if w]
+        names = [os.path.basename(w) for w in words]
+        # `find` is deliberately NOT in RECURSIVE_READ_CMDS: listing a protected
+        # directory stays allowed. With `-exec` it is no longer listing — every
+        # file found is handed to a command, which reads the search path
+        # recursively. Measured 2026-08-20: `find /etc -name shadow -exec cat {} \;`
+        # ran free while `cat /etc/shadow` was refused, so the detour was the
+        # weaker door — exactly as directory packing once was.
+        find_exec = bool(_FIND_EXEC_RE.search(segment))
+        head = next((i for i, w in enumerate(words)
+                     if not (names[i] in _COMMAND_PREFIXES or w.startswith("-")
+                             or re.match(r"^[A-Za-z_]\w*=", w))), None)
+        if head is not None:
+            if names[head] in RECURSIVE_READ_CMDS or (names[head] == "find" and find_exec):
+                targets += [w for w in words[head + 1:] if not w.startswith("-")]
+            elif any(n in RECURSIVE_READ_CMDS for n in names) or ("find" in names and find_exec):
+                targets += [w for w in piped_in + words if not w.startswith("-")]
+        separator = parts[k + 1] if k + 1 < len(parts) else ""
+        piped_in = piped_in + words if separator == "|" else []
     return targets
 
 # Path boundary for the Bash self-protection detection: the protected path must
@@ -2412,7 +2430,7 @@ def _is_remote_call(segment: str) -> bool:
     i = 0
     while i < len(tokens):
         t = tokens[i]
-        if t in _PREFIX_TOKENS or "=" in t.split("/")[0] or t.startswith("-"):
+        if os.path.basename(t) in _COMMAND_PREFIXES or "=" in t.split("/")[0] or t.startswith("-"):
             i += 1
             continue
         break
@@ -2440,9 +2458,6 @@ def _is_remote_call(segment: str) -> bool:
 _PASSTHROUGH_RE = re.compile(
     r"""\b(?:ssh|eval|[a-z]*sh\s+-c)\b[^"']*"""
     r"""(?:"((?:[^"\\]|\\.?)*)(?:"|$)|'([^']*)(?:'|$))""")
-
-# Prefixes that may sit in front of the actual command.
-_PREFIX_TOKENS = ("sudo", "doas", "command", "env", "nohup", "time")
 
 # Tools that only READ or print their arguments. With one of them in front, a
 # container word behind it is text, not a command. This list may be incomplete:
@@ -2488,7 +2503,7 @@ def _is_container_command(segment: str) -> str | None:
     i = 0
     while i < len(tokens):
         t = tokens[i]
-        if t in _PREFIX_TOKENS or "=" in t.split("/")[0] or t.startswith("-"):
+        if os.path.basename(t) in _COMMAND_PREFIXES or "=" in t.split("/")[0] or t.startswith("-"):
             i += 1
             continue
         break
@@ -3759,7 +3774,7 @@ def check_owner_only(command: str, names: list[str]) -> str | None:
         i = 0
         while i < len(tokens):
             t = tokens[i]
-            if t in _PREFIX_TOKENS or "=" in t.split("/")[0] or t.startswith("-"):
+            if os.path.basename(t) in _COMMAND_PREFIXES or "=" in t.split("/")[0] or t.startswith("-"):
                 i += 1
                 continue
             break

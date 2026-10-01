@@ -9,6 +9,39 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01-4
+
+### Security — the directory read gate behind a word it does not know
+
+- Handing a credential directory to a recursive reader (`tar czf x ~/.ssh`,
+  `find /etc … -exec cat`) is refused. But the gate looked for the reading
+  command only after a fixed list of wrappers (`sudo`, `env`, `nice` …) and
+  skipped the whole segment when the first word was not on it. So all of these
+  ran without an approval: `timeout 60 tar czf x ~/.ssh`,
+  `timeout 5 find /etc -name shadow -exec cat {} \;`, `nice -n 10 tar …`,
+  `xargs tar …`, `bash -c 'tar … ~/.ssh'`, `echo $(tar czf - ~/.ssh)`,
+  `for f in a; do tar … ~/.ssh; done`, `if grep -r key ~/.ssh; then …`,
+  `find ~/.ssh | xargs tar czf x`, `git grep --no-index key ~/.ssh` — 23
+  measured forms.
+- Now a missing list entry costs a false alarm instead of a hole: when the gate
+  does not know the word that leads a segment and a reading command appears in
+  it, every argument of that segment counts — and those of segments piping into
+  it. A segment LED by a reading command stays as precise as before, so a filter
+  in a pipe (`find ~ … | grep -v cache`) remains free. Command and process
+  substitution (`$(…)`, `` `…` ``, `<(…)`) open a new command position.
+- The two wrapper lists (read gate; remote, container and owner-only checks)
+  are one list now.
+- New test `tests/test_read_gate_behind_wrappers.py`, both directions — 10/33
+  before, 34/34 after; 6/6 mutations killed, each on the expected case.
+
+Changes what the guard blocks: **yes**, the 23 forms above. Replayed against
+the maintainer's audit log: 50,961 commands with a reading word, 3,671 of them
+with different read targets → **3 newly blocked**, 0 newly allowed. The three:
+a grep pattern `'~/'` inside `$(…)` (the same false alarm a plain
+`grep -c '~/' file` already had), `find /home/<user> … | xargs grep` (reads
+files from the home directory — correct), and a Python heredoc whose text names
+`tar "$HOME/.ssh"` (an interpreter body is code, not text).
+
 ## 2026.10.01-3
 
 ### Security — three detours around the write guard
