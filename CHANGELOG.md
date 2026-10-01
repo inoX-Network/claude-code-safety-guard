@@ -9,6 +9,33 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01-6
+
+### New rule section — trees that must not be deleted as a whole
+
+- `blocked_recursive_delete` names tree roots — your most valuable directories
+  below the home directory, say `~/Projects` or `/mnt/data`. The fixed rule
+  protects only `/` (and its first level) and `~` itself, because
+  `rm -rf ~/something` is everyday work; so `rm -rf ~/Projects`,
+  `mv ~/Projects /tmp/gone` and `find ~/Projects -maxdepth 1 | xargs rm -rf`
+  ran without an approval. `blocked_paths_delete` is no answer there: it
+  protects every single file in the tree.
+- Same two steps as for `/`: the root itself blocks with every delete verb,
+  one level below it only a recursive delete does, from two levels down the
+  rule is off. Globs count (`rm -rf ~/Proj*`). Single files, writing and
+  editing stay free. Level 1+ with a matching `allowed_paths` entry lifts it;
+  the refusal has its own message.
+- The section is **optional** and **empty in the example rules** — the right
+  roots depend on your machine. Without it nothing changes; an older rules
+  file gets the once-per-session note that the section is not configured.
+- New test `tests/test_configured_tree_roots.py` — 7/20 before, 20/20 after;
+  5/5 mutations killed, each on the expected case.
+
+Changes what the guard blocks: **only if you add roots.** With the example
+rules, replayed over 9,107 real commands with a delete verb: 0 differences.
+With the maintainer's four roots: 78 commands hit, identical to the
+maintainer's own copy, where the rule has run since 2026-08-25.
+
 ## 2026.10.01-5
 
 ### Security — an environment file named inside interpreter inline code

@@ -249,6 +249,13 @@ _MESSAGES = {
         "the coordinator → coordinator decides with the owner about adjusting "
         "the override file."
     ),
+    "root_delete.configured_tree": (
+        "BLOCKED: recursively deleting near the root of '{path}' — a whole tree, "
+        "not a file inside it (blocked_recursive_delete). Deleting single files "
+        "there stays allowed, so do writing and editing. {extra}Needed: "
+        "{needed}. ESCALATION: agent asks the coordinator → coordinator decides "
+        "with the owner about adjusting the override file."
+    ),
     # --- who is asking, and which approval is in force ---
     # These are BUILDING BLOCKS: they go into other messages. Without them in
     # the catalogue a translated refusal stays half English.
@@ -1825,11 +1832,13 @@ _FALLBACK_RULES = {
 
 # Sections the guard reads that have NO hardcoded default. A missing one means
 # "not configured" and is reported, not filled in: allowed_sudo missing is
-# stricter (no sudo allowed), docker keeps its hardcoded escape flags, and the
-# other two only add prompts. Every other section the guard reads is a key of
-# _FALLBACK_RULES.
+# stricter (no sudo allowed), docker keeps its hardcoded escape flags, two
+# others only add prompts, and without blocked_recursive_delete there are no
+# configured tree roots while the fixed rule for '/' and '~' holds. Every other
+# section the guard reads is a key of _FALLBACK_RULES.
 _OPTIONAL_SECTIONS = ("allowed_sudo", "require_confirmation",
-                      "prompt_injection_keywords", "docker")
+                      "prompt_injection_keywords", "docker",
+                      "blocked_recursive_delete")
 
 # What the rules file lacks, collected while this call runs and handed to the
 # model once per session (see _emit_notices). load_rules() runs several
@@ -2989,14 +2998,32 @@ def _tree_delete_targets(segment: str, whole_command: str = "") -> list:
     return targets
 
 
-def check_root_delete(command: str) -> str:
-    """The fixed root the command deletes or moves away, or "".
+def check_root_delete(command: str, configured_roots=()) -> str:
+    """The tree root the command deletes or moves away, or "".
+
+    The fixed roots '/' and '~', plus the roots configured in
+    blocked_recursive_delete. Those are the trees that matter most on a given
+    machine and sit below the home directory, where the fixed rule is off by
+    design (`rm -rf ~/something` is everyday work). They get the same two steps
+    as '/': the root itself blocks with every delete verb, one level below it
+    only a recursive delete does.
 
     Returns '/' or '~' for the root or the home directory ITSELF -- always
-    blocked. For the first level below '/' the touched path comes back (say
-    '/usr'), so the approval check sees it instead of '/'.
+    blocked. A configured root comes back as written in the rules file. For the
+    first level below '/' the touched path comes back (say '/usr'), so the
+    approval check sees it instead of '/'.
+
+    A root the rules file spells in a way that cannot be resolved is skipped,
+    not a crash.
     """
-    roots = [("/", "", _TREE_DEPTH_FREE_FROM), ("~", _norm_path("~"), 1)]
+    roots = []
+    for root in configured_roots or ():
+        try:
+            roots.append((str(root), _norm_path(str(root)).rstrip("/"),
+                          _TREE_DEPTH_FREE_FROM))
+        except Exception:
+            continue
+    roots += [("/", "", _TREE_DEPTH_FREE_FROM), ("~", _norm_path("~"), 1)]
     for segment in split_segments(command):
         # split_segments keeps the leading blank after '; ', and the verb
         # pattern wants the verb at the start: without strip() every delete in
@@ -4667,9 +4694,11 @@ def main():
         delete_only = bool(blocked_path)
     if not blocked_path:
         # The root or the home directory, in any spelling -- a fixed rule, not
-        # a rules-file entry. Its own branch with its own message: the path
-        # messages would claim a write block, while writing there stays free.
-        root_hit = check_root_delete(command)
+        # a rules-file entry -- plus the tree roots of blocked_recursive_delete.
+        # Its own branch with its own message: the path messages would claim a
+        # write block, while writing there stays free.
+        configured_roots = rules.get("blocked_recursive_delete", [])
+        root_hit = check_root_delete(command, configured_roots)
         if root_hit in FIXED_TREE_ROOTS_ALWAYS:
             # The root or the home directory ITSELF: no approval turns this
             # into a maintenance task.
@@ -4682,7 +4711,10 @@ def main():
             if not allowed:
                 _audit(input_data, "Bash", command, "block",
                        f"root_delete:{root_hit}", level)
-                print(msg("root_delete.first_level", path=root_hit, needed=need,
+                key = ("root_delete.configured_tree"
+                       if root_hit in [str(r) for r in configured_roots]
+                       else "root_delete.first_level")
+                print(msg(key, path=root_hit, needed=need,
                           extra=_override_note(override, level, agent_id)),
                       file=sys.stderr)
                 sys.exit(2)
