@@ -570,7 +570,7 @@ The hook intercepts Read (and `.env` writes) and applies tiers:
 |------|----------|----------|----------|
 | **Always allowed** | no restriction | `~/.ssh/*.pub`, `~/.ssh/config`, `~/.ssh/known_hosts`, `~/.ssh/authorized_keys` | not needed |
 | **Override required** | blocked without level 1+ | `~/.ssh/id_*`, `~/.aws/credentials`, `~/.aws/config`, `~/.npmrc`, `~/.docker/config.json`, `~/.gnupg/` | level 1+ |
-| **`.env` files** | read **and** write require level 1+ | `.env`, `.env.local`, `.env.development`, `.env.production`, and `name.env` as read by docker compose (`billing-db.env`) — matched by basename, any directory; `process.env` and templates like `.env.example` stay free | level 1+ |
+| **`.env` files** | read **and** write require level 1+ | `.env`, `.env.local`, `.env.development`, `.env.production`, and `name.env` as read by docker compose (`billing-db.env`) — matched by basename, any directory, also with a shell operator glued to the name (`cat .env|head`, since 2026.10.01); `process.env` and templates like `.env.example` stay free | level 1+ |
 | **Always blocked** | cannot be read | `/etc/shadow`, `/etc/gshadow` | none |
 
 Without this, a prompt-injection or confused-deputy attack could trick the AI into reading your private key or `.env` and exfiltrating it via a later command.
@@ -585,7 +585,7 @@ No override unlocks any of these:
 |----------|---------------------|
 | Catastrophic `rm` | `rm -rf /`, `rm -rf ~`, `rm -rf /*`, `rm -rf .`, `rm -rf $HOME` |
 | Deleting the root or home itself | `/` or the home directory deleted or moved away in **any** spelling — `-fr`, `-r -f`, `--recursive`, `/*`, `/.`, `//`, `find / -delete`, a later segment, the spelled-out home path. A fixed rule, independent of the rules file (since 2026.09.30; before, only the one spelling in the row above held). One level below `/` (`/usr`, `/home`, `/etc`, …) a recursive delete needs level 2 |
-| Permission destruction | `chmod 777`, `chmod -R 777` |
+| Permission destruction | `chmod 777` in any spelling — `-R 777`, `-R777`, `0777`, any flag before the mode (since 2026.10.01) |
 | Drive overwrite | `mkfs`, `dd if=… of=/dev/{sd,nvme,hd}`, `> /dev/sd` |
 | Recursive on system paths | `chown -R` / `chmod -R` / `chgrp -R` on `/etc`, `/usr`, `/var`, `/lib`, `/bin`, `/sbin`, `/boot` — the exact pattern from [the incident](https://github.com/anthropics/claude-code/issues/39283) |
 | Remote-code execution | `curl … \| sh`, `wget … \| bash`, `eval … base64`, `python -c … import os … system` |

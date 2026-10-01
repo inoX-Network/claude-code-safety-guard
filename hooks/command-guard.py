@@ -1708,7 +1708,7 @@ _FALLBACK_RULES = {
         r"rm\s+-rf?\s+/(\s|$)", r"rm\s+-rf?\s+/\*", r"rm\s+-rf?\s+~(\s|$|/\*)",
         r"rm\s+-rf?\s+\$HOME(\s|$|/\*)", r"rm\s+-rf?\s+\.(\s|$)",
         r"\bmkfs\b", r"\bdd\s+if=.*\s+of=/dev/(sd|nvme|hd)", r"> /dev/sd",
-        r"chmod\s+-?R?\s*777", r":\(\)\{ :\|:& \};:",
+        r"\bchmod\b(?:\s+-[-\w]*)*\s+(?:-[A-Za-z]*)?0?777\b", r":\(\)\{ :\|:& \};:",
         r"curl\s+[^|]*\|\s*sh", r"curl\s+[^|]*\|\s*bash",
         r"wget\s+[^|]*\|\s*sh", r"wget\s+[^|]*\|\s*bash",
         r"chown -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
@@ -3754,6 +3754,76 @@ _ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist",
 # was needed most.
 _TRAILING_PUNCT = "\"'`,;:)]}>"
 
+def _free_operators(text: str) -> str:
+    """Put a blank where a shell operator ends a word (`; | & < > ( )`,
+    backtick, `$(`) — but only where the shell reads it as an operator.
+
+    Inside quotes `|` is text: `grep -iE '(^|/)\\.env|secret'` is a search
+    pattern, not a read. A first version of this fix split there too and,
+    measured on the maintainer's audit log, refused 74 harmless commands
+    (patterns with `\\.env`, `process\\.env`, `/home/` in an alternation).
+    Inside double quotes `$(…)` and backticks are still code — those keep
+    being split, or `echo "$(cat .env|head)"` would be the next gap.
+    """
+    out, stack, i = [], [], 0
+    while i < len(text):
+        c = text[i]
+        top = stack[-1] if stack else None
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < len(text):
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if text.startswith("$((", i):
+            # Arithmetic, not command substitution: `~$((i*4))` must not turn
+            # into a bare `~` (measured: five false "recursive read of ~").
+            out.append("$((")
+            i += 3
+            continue
+        if top == '"':
+            if c == '"':
+                stack.pop()
+                out.append(c)
+            elif text.startswith("$(", i):
+                stack.append("$(")
+                out.append(" ")
+                i += 1
+            elif c == "`":
+                stack.append("`")
+                out.append(" ")
+            else:
+                out.append(c)
+            i += 1
+            continue
+        # Code: top level, inside $(…) or inside backticks
+        if c in "'\"":
+            stack.append(c)
+            out.append(c)
+        elif top == "$(" and c == ")":
+            stack.pop()
+            out.append(" ")
+        elif top == "`" and c == "`":
+            stack.pop()
+            out.append(" ")
+        elif text.startswith("$(", i):
+            stack.append("$(")
+            out.append(" ")
+            i += 1
+        elif c == "`":
+            stack.append("`")
+            out.append(" ")
+        elif c in ";|&<>()":
+            out.append(" ")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
 # Expressions shaped like `name.env` that mean environment variables in code,
 # not a file — Node and Vite.
 _ENV_JS_EXPRESSIONS = ("process.env", "import.meta.env", "meta.env")
@@ -3905,8 +3975,15 @@ def command_hits_protected_read(command: str, rules: dict,
     cleaned = _only_copy_sources(cleaned)
 
     # Normalise tokens once (quotes, leading shell metachars, VAR=/if= prefixes).
+    # Split on whitespace AND on shell operators: an operator glued to a file
+    # name is not part of the name. Splitting on whitespace only let
+    # `cat .env|head`, `cat .env;echo x`, `cat .env&& …` through without an
+    # override — `.env|head` does not look like an environment file.
+    # Measured 2026-10-01. Paths with a directory were never affected: those
+    # go through the path comparison, not the name. Split only where the shell
+    # reads the operator — not inside quotes (_free_operators).
     tokens = []
-    for raw in cleaned.split():
+    for raw in _free_operators(cleaned).split():
         tok = raw.strip("'\"").lstrip("<>|&;()")
         # A long option with '=' can carry a path as its value:
         # --upload-file=PATH, --post-file=PATH. Take the part after the first

