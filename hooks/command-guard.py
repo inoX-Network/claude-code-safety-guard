@@ -1490,13 +1490,12 @@ _IFS_RE = re.compile(r"\$\{IFS[^}]*\}|\$IFS\b")
 # Path-like substrings inside opaque interpreter code (~/..., /abs/..., $HOME/...).
 _PATHLIKE_RE = re.compile(r"(?:~|\$\{?HOME\}?|/)[\w./+\-]*")
 
-# Detects a .env-style filename inside opaque interpreter code, on a word boundary.
-# Used instead of a plain `".env" in command` substring test, which false-positives
-# on os.environ / .environment (both contain ".env"). Matches .env, .envrc,
-# .env.local, .env.production — must be preceded by start/separator and followed by
-# end/separator. .envrc is included for parity with check_env_file_read (which also
-# treats it as a .env file via startswith). os.environ / .environment do NOT match.
-_ENV_RE = re.compile(r"""(?:^|[/\s='"])\.env(rc|\.[\w.\-]+)?(?=$|[\s'":])""")
+# A quoted string inside opaque interpreter code that contains `.env`. Whether it
+# IS an environment file is decided by check_env_file_read, the same rule the
+# token scan uses: `config/prod.env` counts; `.env.example`, `os.environ` and
+# `.environment` do not. A pattern of its own, applied to the whole line, missed
+# the first and refused the second (measured 2026-10-01).
+_ENV_IN_CODE_RE = re.compile(r"""["'][^"']*\.env[^"']*["']""")
 
 
 # Two more rewrites the shell performs before anything runs, and the guard was
@@ -4083,7 +4082,8 @@ def command_hits_protected_read(command: str, rules: dict,
                                                           session_id)
             if blocked:
                 return True, reason, not hard
-        if env_patterns and _ENV_RE.search(command):
+        if env_patterns and any(check_env_file_read(s.strip("\"'"), env_patterns)
+                                for s in _ENV_IN_CODE_RE.findall(inline)):
             override = load_override(agent_id, session_id)
             if not override or override.get("override_level", 0) < 1:
                 return True, msg("read.env_file_inline"), True

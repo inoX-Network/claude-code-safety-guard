@@ -9,6 +9,30 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01-5
+
+### Security — an environment file named inside interpreter inline code
+
+- `python3 -c "print(open('config/prod.env').read())"` ran without an approval,
+  while `cat config/prod.env` is refused. The inline-code check used a pattern
+  of its own over the whole command line and never asked
+  `check_env_file_read` — so the `name.env` form (docker compose `env_file`)
+  was unknown there.
+- The other side of the same split: templates were refused inside inline code
+  (`open('.env.example')`), and even after it — `python3 -c "…" .env.example`
+  or `python3 -c "…" && git add .env.example` needed an override.
+- The inline check now takes every quoted string of the inline code that
+  contains the suffix and asks `check_env_file_read` — one rule for the token
+  scan and the inline code.
+- New test `tests/test_env_file_in_inline_code.py`, both directions — 10/15
+  before, 15/15 after; 4/4 mutations killed, each on the expected case.
+
+Changes what the guard blocks: **yes**. Replayed against the maintainer's audit
+log: 276 commands with inline code and the suffix → **1 newly blocked**, a
+Python heredoc searching for the text `"shell.env"` (the same rule refuses
+`cat shell.env`); **2 newly allowed**, both `git add .env.example` behind a
+`python3 -c`.
+
 ## 2026.10.01-4
 
 ### Security — the directory read gate behind a word it does not know
