@@ -26,7 +26,7 @@
     "grant-override",
     "hook-dev-mode"
   ],
-  "_comment_blocked_git_ops": "Git safety checks: never to be bypassed by an override. The +refspec entry catches a force-push written as a refspec whose leading '+' forces the update (e.g. 'git push origin +main') -- the --force/-f patterns miss it. It requires a remote token before the +refspec, so an arithmetic 'a + b' inside a heredoc does not match.",
+  "_comment_blocked_git_ops": "Git safety checks: never to be bypassed by an override. The +refspec entry catches a force-push written as a refspec whose leading '+' forces the update (e.g. 'git push origin +main') -- the --force/-f patterns miss it. It requires a remote token before the +refspec, so an arithmetic 'a + b' inside a heredoc does not match. The three core.hooksPath entries catch the other way around the commit hooks: pointing git at an empty hooks directory for one call (-c, --config-env, or GIT_CONFIG_KEY_n in the environment) does what --no-verify does.",
   "blocked_git_ops": [
     "git\\s+reset\\s+--hard",
     "git\\s+push\\s+(-f|--force(-with-lease)?)(\\s|$)",
@@ -35,7 +35,10 @@
     "git\\s+commit\\s+.*--amend",
     "git\\s+add\\s+(-A|--all)(\\s|$)",
     "git\\s+add\\s+\\.(\\s|$)",
-    "git\\s+config\\s+(?!(--get|--list|-l)\\b)"
+    "git\\s+config\\s+(?!(--get|--list|-l)\\b)",
+    "-c\\s+core\\.hooksPath",
+    "--config-env\\s*=\\s*core\\.hooksPath",
+    "GIT_CONFIG_KEY_[0-9]+\\s*=\\s*core\\.hooksPath"
   ],
   "_comment_protected_git_branches": "Branches that must not receive a commit directly. Only 'git commit' is checked -- merge and pull also create commits but belong to the merge path a human drives. Reading (status, log, diff) stays untouched. Empty list = check off.",
   "protected_git_branches": [
@@ -45,16 +48,15 @@
   "blocked_paths_write": [
     "~/.ssh",
     "~/.gnupg",
-    "/etc/passwd",
-    "/etc/shadow",
-    "/etc/sudoers",
-    "/etc/fstab",
+    "/etc",
     "/boot",
     "/usr/bin",
     "/usr/sbin",
     "/usr/lib",
     "/sbin",
-    "/bin"
+    "/bin",
+    "/usr/local/bin",
+    "/usr/local/sbin"
   ],
   "_comment_blocked_paths_delete": "Paths that may be CHANGED but not DESTROYED. Deleting is not the same as writing: 'this data is valuable' almost always means don't throw it away, not don't touch it. Putting ~/.claude/projects into blocked_paths_write would also block writing a single memory entry -- and a barrier that blocks everyday maintenance gets switched off within the week. Covered verbs: rm, rmdir, unlink, shred, truncate, mv, dd, plus find -delete / rsync --delete / git clean and interpreter one-liners (shutil.rmtree and friends). Redirects deliberately do NOT count -- 'echo x > file' is the ordinary maintenance path. Level 1 lifts it for explicitly named paths.",
   "_comment_blocked_paths_delete": "Deleting is not writing -- these paths may be changed but not thrown away. The guard's own directories are listed because self-protection covers the FILES in them; naming the DIRECTORY removes them as a side effect, and the rules directory is the first step of an escalation chain (delete rules -> fallback ruleset -> approval script no longer owner-only). Measured over 216972 real commands: 88 hit ~/.claude/hooks with a delete form, 1 of which was previously allowed. Adjust the last entry if your rules file lives elsewhere -- guard-config.json says where.",
@@ -67,7 +69,7 @@
   ],
   "_comment_blocked_recursive_delete": "Tree roots that must not be deleted as a WHOLE -- your most valuable directories below the home directory, e.g. \"~/Projects\" or \"/mnt/data\". Two steps, like the fixed rule for '/': the root itself blocks with every delete verb (rm, rmdir, mv away), one level below it only a recursive delete does (rm -rf, find -delete, find | xargs rm). From two levels down the rule is off, and single files, writing and editing stay free everywhere -- unlike blocked_paths_delete, which protects every file in the tree. Level 1 with a matching allowed_paths entry lifts it. Empty here because the right roots depend on your machine; '/' and '~' themselves are protected without any entry. Measured on the maintainer's machine over 97,905 log entries: zero deletes of ~/Projekte itself and 5 one level below, all single files -- the rule cost no real work there.",
   "blocked_recursive_delete": [],
-  "_comment_allowed_sudo": "Commands allowed with raised rights on level 0. The read-only ones at the end are NOT a relaxation of the read guard: protected_reads applies regardless of this list, so `sudo cat /etc/shadow` stays refused while `sudo cat /var/log/syslog` runs. Measured -- tests/test_readonly_sudo_allowlist.py pins it down. Their absence caused 47 of 910 real refusals without protecting anything.",
+  "_comment_allowed_sudo": "Commands allowed with raised rights on level 0. The read-only ones at the end are NOT a relaxation of the read guard: protected_reads applies regardless of this list, so `sudo cat /etc/shadow` stays refused while `sudo cat /var/log/syslog` runs. Measured -- tests/test_readonly_sudo_allowlist.py pins it down. Their absence caused 47 of 910 real refusals without protecting anything. find is listed for searching; its actions that run or write (-exec, -execdir, -ok, -okdir, -delete, -fprint*, -fls) still need an approval -- with -exec it would hand a root shell to anything. Every command on this list runs as root without an approval; what cp, mv or tee may write is limited only by blocked_paths_write.",
   "allowed_sudo": [
     "ls",
     "grep",

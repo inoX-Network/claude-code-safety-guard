@@ -9,6 +9,50 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01-7
+
+### Security — ways to root and around the commit hooks in the example rules
+
+The code caught all of these with the maintainer's rules; the rules shipped to
+new installations did not. Measured against 2026.10.01-6 with
+`security-rules.example.json`, all on level 0, all ran without an approval:
+
+- **Commit hooks switched off for one call:** `git -c core.hooksPath=/dev/null
+  commit` does what `--no-verify` does. Three spellings now blocked in the
+  example and the built-in fallback: `-c`, `--config-env`,
+  `GIT_CONFIG_KEY_n` in the environment.
+- **Root shell through `sudo find`:** `find` is on the allowlist for searching,
+  and `-exec` hands a root shell to anything. Searching stays free; the
+  actions that run or write — `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`,
+  `-fprint*`, `-fls` — now need an approval, like `systemctl start` already did.
+- **Root writes below `/etc`:** the example protected four files there, so
+  `sudo tee /etc/cron.d/x` and `sudo cp x /etc/sudoers.d/x` ran. `/etc` is
+  protected as a whole now, as announced in 2026.10.01-3.
+- **`/usr/local/bin` and `/usr/local/sbin`** are protected — a file there
+  shadows the system command for every later call (`sudo mv x
+  /usr/local/bin/ls` ran).
+
+The built-in fallback (no rules file) also gets what the example or the
+maintainer's rules already had: `/usr/local/bin`, `/usr/local/sbin`,
+`chgrp -R` on system paths, `~/.npmrc` and `~/.docker/config.json`.
+
+New test `tests/test_example_rules_root_paths.py` — 8/24 before, 24/24 after;
+16/16 mutations killed, each on the expected case. One older case moved:
+"a grant on `/etc` is too broad for `/etc/fstab`" assumed the file-level entry;
+the same rule is now pinned with `/usr` above `/usr/bin`.
+
+Changes what the guard blocks: **yes**, for new installations — your existing
+rules file is not touched by an update; copy the entries over if you want
+them. Replayed over 5,911 real commands with sudo, a system path or the hooks
+setting: **101 newly blocked, 0 newly allowed.** Nearly all are probes of
+exactly these holes; real work among them: two `sudo find … -exec` on a
+server, one deploy into `/usr/local/bin` on a server, and three commit or log
+messages that name a path under `/etc`.
+
+Not changed, and worth deciding for yourself: `apt` and `apt-get` stay on the
+example allowlist. `sudo apt-get install ./x.deb` runs a package's install
+scripts as root.
+
 ## 2026.10.01-6
 
 ### New rule section — trees that must not be deleted as a whole

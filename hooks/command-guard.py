@@ -1770,14 +1770,18 @@ _FALLBACK_RULES = {
         r"wget\s+[^|]*\|\s*sh", r"wget\s+[^|]*\|\s*bash",
         r"chown -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
         r"chmod -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
+        r"chgrp -R.*(/etc|/usr|/var|/lib|/bin|/sbin|/boot)",
     ],
+    # /usr/local/bin comes before /usr/bin in PATH: a file written there
+    # shadows the system command for every later call.
     "blocked_paths_write": [
         "~/.ssh", "~/.gnupg", "/etc", "/boot", "/usr/bin", "/usr/sbin",
-        "/usr/lib", "/sbin", "/bin",
+        "/usr/lib", "/sbin", "/bin", "/usr/local/bin", "/usr/local/sbin",
     ],
     "protected_reads": {
         "always_blocked_reads": ["/etc/shadow", "/etc/gshadow"],
-        "require_override_1": ["~/.ssh/id_", "~/.aws/credentials", "~/.gnupg/"],
+        "require_override_1": ["~/.ssh/id_", "~/.aws/credentials", "~/.gnupg/",
+                               "~/.npmrc", "~/.docker/config.json"],
         "always_allowed": ["~/.ssh/config", "~/.ssh/known_hosts", "~/.ssh/*.pub"],
         "env_files_require_override_1": [".env"],
     },
@@ -1809,6 +1813,10 @@ _FALLBACK_RULES = {
         r"git\s+commit.*--no-verify", r"git\s+commit\s+.*--amend",
         r"git\s+add\s+(-A|--all)(\s|$)", r"git\s+add\s+\.(\s|$)",
         r"git\s+config\s+(?!(--get|--list|-l)\b)",
+        # An empty hooks directory for one call does what --no-verify does.
+        r"-c\s+core\.hooksPath",
+        r"--config-env\s*=\s*core\.hooksPath",
+        r"GIT_CONFIG_KEY_[0-9]+\s*=\s*core\.hooksPath",
     ],
     "protected_git_branches": ["main", "master"],
     # The tool chain's own transcripts and memory. Not self-protection — user
@@ -2373,6 +2381,17 @@ _SUDO_READONLY_SUBCOMMANDS = {
                "-Ss", "-Si", "-Sl", "-Sg", "-V", "-T"},
 }
 
+# Options that turn a searching tool into one that runs or writes as root. `find`
+# is on the example allowlist for searching (`sudo find /var/log -name x`), but
+# -exec hands every match -- and anything else -- to a command running as root:
+# measured 2026-10-01, `sudo find / -maxdepth 0 -exec bash -c id \;` passed with
+# the example rules. -delete removes as root what `sudo rm` may not, the -fprint
+# family writes a file as root.
+_SUDO_ACTION_OPTIONS = {
+    "find": {"-exec", "-execdir", "-ok", "-okdir", "-delete",
+             "-fprint", "-fprint0", "-fprintf", "-fls"},
+}
+
 
 def _first_subcommand(tokens: list[str], flags_count: bool = False) -> str:
     """Erster echter Unterbefehl; Optionen und ihre Werte werden uebersprungen.
@@ -2690,6 +2709,12 @@ def check_sudo(command: str, allowed: list[str],
             sub = _first_subcommand(rest_tokens, flags_count=(cmd_after_sudo == "pacman"))
             if sub and sub not in table:
                 return f"{cmd_after_sudo} {sub}"
+        actions = _SUDO_ACTION_OPTIONS.get(cmd_after_sudo) \
+            if check_subcommands else None
+        if actions:
+            action = next((t for t in rest_tokens if t in actions), None)
+            if action:
+                return f"{cmd_after_sudo} {action}"
     return None
 
 
