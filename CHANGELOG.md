@@ -9,6 +9,39 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01-3
+
+### Security — three detours around the write guard
+
+- **Traversal target in Write/Edit.** The write gate compared the target with
+  `expand_path` only: `/tmp/../boot/x`, `/var/../usr/bin/x`,
+  `/opt/x/../../sbin/x` were written without any approval. The target is now
+  normalised (`_norm_path`), as the read gate already did.
+- **Backslash in front of a path.** The shell turns `\/boot/x` into `/boot/x`;
+  the backslash was not a valid path start, so `cp x \/boot/x` and
+  `echo x > \/boot/x` ran through. It is one now.
+- **Unset variable in front of a path.** `cp x $UNSET/boot/x` writes to
+  `/boot/x` — the variable is empty. The comparison saw a word character in
+  front and took `/boot` for the tail of another path (`${UNSET}/boot` was
+  always caught). Every segment is now also checked the way the shell sees it:
+  variables the line does not set are empty, `$HOME` is the home directory,
+  loop and `read` variables stay. Only checked in addition — no new hole is
+  possible, at most a false positive. The same gap was in the maintainer's own
+  copy and is closed there too.
+- New test `tests/test_write_target_detours.py`, both directions — 3/6 before,
+  6/6 after; 5/5 mutations killed, each on the expected case.
+
+Changes what the guard blocks: **yes**, the three detours. Replayed against the
+maintainer's audit log: 146 allowed calls with a traversal target or a
+backslash path → **16 newly blocked, all probe paths** (`/tmp/../etc/passwd`,
+`/var/../home/<user>/.ssh/authorized_keys` …), 0 ordinary work. 15,334
+allowed commands with a variable → **0 newly blocked**.
+
+Also worth knowing: the example rules protect five files under `/etc`, not
+`/etc` as a whole. `sudo tee /etc/cron.d/x` is not refused by the example
+rules — add `/etc` to `blocked_paths_write` if that matters to you. A later
+release will make that the default.
+
 ## 2026.10.01-2
 
 ### Security — `docker exec` / `run` / `attach` / `cp` on another machine need an approval
