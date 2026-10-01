@@ -9,6 +9,35 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01-8
+
+### New, off by default — the chain approval channel
+
+- An approval from a distance, without the `!` channel: the owner sends a
+  one-time value from a chain the assistant cannot predict, and the assistant
+  may run the approval script itself — in exactly ONE form, matched against
+  the whole command line. A prefix, a chained command, another script path or
+  other flags fall back to the hard owner-only block, as before.
+- Switched on in `guard-config.json` (`chain_approval`), with the script name
+  and flag names of YOUR approval script. A name or flag of an unexpected
+  shape switches the channel off. The shipped `grant-override` does not take
+  `--code` yet — leave it off until your script does.
+- `installation.approval_scripts` (default `~/.claude/bin`) is read now, and a
+  configured directory is **added to self-protection** — the channel runs a
+  script from there, so the directory must not be writable for the assistant.
+  Dev mode does not open it, exactly like the default `~/.claude/bin` (the
+  suite caught a first version that put it on the dev-mode list).
+- `.beispiel` and `.vorlage` count as template suffixes for environment files,
+  next to `.example` and `.sample`.
+
+New test `tests/test_chain_approval_switch.py` — 11/19 before, 19/19 after;
+9/9 mutations killed, each on the expected case. Against the maintainer's copy,
+where this channel has run since September: identical verdicts on 156 real
+commands naming the approval script and 8 edge cases.
+
+Changes what the guard blocks: **no**, unless you switch the channel on. The
+two template suffixes stop refusals of `.env.beispiel` / `.env.vorlage`.
+
 ## 2026.10.01-7
 
 ### Security — ways to root and around the commit hooks in the example rules

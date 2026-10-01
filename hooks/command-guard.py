@@ -598,8 +598,17 @@ def _redirected_startup_files() -> list[str]:
     return targets
 
 
+# A configured approval-scripts directory is self-protected like the default
+# ~/.claude/bin: the chain approval channel (_chain_approval_re) runs a script
+# from it, and a directory the assistant could write to would turn that
+# exception into a door. Kept OUT of _installation_self_protect on purpose —
+# that list is what dev mode may open, and the approval scripts must stay shut
+# even then.
+_APPROVAL_SCRIPTS_DIR = [p for p in [str(_config_path("approval_scripts", "")).strip()] if p]
+
 SELF_PROTECT_PATHS = (_BUILTIN_SELF_PROTECT + _SHELL_STARTUP_FILES
-                      + _redirected_startup_files() + _installation_self_protect())
+                      + _redirected_startup_files() + _installation_self_protect()
+                      + _APPROVAL_SCRIPTS_DIR)
 
 # Project-local control files — a RULE, not a list of places.
 #
@@ -3766,6 +3775,54 @@ def check_force_push(command: str, patterns: list[str]) -> str | None:
     return _git_patterns_hit(command, patterns)
 
 
+# The chain approval channel: the ONE form in which the assistant may run the
+# approval script itself. The owner sends a one-time value from a chain the
+# assistant cannot predict (it only knows the anchor, from which no earlier
+# value can be computed). Matched with fullmatch against the WHOLE command
+# line: no prefix, no chaining, no substitution, no interpreter in front, no
+# other script path. Every deviation falls back to the hard owner-only block.
+#
+# Off unless switched on in the configuration (`chain_approval`). Script name
+# and flag names come from there, because the approval script's interface
+# belongs to the installation; a name or flag of an unexpected shape switches
+# the channel off rather than being escaped into a looser pattern. The
+# directory is installation.approval_scripts, which is self-protected
+# (_installation_self_protect) — a writable directory would make this a door.
+_CHAIN_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+_CHAIN_FLAG_RE = re.compile(r"--[a-z][a-z-]{0,31}")
+
+
+def _chain_approval_re():
+    """The compiled allowed form, or None when the channel is off."""
+    cfg = _CONFIG.get("chain_approval")
+    if not isinstance(cfg, dict) or cfg.get("enabled") is not True:
+        return None
+    script, flags = cfg.get("script"), cfg.get("flags")
+    if not isinstance(flags, dict):
+        return None
+    level, scope, minutes = flags.get("level"), flags.get("scope"), flags.get("minutes")
+    if not (isinstance(script, str) and _CHAIN_NAME_RE.fullmatch(script)
+            and all(isinstance(f, str) and _CHAIN_FLAG_RE.fullmatch(f)
+                    for f in (level, scope, minutes))):
+        return None
+    directory = str(_config_path("approval_scripts", "~/.claude/bin")).rstrip("/")
+    spellings = [directory, expand_path(directory)]
+    return re.compile(
+        "(?:" + "|".join(re.escape(s) for s in dict.fromkeys(spellings)) + ")/"
+        + re.escape(script)
+        + r"\s+--code\s+[0-9a-fA-F]{4}(?:-?[0-9a-fA-F]{4}){4}"
+        + r"\s+[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+        + r"\s+" + re.escape(level) + r"\s+[123]"
+        + r"\s+" + re.escape(scope) + r"\s+/[A-Za-z0-9_./-]*"
+        + r"(?:\s+" + re.escape(minutes) + r"\s+[0-9]{1,4})?")
+
+
+def is_chain_approval(command: str) -> bool:
+    """Does the command match the allowed chain approval form exactly?"""
+    form = _chain_approval_re()
+    return form is not None and form.fullmatch(command.strip()) is not None
+
+
 # Tools that only PRINT or READ their arguments. When one of these sits at the
 # command position, an owner-only name behind it is text, not a call.
 #
@@ -3922,7 +3979,7 @@ def check_git_safety(command: str, patterns: list[str]) -> str | None:
 # with one of these names loses the protection. The naming convention is
 # unambiguous enough that the trade is worth it.
 _ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist",
-                          ".defaults")
+                          ".defaults", ".beispiel", ".vorlage")
 
 # Trailing punctuation from surrounding prose or code (`"…/.env.example",`) must
 # not defeat the suffix check — that turned the exemption off exactly where it
@@ -4586,7 +4643,7 @@ def main():
     # 1b. Owner-exclusive commands — ALWAYS blocked for AI Bash, no override.
     #     Only the owner's !-invocation bypasses the guard and reaches the script.
     owner_only = check_owner_only(command, rules.get("owner_only_commands", []))
-    if owner_only:
+    if owner_only and not is_chain_approval(command):
         _audit(input_data, "Bash", command, "block", f"owner_only:{owner_only}", "hard")
         print(msg("bash.owner_only", command=owner_only), file=sys.stderr)
         sys.exit(2)

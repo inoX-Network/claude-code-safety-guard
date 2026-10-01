@@ -19,7 +19,21 @@
     "dev_window": "~/.claude/.hook-dev-mode",
 
     "_comment_lang_dir": "Where the language files live, if not next to the hook. Only needed when the hook is a single file somewhere the lang/ directory could not follow.",
-    "lang_dir": "~/.claude/hooks/lang"
+    "lang_dir": "~/.claude/hooks/lang",
+
+    "_comment_approval_scripts": "Directory of the owner's approval scripts. Default: ~/.claude/bin. A configured directory is added to self-protection, like rules and hook_source -- the chain approval channel below runs a script from here.",
+    "approval_scripts": "~/.claude/bin"
+  },
+
+  "_comment_chain_approval": "Approving from a distance, without the ! channel. OFF unless enabled. When on, the assistant may run the approval script itself in exactly ONE form: '<approval_scripts>/<script> --code <one-time value> <id> <level flag> 1|2|3 <scope flag> /path [<minutes flag> N]'. Matched against the whole command line -- any prefix, chained command or other path falls back to the hard owner-only block. The one-time value comes from the owner and must be unpredictable for the assistant; the approval script checks it. Script name and flag names describe YOUR approval script's interface. The shipped grant-override does not take --code yet, so leave this off until your script does.",
+  "chain_approval": {
+    "enabled": false,
+    "script": "grant-override",
+    "flags": {
+      "level": "--expect-level",
+      "scope": "--expect-scope",
+      "minutes": "--minutes"
+    }
   },
 
   "_comment_update_check": "Check once a day whether a newer guard is published, and say so at session start. OFF by default and it is the ONLY part of this tool that contacts anything: a security tool that phones home uninvited spends the trust it needs, so this is your decision, not the default. Turn it on and one plain-text request per interval goes to the source below; the answer must look like a date or it is ignored, and nothing fetched is ever executed. It only REPORTS — installing an update stays a separate, deliberate step. Any failure (no network, bad answer, unreadable file) ends in silence rather than a daily complaint.",
