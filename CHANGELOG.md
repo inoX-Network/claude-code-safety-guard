@@ -9,6 +9,41 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.01-2
+
+### Security — `docker exec` / `run` / `attach` / `cp` on another machine need an approval
+
+- Locally these four stay free — test runs and throwaway containers are
+  everyday work. On another machine stands the production system. In the
+  maintainer's own setup a remote call, inside it an `exec` into the service
+  container, inside that a Python process, deleted rows from a production
+  database without any approval (2026-08-18). The maintainer's copy has
+  refused that shape since; this release brings it here.
+- Remote means: `ssh` / `mosh` at the command position, also behind a
+  wrapper (`timeout 5 ssh …`, `nice ssh …`); a container call with its own
+  target (`-H`, `--host`, `--context`); and the quoted text behind `ssh`,
+  `eval` or `sh -c`.
+- That quoted text now ends at the **same** quote it started with. Ending at
+  any quote turned `ssh h "echo 'x'; docker exec db rm -rf /data"` into
+  `echo ` and judged the rest as a local command. An unclosed quote takes the
+  rest of the line.
+- Measured against 2026.10.01 with the example rules — all of these ran
+  **without any approval**: `ssh prod "docker exec db ls"`,
+  `ssh prod docker cp evil.sh web:/app/`, `timeout 5 ssh prod docker exec …`,
+  `docker -H ssh://prod exec db ls`, `docker --context prod exec db ls`,
+  `bash -c "echo 'p'; ssh prod docker exec db psql"`.
+- New test `tests/test_remote_container_exec.py`: 18 remote cases blocked,
+  12 local / read-only / prose cases free — 0/18 before, 18/18 after.
+  9/9 mutations killed, each on the remote half.
+
+Changes what the guard blocks: **yes** — remote `exec`/`run`/`attach`/`cp`.
+Replayed against 9,897 previously allowed commands with `docker`/`podman` from
+the maintainer's audit log: **1,130 newly need an approval** — 1,102 from before
+2026-08-18, when nobody asked; 28 from the weeks after, every one a real
+`docker exec` into a production container over `ssh`, refused by the
+maintainer's copy today. No local call is affected. If your workflow runs
+`exec` on a server routinely, expect one approval per task.
+
 ## 2026.10.01
 
 ### Security — an operator glued to an environment file, `chmod 777` in any spelling

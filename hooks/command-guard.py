@@ -348,9 +348,11 @@ _MESSAGES = {
     ),
     "lifecycle.needs_override": (
         "BLOCKED: '{command}' changes or tears down and requires override "
-        "level 1+. Read-only forms (ps, logs, inspect, exec, run, build) run "
-        "without an approval. ESCALATION: the agent writes an override proposal "
-        "into the pending directory and asks the owner to approve it."
+        "level 1+. Read-only forms (ps, logs, inspect, images, stats) run "
+        "without an approval; exec, run, attach and cp only LOCALLY — not "
+        "through a remote call, because the production system stands there. "
+        "ESCALATION: the agent writes an override proposal into the pending "
+        "directory and asks the owner to approve it."
     ),
     "injection.context": (
         "command-guard: this command contains words that often appear in "
@@ -2259,6 +2261,21 @@ _CONTAINER_FREE = {
     "pull", "push", "tag", "search", "wait", "attach", "df",
 }
 
+# Four of those do NOT only show something: executing inside a running
+# container, starting a new one, attaching to a running process and copying
+# files in bring foreign code or files INTO the container. The read-only label
+# never fits them.
+#
+# LOCALLY they stay free anyway: test runs and throwaway containers are
+# everyday work, and an approval per test run is exactly the fatigue that eats
+# a guard — people click it through without looking.
+#
+# BEYOND A REMOTE CALL stands the production system. On 2026-08-18 the
+# author's own setup deleted rows from a production database this way without
+# any approval: a remote call, inside it an exec into the service container,
+# inside that a Python process. Each station on its own counted as harmless.
+_CONTAINER_LOCAL_ONLY_FREE = {"exec", "run", "attach", "cp"}
+
 _CONTAINER_GROUP_FREE = {
     "volume": {"ls", "inspect"},
     "network": {"ls", "inspect"},
@@ -2292,17 +2309,6 @@ _SUDO_READONLY_SUBCOMMANDS = {
 }
 
 
-# Options that carry their own VALUE. Without this list the check mistakes
-# the value for the subcommand: a compose call with a file option would read
-# the file name and fail — on the most common call there is.
-_CONTAINER_VALUE_FLAGS = {
-    "-f", "--file", "-p", "--project-name", "--env-file", "--project-directory",
-    "-H", "--host", "--context", "-c", "--profile", "-l", "--log-level",
-    "--ansi", "--parallel", "--progress", "-u", "--user", "-w", "--workdir",
-    "-e", "--env", "-v", "--volume", "--network", "--name", "--label",
-}
-
-
 def _first_subcommand(tokens: list[str], flags_count: bool = False) -> str:
     """Erster echter Unterbefehl; Optionen und ihre Werte werden uebersprungen.
 
@@ -2321,8 +2327,13 @@ def _first_subcommand(tokens: list[str], flags_count: bool = False) -> str:
     return ""
 
 
-def _container_subcommand_free(rest: str) -> tuple[bool, str]:
-    """May this container call run without an approval?"""
+def _container_subcommand_free(rest: str,
+                               remote: bool = False) -> tuple[bool, str]:
+    """May this container call run without an approval?
+
+    ``remote=True`` for calls that land on ANOTHER machine. There the four
+    forms in ``_CONTAINER_LOCAL_ONLY_FREE`` do not count as free.
+    """
     tokens = rest.split()
     first = _first_subcommand(tokens)
     if not first:
@@ -2331,12 +2342,65 @@ def _container_subcommand_free(rest: str) -> tuple[bool, str]:
         rest_tokens = tokens[tokens.index(first) + 1:] if first in tokens else []
         second = _first_subcommand(rest_tokens)
         return second in _CONTAINER_GROUP_FREE[first], f"{first} {second}".strip()
+    if remote and first in _CONTAINER_LOCAL_ONLY_FREE:
+        return False, first
     return first in _CONTAINER_FREE, first
+
+
+# Commands that run what follows on ANOTHER machine.
+_REMOTE_COMMANDS = ("ssh", "mosh")
+
+# A container call can also bring its own target, without any ssh.
+_REMOTE_TARGET_RE = re.compile(r"(?:^|\s)(?:-H\b|--host\b|--context\b)")
+
+
+def _is_remote_call(segment: str) -> bool:
+    """Does this segment land on another machine?
+
+    Tied to the COMMAND POSITION, not to a text search: the word in a message or
+    a search pattern must not trigger an approval — that is the class of error
+    that makes a watchdog lose credibility.
+
+    A container call with its own target (``-H``, ``--host``, ``--context``)
+    counts as remote too. Without that branch the same path ran around it
+    without ssh.
+
+    The remote command may also sit BEHIND a wrapper (`timeout 5 ssh`,
+    `nice ssh`) — the same rule as in _is_container_command, way 2. The search
+    runs up to the container word; what follows are its arguments.
+    """
+    tokens = _segment_tokens(segment)
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t in _PREFIX_TOKENS or "=" in t.split("/")[0] or t.startswith("-"):
+            i += 1
+            continue
+        break
+    for t in tokens[i:]:
+        name = os.path.basename(t)
+        if name in _REMOTE_COMMANDS:
+            return True
+        if name in ("docker", "podman"):
+            break
+    return bool(_REMOTE_TARGET_RE.search(segment))
 
 
 # Pass-through wrappers: the string behind them runs on a shell, where the
 # same rules apply. Without this branch the remote path would be a hole.
-_PASSTHROUGH_RE = re.compile(r"""\b(?:ssh|eval|[a-z]*sh\s+-c)\b[^"']*["']([^"']+)["']""")
+#
+# The string ends at the SAME quote it started with — in double quotes at the
+# next unescaped ", in single quotes at the next '. If it is missing, the rest
+# of the line counts. Ending at ANY quote let
+# `ssh h "echo 'x'; docker exec db rm -rf /data"` through as `echo `: the
+# remote call was judged as a local container command.
+#
+# A single trailing backslash is allowed: the obfuscation normalisation drops
+# empty "" pairs without looking at escapes, turning `\""` at the end of a line
+# into `\`. Without `\\.?` the pattern failed on it entirely.
+_PASSTHROUGH_RE = re.compile(
+    r"""\b(?:ssh|eval|[a-z]*sh\s+-c)\b[^"']*"""
+    r"""(?:"((?:[^"\\]|\\.?)*)(?:"|$)|'([^']*)(?:'|$))""")
 
 # Prefixes that may sit in front of the actual command.
 _PREFIX_TOKENS = ("sudo", "doas", "command", "env", "nohup", "time")
@@ -2407,15 +2471,21 @@ def check_lifecycle(command: str) -> str | None:
     Every segment of the line is checked, plus the contents of every pass-through
     wrapper, so a remote invocation cannot slip past.
     """
-    to_check = [command]
+    to_check = [(command, False)]
     for hit in _PASSTHROUGH_RE.finditer(command):
-        to_check.append(hit.group(1))
-    for text in to_check:
+        to_check.append((hit.group(1) or hit.group(2) or "", True))
+    for text, remote_by_passthrough in to_check:
         for segment in split_segments(text):
             rest = _is_container_command(segment)
             if rest is None:
                 continue
-            free, named = _container_subcommand_free(rest)
+            # BOTH ways must apply: the contents of a pass-through are remote
+            # per se, but a remote call WITHOUT quotes never matches the
+            # pass-through pattern — it is only recognised here, at the
+            # segment's command position. Without the second branch the
+            # distinction could be dodged by leaving out the quotes.
+            remote = remote_by_passthrough or _is_remote_call(segment)
+            free, named = _container_subcommand_free(rest, remote=remote)
             if not free:
                 return named
     return None
