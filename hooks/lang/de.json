@@ -22,6 +22,7 @@
   "path.delete_blocked": "BLOCKIERT: Löschen in geschütztem Pfad '{path}' — Ändern und Schreiben bleiben dort erlaubt. {extra}Benötigt: {needed}. ESKALATION: Der Agent fragt den Koordinator → der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei.",
   "root_delete.always": "BLOCKIERT: Löschen oder Wegschieben von '{path}' — die Wurzel des Dateisystems oder das Heimatverzeichnis, gleich in welcher Schreibweise. IMMER blockiert (kein Override); nur der Eigentümer via !.",
   "root_delete.first_level": "BLOCKIERT: Rekursives Löschen von '{path}' — ein ganzer Baum direkt unter der Wurzel des Dateisystems. {extra}Benötigt: {needed}. ESKALATION: Der Agent fragt den Koordinator → der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei.",
+  "root_delete.configured_tree": "BLOCKIERT: Rekursives Löschen nahe der Wurzel von '{path}' — ein ganzer Baum, nicht eine Datei darin (blocked_recursive_delete). Einzelne Dateien dort löschen bleibt erlaubt, ebenso Schreiben und Ändern. {extra}Benötigt: {needed}. ESKALATION: Der Agent fragt den Koordinator → der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei.",
   "who.agent": "Agent {agent}",
   "who.main": "Hauptsitzung",
   "override.none": "{who} hat keinen gültigen Override (Stufe 0).",

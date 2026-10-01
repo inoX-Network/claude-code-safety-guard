@@ -9,6 +9,7 @@ The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see 
 | `blocked_git_ops` | `string[]` | Always-blocked git operations (regex). |
 | `blocked_paths_write` | `string[]` | Paths protected from writes (supports `~`); level-dependent. |
 | `blocked_paths_delete` | `string[]` | Paths that may be **changed but not destroyed** (supports `~`); level-dependent. See below. |
+| `blocked_recursive_delete` | `string[]` | Tree roots that must not be deleted **as a whole** (supports `~` and globs in the command). The root itself blocks with every delete verb (`rm`, `rmdir`, `mv` away), one level below only a recursive delete (`rm -rf`, `find -delete`, `find | xargs rm`); from two levels down the rule is off. Single files, writing and editing stay free. Level 1+ with a matching `allowed_paths` entry lifts it. `/` and `~` themselves are protected without an entry. |
 | `allowed_sudo` | `string[]` | Base allowlist of commands permitted after `sudo`. |
 | `require_confirmation` | `string[]` | Substrings that trigger a desktop notification. |
 | `protected_reads.always_allowed` | `string[]` | Read tool may always access (supports `*` globs). |
@@ -31,8 +32,8 @@ The hook reads its rules from `~/.claude/safety-guard/security-rules.json` (see 
 `protected_git_branches` or `mcp_policy` is **absent**, the hook uses its
 built-in default for it and tells the model once per session. An explicit
 empty value (`[]`, `{}`) is kept as written — that is the way to switch a
-section off. `allowed_sudo`, `require_confirmation`, `prompt_injection_keywords`
-and `docker` have no default; absent means "not configured". This matters after
+section off. `allowed_sudo`, `require_confirmation`, `prompt_injection_keywords`,
+`docker` and `blocked_recursive_delete` have no default; absent means "not configured". This matters after
 an update, which never changes your rules file: see INSTALL.md, section F.
 
 ### Override file format

@@ -418,8 +418,9 @@ missing from your file until you add it yourself.
   is a decision and stays in force; only a key that is not there at all gets
   the default. This is the way to turn a section off on purpose.
 - **Optional sections have no default.** `allowed_sudo`, `require_confirmation`,
-  `prompt_injection_keywords` and `docker` mean "not configured" when missing
-  (for `docker`, the escape flags are hardcoded and hold anyway).
+  `prompt_injection_keywords`, `docker` and `blocked_recursive_delete` mean
+  "not configured" when missing (for `docker`, the escape flags are hardcoded
+  and hold anyway; for `blocked_recursive_delete`, `/` and `~` stay protected).
 - **You are told once per session.** On the first allowed tool call, the hook
   hands the model a note naming the missing sections, and asks it to tell you.
   Claude Code has no channel from an allowing hook straight to your screen;

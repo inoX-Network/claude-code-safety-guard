@@ -65,6 +65,8 @@
     "~/.claude/rules",
     "~/.claude/safety-guard"
   ],
+  "_comment_blocked_recursive_delete": "Tree roots that must not be deleted as a WHOLE -- your most valuable directories below the home directory, e.g. \"~/Projects\" or \"/mnt/data\". Two steps, like the fixed rule for '/': the root itself blocks with every delete verb (rm, rmdir, mv away), one level below it only a recursive delete does (rm -rf, find -delete, find | xargs rm). From two levels down the rule is off, and single files, writing and editing stay free everywhere -- unlike blocked_paths_delete, which protects every file in the tree. Level 1 with a matching allowed_paths entry lifts it. Empty here because the right roots depend on your machine; '/' and '~' themselves are protected without any entry. Measured on the maintainer's machine over 97,905 log entries: zero deletes of ~/Projekte itself and 5 one level below, all single files -- the rule cost no real work there.",
+  "blocked_recursive_delete": [],
   "_comment_allowed_sudo": "Commands allowed with raised rights on level 0. The read-only ones at the end are NOT a relaxation of the read guard: protected_reads applies regardless of this list, so `sudo cat /etc/shadow` stays refused while `sudo cat /var/log/syslog` runs. Measured -- tests/test_readonly_sudo_allowlist.py pins it down. Their absence caused 47 of 910 real refusals without protecting anything.",
   "allowed_sudo": [
     "ls",
