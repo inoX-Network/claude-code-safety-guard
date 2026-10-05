@@ -116,6 +116,58 @@ session so the new hook configuration is picked up.
 > All eight matchers run the **same** script. The hook decides what to check based
 > on the `tool_name` it reads from stdin, so you do not need separate scripts.
 
+### Alternative: run the hook from a release checkout
+
+Instead of copying `command-guard.py`, you can keep a git checkout of a release
+tag **inside `~/.claude/hooks`** and point a symlink at the hook in it. What
+runs is then a tagged release by construction, an update is a tag switch, and
+`git status` shows at a glance whether anything in it was changed.
+
+```bash
+# Replace <TAG> with the release you want, e.g. the latest from the releases page
+git clone --branch <TAG> https://github.com/inoX-Network/claude-code-safety-guard.git \
+    ~/.claude/hooks/safety-guard-release
+ln -sf ~/.claude/hooks/safety-guard-release/hooks/command-guard.py ~/.claude/hooks/command-guard.py
+cp ~/.claude/hooks/safety-guard-release/VERSION ~/.claude/hooks/VERSION
+```
+
+`settings.json` stays as in step 6 — it still names
+`~/.claude/hooks/command-guard.py`. Language files are found next to the
+symlink's **target**, so `hooks/lang/` comes with the checkout.
+
+Three things make this safe, and each one depends on where the checkout lives:
+
+- **Keep it under `~/.claude/hooks`.** That directory is self-protected, and
+  from 2026.10.05-2 on, a git command that acts inside a self-protected path is
+  blocked unless it only reads (`status`, `log`, `diff`, `describe` …). The AI
+  cannot `checkout`, `pull` or `reset` the guard into another state.
+- **Do not point the symlink into your working clone.** There, every branch
+  switch would swap the running guard, and an AI session working in that clone
+  commits and switches branches as a matter of course.
+- **The production location is the resolved path.** The hook recognises itself
+  through the symlink, so the test-only environment variables (section C) are
+  ignored here just as they are for a copied hook. Test against a copy, never
+  against the checkout.
+
+Updating is an owner step, run via `!` (the AI cannot run git there):
+
+```bash
+git -C ~/.claude/hooks/safety-guard-release fetch --tags
+git -C ~/.claude/hooks/safety-guard-release checkout <NEW_TAG>
+cp ~/.claude/hooks/safety-guard-release/VERSION ~/.claude/hooks/VERSION
+```
+
+To check that what runs is exactly the release `VERSION` names, both commands
+must agree and the second must print nothing:
+
+```bash
+git -C ~/.claude/hooks/safety-guard-release describe --tags --exact-match; cat ~/.claude/hooks/VERSION
+git -C ~/.claude/hooks/safety-guard-release status --porcelain
+```
+
+Dev mode opens `~/.claude/hooks` — the checkout included. That is the same
+exposure a copied hook has during a dev window, not a new one.
+
 ---
 
 ## B. Required AI context (memory / CLAUDE.md)
@@ -444,6 +496,9 @@ less CHANGELOG.md
 # 3. Which sections your rules file lacks
 python3 tools/verify-install.py
 ```
+
+Running from a release checkout (section A)? Step 1 is the tag switch shown
+there instead of the copy; steps 2 and 3 are the same.
 
 Do **not** copy `security-rules.example.json` over your rules file — that
 throws away everything you configured. Instead, take each section
