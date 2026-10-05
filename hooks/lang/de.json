@@ -44,6 +44,7 @@
   "mcp.why_not_readonly": "schreibend oder nicht als lesend eingestuft",
   "bash.blocked_pattern": "BLOCKIERT: gefährliches Muster erkannt: {pattern}",
   "bash.owner_only": "BLOCKIERT: '{command}' ist ein Eigentümer-Befehl (Freigabe-Kanal). Die KI darf ihn nicht ausführen — nur der Eigentümer via ! (umgeht den Wächter). Ich kann einen Override-VORSCHLAG ins pending-Verzeichnis schreiben.",
+  "bash.agent_cli": "BLOCKIERT: '{command}' — die Agenten-CLI ändert ihre eigenen Einstellungen oder startet eine Sitzung ohne die Haken des Benutzers. IMMER gesperrt (kein Override); nur der Eigentümer via ! darf das ausführen. Normale Sitzungen starten und verwalten bleibt frei.",
   "bash.read_blocked": "BLOCKIERT: {reason} (Bash-Leseweg). {extra}ESKALATION: Der Agent fragt den Koordinator → der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei.",
   "bash.read_blocked_hard": "BLOCKIERT: {reason} (Bash-Leseweg).",
   "git.force_push": "BLOCKIERT: force-push auf main/master — IMMER gesperrt, kein Override möglich.",

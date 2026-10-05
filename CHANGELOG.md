@@ -9,6 +9,47 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.05
+
+### security — the agent CLI wrote its own settings and started sessions without the hooks
+
+- The guard protects the settings file by its path. The `claude` CLI writes
+  that file itself, with no path on the command line: `claude plugin disable
+  <name>` rewrote it past the guard (measured live). Plugins bring their own
+  hooks and MCP servers, so the same CLI could add code that runs next to the
+  guard. Every subcommand that writes settings, credentials or local state —
+  `plugin`/`mcp`/`marketplace` changes, `auth login`/`logout`, `import`,
+  `install`, `update`, `setup-token`, `purge`, `ultrareview`, `gateway`,
+  `auto-mode reset`, … — is now owner-only, with no override.
+- Worse, the CLI can start a session that never loads the user's hooks, and so
+  never this guard: `--safe-mode`, `--bare`, `--restricted`, `--setting-sources`
+  without `user`, `--settings`, `--plugin-dir`, `--plugin-url`, `--mcp-config`,
+  `--agents`, `--channels`, `--exec`, `--debug-file`, and the variables
+  `CLAUDE_CODE_SAFE_MODE`, `CLAUDE_CODE_SIMPLE`, `CLAUDE_CONFIG_DIR`. Owner-only
+  as well — at the command position, behind wrappers (`timeout`, `xargs`,
+  `sudo -u`), in a later segment and inside `bash -c "…"`.
+- An unknown subcommand right after the program name counts as writing
+  (fail-closed): a future `claude <something>` must not pass because the list
+  has not heard of it.
+- Free on purpose: starting and managing ordinary sessions, with
+  `--dangerously-skip-permissions` / `bypassPermissions` and Remote Control
+  too — hooks keep running there (measured: a blocked pattern stayed blocked in
+  a bypass session). `--bg`, `attach`, `respawn`, `logs`, `stop`/`kill`, `rm`,
+  `daemon`, `remote-control`, `--version`, `--help`, `doctor`, `agents`, and the
+  reading forms `plugin list/details/validate`, `marketplace list`,
+  `mcp list/get`, `auth status`, `auto-mode config/defaults/critique`.
+- A pattern a hook alone cannot close: a child session can still change a
+  setting through `/config key=value` in its prompt. The real second line is a
+  **managed** hook — see THREAT-MODEL.md.
+
+New test `tests/test_agent_cli_settings.py` — 50/119 before (only the free
+cases), 119/119 after; 11/11 mutations caught at the expected case. Against a
+real log of 99,113 distinct allowed commands: 16 now refused — 13 are exactly
+this rule's target (plugin and MCP changes, `--safe-mode`/`--settings` child
+sessions), 3 are the known "a `|` inside a quoted pattern splits the line"
+class.
+Changes what the guard blocks: **yes**.
+
 ## 2026.10.01-9
 
 ### Messages — the last English pieces inside a translated refusal

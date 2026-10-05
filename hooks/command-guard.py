@@ -316,6 +316,12 @@ _MESSAGES = {
         "The AI cannot run it — only the owner via ! (bypasses the guard). "
         "I can write an override PROPOSAL into the pending directory."
     ),
+    "bash.agent_cli": (
+        "BLOCKED: '{command}' — the agent CLI changes its own settings or "
+        "starts a session without the user's hooks. ALWAYS blocked (no "
+        "override); only the owner via ! may run this. Starting and managing "
+        "ordinary sessions stays free."
+    ),
     "git.force_push": (
         "BLOCKED: force-push to main/master — ALWAYS blocked, no override "
         "possible."
@@ -3908,6 +3914,120 @@ def check_owner_only(command: str, names: list[str]) -> str | None:
     return None
 
 
+# --- The agent's own CLI -------------------------------------------------------
+#
+# The claude CLI writes its settings itself, without a path on the command line
+# (`claude plugin disable x` rewrote ~/.claude/settings.json past this guard,
+# measured 2026-10-02), and it can start a session that never loads the user's
+# hooks (`--safe-mode`, `--bare`, `--restricted`, `--setting-sources` without
+# `user`, CLI 2.1.289). Both are owner-only.
+#
+# Starting and managing ordinary sessions stays free -- with bypassPermissions
+# and Remote Control too: hooks keep running there (measured 2026-10-05).
+
+# Subcommands that only read, or manage running sessions.
+_AGENT_CLI_FREE = {"agents", "attach", "doctor", "logs", "respawn", "rm", "stop",
+                   "kill", "remote-control", "daemon", "help"}
+
+# Subcommands with their own subcommands: which of THOSE only read.
+_AGENT_CLI_FREE_SUB = {
+    "plugin": {"list", "details", "validate", "help", "marketplace"},
+    "plugins": {"list", "details", "validate", "help", "marketplace"},
+    "mcp": {"list", "get", "help"},
+    "auth": {"status", "help"},
+    "auto-mode": {"config", "defaults", "critique", "help"},
+}
+_AGENT_CLI_FREE_MARKETPLACE = {"list", "help"}
+
+# Every subcommand name the CLI knows. A word from here anywhere among the
+# arguments is judged -- also behind an option that takes a value, where a
+# naive parser would stop looking (`claude -n doctor plugin install x`).
+_AGENT_CLI_COMMANDS = _AGENT_CLI_FREE | set(_AGENT_CLI_FREE_SUB) | {
+    "gateway", "import", "install", "purge", "setup-token", "ultrareview",
+    "update", "upgrade", "self-hosted-runner", "config",
+}
+
+# Start options that drop the user's hooks, add code next to them, or write
+# a file the guard cannot see.
+_AGENT_CLI_OPTIONS = {
+    "--safe-mode", "--bare", "--restricted", "--setting-sources", "--settings",
+    "--plugin-dir", "--plugin-url", "--mcp-config", "--agents", "--exec",
+    "--debug-file", "--channels", "--dangerously-load-development-channels",
+}
+
+# Environment variables that do the same before the CLI even parses options.
+_AGENT_CLI_ENV = ("CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_SIMPLE", "CLAUDE_CONFIG_DIR")
+
+
+def _agent_cli_verdict(args: list[str]) -> str | None:
+    """What in these claude arguments needs the owner, else None."""
+    if "--help" in args or "-h" in args:
+        return None
+    for arg in args:
+        option = arg.split("=", 1)[0]
+        if option in _AGENT_CLI_OPTIONS:
+            return f"claude {option}"
+    # Fail-closed for what the list has not heard of yet: a bare word right
+    # after the program name is a subcommand to the CLI, not a prompt. A prompt
+    # with spaces arrives as one quoted word and never matches.
+    if args and re.fullmatch(r"[a-z][a-z0-9-]*", args[0]) and args[0] not in _AGENT_CLI_COMMANDS:
+        return f"claude {args[0]}"
+    # The words a parent already judged are its subcommands, not new ones:
+    # `auto-mode config` reads, it is no top-level `config`.
+    judged: set[int] = set()
+    for i, word in enumerate(args):
+        if i in judged or word not in _AGENT_CLI_COMMANDS or word in _AGENT_CLI_FREE:
+            continue
+        free_sub = _AGENT_CLI_FREE_SUB.get(word)
+        if free_sub is None:
+            return f"claude {word}"
+        rest = [j for j in range(i + 1, len(args)) if not args[j].startswith("-")]
+        if not rest:
+            continue                           # prints the help
+        sub = args[rest[0]]
+        judged.add(rest[0])
+        if sub not in free_sub:
+            return f"claude {word} {sub}"
+        if sub == "marketplace" and len(rest) > 1:
+            judged.add(rest[1])
+            if args[rest[1]] not in _AGENT_CLI_FREE_MARKETPLACE:
+                return f"claude {word} marketplace {args[rest[1]]}"
+    return None
+
+
+def check_agent_cli(command: str) -> str | None:
+    """Return the agent-CLI call that needs the owner, else None.
+
+    Per segment, the contents of every pass-through wrapper included (`bash -c
+    "…"`). The CLI counts at the command position and behind any word that is
+    not a pure print or read tool -- so `timeout`, `xargs` and tomorrow's
+    wrapper are covered without a list of them (fail-closed, as with the
+    owner-only commands). Behind a read tool the name is text.
+    """
+    texts = [command] + [hit.group(1) or hit.group(2) or ""
+                         for hit in _PASSTHROUGH_RE.finditer(command)]
+    for text in texts:
+        for segment in split_segments(text):
+            tokens = _segment_tokens(segment)
+            i = 0
+            while i < len(tokens) and (tokens[i] == "export"
+                                       or os.path.basename(tokens[i]) in _COMMAND_PREFIXES
+                                       or "=" in tokens[i].split("/")[0]
+                                       or tokens[i].startswith("-")):
+                i += 1
+            if i < len(tokens) and os.path.basename(tokens[i]) in _OWNER_TEXT_COMMANDS:
+                continue
+            for token in tokens:
+                if token.split("=", 1)[0] in _AGENT_CLI_ENV and "=" in token:
+                    return token.split("=", 1)[0]
+            for j in range(i, len(tokens)):
+                if os.path.basename(tokens[j]) == "claude":
+                    found = _agent_cli_verdict(tokens[j + 1:])
+                    if found:
+                        return found
+    return None
+
+
 # 'git commit' — including leading -C/-c flags (git -C /path commit). Does NOT
 # match 'git log --grep=commit' (there 'log' sits between git and commit).
 _GIT_COMMIT_RE = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-c\s+\S+\s+)*commit\b")
@@ -4651,6 +4771,14 @@ def main():
     if owner_only and not is_chain_approval(command):
         _audit(input_data, "Bash", command, "block", f"owner_only:{owner_only}", "hard")
         print(msg("bash.owner_only", command=owner_only), file=sys.stderr)
+        sys.exit(2)
+
+    # 1c. The agent's own CLI — writes its settings itself, or starts a
+    #     session without the user's hooks. ALWAYS blocked, no override.
+    agent_cli = check_agent_cli(command)
+    if agent_cli:
+        _audit(input_data, "Bash", command, "block", f"agent_cli:{agent_cli}", "hard")
+        print(msg("bash.agent_cli", command=agent_cli), file=sys.stderr)
         sys.exit(2)
 
     # 2. Force-push to main/master — ALWAYS blocked, even with an override
