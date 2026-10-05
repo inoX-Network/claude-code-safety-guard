@@ -242,6 +242,7 @@ def check_rules() -> dict | None:
     keys = [k for k in data if not k.startswith("_")]
     note(OK, "rules file", f"{path}, {len(keys)} keys")
     check_rule_sections(data)
+    check_rule_wildcards(data)
     if not data.get("blocked_paths_write"):
         note(WARN, "rules content",
              "blocked_paths_write is empty — nothing is write-protected by rule")
@@ -275,6 +276,30 @@ def check_rule_sections(data: dict) -> None:
              f"default until you copy them in; see INSTALL.md, 'After an update'.")
     else:
         note(OK, "rule sections", "every section of the example file is present")
+
+
+def check_rule_wildcards(data: dict) -> None:
+    """Name wildcard entries in lists that only take exact paths.
+
+    A '*' there is not expanded: the entry matches nothing, and the path it was
+    meant to cover is unprotected. Measured 2026-10-05 with
+    '~/.claude/rate-limit.json*' -- even the main file was writable. The hook
+    tells the model; this is where a human sees it. always_allowed is left out:
+    it understands '*'.
+    """
+    reads = data.get("protected_reads")
+    reads = reads if isinstance(reads, dict) else {}
+    lists = [(k, data.get(k)) for k in ("blocked_paths_write", "blocked_paths_delete",
+                                        "blocked_recursive_delete")]
+    lists += [(k, reads.get(k)) for k in ("always_blocked_reads", "require_override_1")]
+    wild = [f"{name}: {entry}" for name, entries in lists if isinstance(entries, list)
+            for entry in entries if isinstance(entry, str) and re.search(r"[*?\[]", entry)]
+    if wild:
+        note(WARN, "rule wildcards",
+             f"{'; '.join(wild)} — these lists take paths literally, a wildcard is "
+             f"not expanded. Each such entry protects NOTHING. Write the paths out in full.")
+    else:
+        note(OK, "rule wildcards", "no wildcards in the literal path lists")
 
 
 def check_owner_scripts(rules: dict | None) -> None:

@@ -9,6 +9,30 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.05-3
+
+### A wildcard in a path list of the rules file is reported instead of failing silently
+
+- `blocked_paths_write`, `blocked_paths_delete`, `blocked_recursive_delete`
+  and the read tiers `always_blocked_reads` and `require_override_1` take
+  exact paths. A wildcard there is not expanded — the entry matches nothing,
+  and the path it was meant to cover is unprotected. Measured on a real
+  install: `~/.claude/rate-limit.json*`, written to cover a file and its
+  `.lock`/`.tmp` neighbours, left even the main file writable (9 of 20 probe
+  cases protected instead of 15 with the exact path).
+- The hook now names such entries to the model once per session, through the
+  same channel as a missing section, and `tools/verify-install.py` warns about
+  them. `always_allowed` is not checked — it understands `*`.
+- Teaching every path matcher wildcards was rejected: five separate matchers
+  (shell writes, inline code, downloaders, the write tool, docker mounts,
+  grant reach, delete protection), the kind of change that has opened gaps
+  before. If you need a family of files covered, protect the directory they
+  live in.
+
+New test `tests/test_wildcard_in_rule_paths.py` — 4/14 before, 14/14 after;
+8/8 mutations caught. Changes what the guard blocks: **no** — it adds a
+notice; every verdict is the same.
+
 ## 2026.10.05-2
 
 ### security — git wrote into the guard's own directories
