@@ -9,6 +9,34 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.05-2
+
+### security — git wrote into the guard's own directories
+
+- Self-protection checks the paths a command writes to; git writes through its
+  own options. `git --work-tree <hooks dir> checkout … -- .` replaced the guard
+  itself, `git -C <hooks dir> init` and `git clone <url> <hooks dir>/new` wrote
+  beside it, and a release checkout under the hooks directory could be
+  switched to any version — one the agent pushed itself included — with a
+  single `git checkout`. 10 of 10 such calls passed.
+- A git call that acts inside a self-protected path is now refused unless the
+  subcommand only reads (`log`, `status`, `diff`, `show`, `describe`,
+  `rev-parse`, `ls-files`, …). Where it acts comes from `-C`, `--work-tree`,
+  `--git-dir`, `GIT_DIR`/`GIT_WORK_TREE`, a `cd` earlier on the line and the
+  working directory the tool chain reports; for `clone`, `init`, `checkout`,
+  `restore` and `worktree` also from the path arguments.
+- Still open, by design: a repository that merely CONTAINS a protected
+  directory (a working copy whose `shared/hooks` is the hook source) stays
+  free for `switch`, `pull` and `merge`, because every session commits and
+  switches branches there. A path argument pointing into the protected part is
+  refused. Running the guard from a separate checkout that no session works in
+  closes the rest.
+
+New test `tests/test_git_into_self_protection.py` — 21/46 before, 46/46
+after; 12/12 mutations caught at the expected case. Against a real log of
+99,228 distinct allowed commands: 2 now refused, both probes of this finding.
+Changes what the guard blocks: **yes**.
+
 ## 2026.10.05
 
 ### security — the agent CLI wrote its own settings and started sessions without the hooks
