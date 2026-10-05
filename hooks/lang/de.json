@@ -38,6 +38,7 @@
   "rules.section_defaulted": "command-guard: {path} fehlt der Abschnitt bzw. fehlen die Abschnitte {sections} — dafür gilt der eingebaute Standard. Der Schutz hält, kann aber von dem abweichen, was du selbst eingetragen hättest.",
   "rules.section_unset": "command-guard: {path} fehlt der Abschnitt bzw. fehlen die Abschnitte {sections} — sie sind nicht eingerichtet und haben keinen eingebauten Standard.",
   "rules.notice_tail": "Meist ist die Regeldatei älter als ein Update: Updates ändern sie nie. Vergleiche sie mit security-rules.example.json (tools/verify-install.py nennt die Lücken) und übernimm die fehlenden Abschnitte. Bitte sag das dem Nutzer einmal.",
+  "rules.wildcard_ignored": "command-guard: {path} enthält Platzhalter in Listen, die Pfade wörtlich nehmen — {entries}. Ein solcher Eintrag trifft nichts: Der Pfad, den er nennt, ist NICHT geschützt. Schreib jeden Pfad vollständig aus. Bitte sag das dem Nutzer einmal.",
   "mcp.blocked": "BLOCKIERT: {reason}",
   "mcp.gated": "MCP-Werkzeug '{tool}' ({why}) erfordert Override-Stufe 1+. {extra}ESKALATION: Der Agent fragt den Koordinator -> der Koordinator entscheidet mit dem Eigentümer über die Anpassung der Override-Datei.",
   "mcp.why_sensitive_server": "Server '{server}' ist als heikel eingestuft",

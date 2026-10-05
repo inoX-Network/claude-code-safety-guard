@@ -300,6 +300,12 @@ _MESSAGES = {
         "lists the gaps) and copy the missing sections in. Please tell the "
         "user about this once."
     ),
+    "rules.wildcard_ignored": (
+        "command-guard: {path} has wildcards in lists that take paths "
+        "literally — {entries}. Such an entry matches nothing: the path it names "
+        "is NOT protected. Write each path out in full. Please tell the user "
+        "about this once."
+    ),
     # --- MCP tools ---
     "mcp.blocked": "BLOCKED: {reason}",
     "mcp.gated": (
@@ -1873,6 +1879,10 @@ _OPTIONAL_SECTIONS = ("allowed_sudo", "require_confirmation",
 # model once per session (see _emit_notices). load_rules() runs several
 # times per call, so entries are kept unique.
 _RULES_NOTICE: list[str] = []
+# Wildcard entries in exact-path lists, same channel. Kept apart because the
+# tail for the list above ("the file predates an update") would be wrong here:
+# a wildcard is a writing mistake, not an old file.
+_RULES_WILDCARDS: list[str] = []
 # A prompt-injection warning for THIS call. Unlike the rules notice it is not
 # deduplicated per session: it is about this command, not about the setup.
 _INJECTION_NOTICE: list[str] = []
@@ -1927,6 +1937,23 @@ def load_rules() -> dict:
     if unset:
         _note_rules(msg("rules.section_unset", path=RULES_PATH,
                         sections=", ".join(unset)))
+
+    # These lists compare paths as written; a wildcard is not expanded, so the
+    # entry matches nothing and its path is unprotected. Measured 2026-10-05:
+    # '~/.claude/rate-limit.json*' left even the main file writable. Reported,
+    # not interpreted -- the verdicts stay as they were.
+    # always_allowed is left out on purpose: it understands '*'.
+    reads = data.get("protected_reads")
+    reads = reads if isinstance(reads, dict) else {}
+    lists = [(k, data.get(k)) for k in ("blocked_paths_write", "blocked_paths_delete",
+                                        "blocked_recursive_delete")]
+    lists += [(k, reads.get(k)) for k in ("always_blocked_reads", "require_override_1")]
+    wild = [f"{name}: {entry}" for name, entries in lists if isinstance(entries, list)
+            for entry in entries if isinstance(entry, str) and re.search(r"[*?\[]", entry)]
+    if wild:
+        text = msg("rules.wildcard_ignored", path=RULES_PATH, entries="; ".join(wild))
+        if text not in _RULES_WILDCARDS:
+            _RULES_WILDCARDS.append(text)
     return data
 
 
@@ -1948,8 +1975,10 @@ def _emit_notices(input_data: dict) -> None:
     """
     parts = list(_INJECTION_NOTICE)
     try:
-        if _RULES_NOTICE:
-            text = " ".join(_RULES_NOTICE) + " " + msg("rules.notice_tail")
+        pieces = ([" ".join(_RULES_NOTICE) + " " + msg("rules.notice_tail")]
+                  if _RULES_NOTICE else []) + _RULES_WILDCARDS
+        if pieces:
+            text = " ".join(pieces)
             dir_env = _env("CLAUDE_AUDIT_DIR")
             audit_dir = Path(dir_env) if dir_env else (_HOME / ".claude" / ".agent-audit")
             seen_dir = audit_dir / "rules-notice"

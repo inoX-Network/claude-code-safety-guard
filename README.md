@@ -786,6 +786,17 @@ a `cd` prefix that shares its line with a delete verb.
 
 Level 1 lifts it for explicitly named paths, like the write list.
 
+**Literal paths, no wildcards.** Both lists and the tree roots of
+`blocked_recursive_delete` cover an entry and everything below it — not its
+name neighbours: `~/.claude/rate-limit.json` does not cover
+`~/.claude/rate-limit.json.lock`. The read tiers `always_blocked_reads` and
+`require_override_1` compare by prefix instead (`~/.ssh/id_` covers
+`~/.ssh/id_rsa`). In none of these five is a wildcard expanded, so such an
+entry matches nothing at all; the hook tells the model once per session and
+`tools/verify-install.py` warns. To cover a family of files, protect the
+directory they live in. (`always_allowed` is the exception: it understands `*`,
+as in `~/.ssh/*.pub`.)
+
 ### A name is not a call
 
 `owner_only_commands` protects the approval channel itself: the AI must never
