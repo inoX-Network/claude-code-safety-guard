@@ -9,6 +9,35 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.05-5
+
+### security — level 0 wrote as root anywhere the path list did not reach
+
+- The example rules list `cp`, `mv`, `chmod`, `chown` and `tee` in
+  `allowed_sudo`, for deploys and backups. Protection then hung on
+  `blocked_paths_write` alone, and level 0 wrote as root everywhere else:
+  `sudo cp … /var/spool/cron/crontabs/root`, `sudo cp … /root/.bashrc`, and
+  `sudo chown root` plus `sudo chmod 4755` on one's own copy of a shell — a
+  setuid-root shell in three commands, without an approval.
+- A sudo whose command writes (`cp`, `mv`, `install`, `tee`, `dd`, `ln`,
+  `rsync`, `chmod`, `chown`, `chgrp`, `mkdir`, `touch`, `truncate`, `rm`,
+  `rmdir`, `unlink`) now needs level 1 — the pattern `systemctl` and `pacman`
+  already follow. The gate sits on the verb, not on a path list that would
+  never be complete. Reading as root stays free. Applies to remote commands
+  too.
+- Setting a setuid/setgid bit as root (`chmod 4755`, `2755`, `u+s`, `g+s`,
+  `install -m 4755`) needs level 2 even with a deploy approval; the sticky bit
+  (`1777`) and removing a bit (`u-s`) do not count.
+- One parser for every sudo check: `check_sudo` and both new gates read a line
+  through the same function.
+- Cost, replayed on 5,409 distinct allowed sudo commands from a real log: 16
+  newly refused — 12 local, all of them probes for this very gap; 4 real
+  remote writes at level 0 in three months (deploys run with an approval
+  anyway).
+
+New test `tests/test_sudo_write_verbs.py` — 5/17 before, 17/17 after; 11/11
+mutations caught. Changes what the guard blocks: **yes**.
+
 ## 2026.10.05-4
 
 ### security — the audit log stored passwords in clear text
