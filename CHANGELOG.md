@@ -9,6 +9,36 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.05-4
+
+### security — the audit log stored passwords in clear text
+
+- Redaction knew one form: `echo '<pw>' | sudo`. On a real installation the
+  log held a sudo password in 84 lines, in forms it missed: the password in a
+  variable used later (`PW='…'; echo "$PW" | sudo -S`, 79 lines), `printf …
+  | sudo -S` (3), a brace group `{ echo "…"; cat; } | sudo -S` (2), and one
+  `printf … | ssh host 'cat > ~/.askpass'`. Also open: an unquoted `echo`, a
+  here-string, `--stdin`, a pipe into `ssh host sudo -S`, `sshpass -p`.
+- Secret names with a prefix were missed too: the old rule wanted `password`
+  as a whole word, so `DB_PASSWORD=`, `POSTGRES_PASSWORD=`, `SECRET_KEY=`,
+  `TOKEN_ENC_KEY=` went in unredacted — several hundred lines in the same log.
+- Now: a variable whose name contains `pw`, `pass`, `secret` or `token` is
+  always redacted; `sshpass -p` is redacted; and in a line that hands sudo a
+  password on stdin (`-S`, combined like `-kS`, or `--stdin`) or feeds an
+  askpass helper, every `echo`/`printf` argument, here-string and variable
+  value is redacted. Quote-aware, so a password containing `;`, `|` or `&`
+  cannot leave its tail behind.
+- Cost, measured on 105,586 distinct logged commands: 1,364 lose detail
+  (1.3 %), 913 of them password lines; among the rest a few harmless names
+  (`passed`, `PWD`, `bypass`).
+- **A log written before this version may hold secrets.** Treat it as
+  sensitive; rotate what it exposed.
+
+New test `tests/test_audit_redacts_password_pipes.py` — 8/25 before, 25/25
+after; 10/10 mutations caught. Replayed on the 84 real lines: 84 kept the
+password before, 0 after. Changes what the guard blocks: **no** — it changes
+what the log keeps.
+
 ## 2026.10.05-3
 
 ### A wildcard in a path list of the rules file is reported instead of failing silently

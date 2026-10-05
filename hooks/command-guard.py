@@ -4350,6 +4350,30 @@ _SECRET_PATTERNS = [
     (re.compile(r"(?i)(--(?:password|token|secret|api-?key))(\s+)\S+"), r"\1\2[REDACTED]"),
     # Authorization: Bearer xyz
     (re.compile(r"(?i)(authorization:\s*\w+\s+)\S+"), r"\1[REDACTED]"),
+    # sshpass -p <pw>, also -p<pw>
+    (re.compile(r"(\bsshpass\b(?:\s+-[a-oq-zA-Z]\S*)*\s+-p)\s*(?:'[^']*'|\"[^\"]*\"|\S+)"),
+     r"\1 [REDACTED]"),
+    # A variable whose NAME says it holds a secret: PW=, SUDO_PW=, DB_PASS=, ...
+    # The real log held 79 of 84 leaked lines in this form.
+    (re.compile(r"(?i)\b(\w*(?:pw|pass|secret|token)\w*)=(?:'[^']*'|\"[^\"]*\"|[^\s;&|]+)"),
+     r"\1=[REDACTED]"),
+]
+
+# A line that handles a sudo password: sudo reading it on stdin (-S alone,
+# inside combined short flags like -kS, or --stdin), or an askpass helper being
+# fed or written. Only then are the feeders below redacted -- elsewhere an echo
+# or printf carries content the audit should keep.
+_SUDO_STDIN = re.compile(r"\bsudo\b[^|;&]*?\s(?:-[A-Za-z]*S[A-Za-z]*|--stdin)\b|askpass",
+                         re.IGNORECASE)
+# In such a line the password is SOMEWHERE in it: an echo/printf argument (also
+# inside a brace group, so not only right before a pipe), a here-string, or any
+# variable assignment, whatever its name. All of them are redacted. Quote-aware,
+# so a password containing ; | or & cannot end the match early.
+_STDIN_FEEDERS = [
+    (re.compile(r"\b(echo|printf)\s+(?:'[^']*'|\"[^\"]*\"|[^|;&'\"}\n])+"),
+     r"\1 [REDACTED] "),
+    (re.compile(r"<<<\s*(?:'[^']*'|\"[^\"]*\"|\S+)"), r"<<< [REDACTED]"),
+    (re.compile(r"\b([A-Za-z_]\w*)=(?:'[^']*'|\"[^\"]*\"|[^\s;&|'\"]+)"), r"\1=[REDACTED]"),
 ]
 
 
@@ -4361,6 +4385,12 @@ def _redact(text: str) -> str:
     """
     if not text:
         return text
+    # Measured 2026-10-05: only `echo '<pw>' | sudo` was caught. printf, an
+    # unquoted echo, a here-string, a pipe into `ssh host sudo -S` all went
+    # into the log in clear text -- 84 lines on one real installation.
+    if _SUDO_STDIN.search(text):
+        for pattern, repl in _STDIN_FEEDERS:
+            text = pattern.sub(repl, text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     return text[:600]
