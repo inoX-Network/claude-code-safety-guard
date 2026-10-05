@@ -543,7 +543,9 @@ Every decision (allow or block, by Bash/Read/Write/Edit/… or by the owner scri
 ~/.claude/.agent-audit/actions.jsonl
 ```
 
-Fields: `ts`, `session_id`, `actor` (the `agent_id`, or `main` for the main session), `agent_type`, `tool`, `target`, `decision`, `reason`, `level`. Before the `target` (the command or file path) is logged it runs through **secret redaction** — passwords, tokens, `key=value` secrets, `--password`/`--token` flags and `Authorization:` headers become `[REDACTED]`, and the field is truncated to 600 characters. Logging failures never block the guard.
+Fields: `ts`, `session_id`, `actor` (the `agent_id`, or `main` for the main session), `agent_type`, `tool`, `target`, `decision`, `reason`, `level`. Before the `target` (the command or file path) is logged it runs through **secret redaction** — passwords, tokens, `key=value` secrets (also with a prefix, as in `DB_PASSWORD=`), `--password`/`--token` flags, `sshpass -p` and `Authorization:` headers become `[REDACTED]`. In a line that hands sudo a password on stdin (`-S`, `--stdin`) or feeds an askpass helper, every `echo`/`printf` argument, here-string and variable value is redacted as well — the password is somewhere in that line, and the log cannot know where. Redaction runs before the field is truncated to 600 characters. Logging failures never block the guard.
+
+Redaction is a safety net, not a vault: it only knows the forms above. An audit log written before 2026.10.05-4 can hold passwords in forms the older rule missed (`printf … | sudo -S`, `PW='…'`, `DB_PASSWORD=…`) — treat it as sensitive.
 
 ### Reading it
 
