@@ -3117,6 +3117,101 @@ def _inline_names(command: str, prot: str) -> bool:
     return any(re.search(p, expand_path(block)) for block in _inline_code_segments(command))
 
 
+# --- git into the guard's own directories ---------------------------------------
+#
+# git writes through its own options -- -C, --work-tree, --git-dir, clone and
+# init destinations -- and none of them looks like a write target to the check
+# above. Measured 2026-10-05: `git --work-tree <hooks dir> checkout … -- .`
+# replaced the guard, and a release checkout under the hooks directory could be
+# switched to any version with one `git checkout`. A git call that ACTS inside
+# a self-protected path is refused unless it only reads. A repository that
+# merely contains one stays free: that is an ordinary working copy.
+
+# Subcommands that only read the repository.
+_GIT_READ_ONLY = {
+    "log", "status", "show", "diff", "describe", "rev-parse", "ls-files",
+    "ls-tree", "cat-file", "blame", "grep", "shortlog", "version", "help",
+    "rev-list", "name-rev", "show-ref", "for-each-ref", "count-objects",
+    "whatchanged", "var",
+}
+
+# Subcommands whose positional arguments are paths they write to.
+_GIT_PATH_WRITERS = {"clone", "init", "checkout", "restore", "worktree"}
+
+# Global options that take a value as the next word.
+_GIT_VALUE_OPTIONS = {"-C", "-c", "--work-tree", "--git-dir", "--namespace",
+                      "--exec-path", "--config-env"}
+
+
+def _git_place(path: str, base: str | None) -> str:
+    """A path as git would use it: ~ expanded, relative to `base`."""
+    path = expand_path(path.strip("'\""))
+    if not os.path.isabs(path) and base:
+        path = os.path.join(base, path)
+    return os.path.normpath(path)
+
+
+def git_hits_self_protect(command: str, cwd: str | None) -> str | None:
+    """Return the self-protection path a writing git call acts in, else None."""
+    command = _normalize_obfuscation(command)
+    texts = [command] + [hit.group(1) or hit.group(2) or ""
+                         for hit in _PASSTHROUGH_RE.finditer(command)]
+    for text in texts:
+        where = cwd
+        for segment in split_segments(text):
+            tokens = _segment_tokens(segment)
+            targets = []
+            i = 0
+            while i < len(tokens) and (os.path.basename(tokens[i]) in _COMMAND_PREFIXES
+                                       or "=" in tokens[i].split("/")[0]
+                                       or tokens[i].startswith("-")):
+                name, _, value = tokens[i].partition("=")
+                if name in ("GIT_DIR", "GIT_WORK_TREE") and value:
+                    targets.append(_git_place(value, where))
+                i += 1
+            if i >= len(tokens):
+                continue
+            head = os.path.basename(tokens[i])
+            if head == "cd":
+                where = _git_place(tokens[i + 1] if i + 1 < len(tokens) else "~", where)
+                continue
+            if head in _OWNER_TEXT_COMMANDS:
+                continue
+            start = next((k for k in range(i, len(tokens))
+                          if os.path.basename(tokens[k]) == "git"), None)
+            if start is None:
+                continue
+            args = tokens[start + 1:]
+            base, sub, k = where, None, 0
+            while k < len(args):
+                arg = args[k]
+                option, eq, value = arg.partition("=")
+                if option in _GIT_VALUE_OPTIONS and not eq:
+                    value = args[k + 1] if k + 1 < len(args) else ""
+                    k += 2
+                elif arg.startswith("-"):
+                    k += 1
+                else:
+                    sub = arg
+                    break
+                if option == "-C" and value:
+                    base = _git_place(value, base)
+                elif option in ("--work-tree", "--git-dir") and value:
+                    targets.append(_git_place(value, base))
+            if sub is None or sub in _GIT_READ_ONLY:
+                continue
+            if base:
+                targets.append(base)
+            if sub in _GIT_PATH_WRITERS:
+                targets += [_git_place(a, base) for a in args[k + 1:]
+                            if not a.startswith("-") and "://" not in a]
+            for target in targets:
+                hit = hits_self_protect(target)
+                if hit:
+                    return hit
+    return None
+
+
 def command_hits_self_protect(command: str) -> str | None:
     """Return the self-protection path a Bash write command targets.
 
@@ -4810,7 +4905,8 @@ def main():
 
     # 2c. Self-protection of the security system — ALWAYS blocked, no override.
     #     Closes the Bash gap 'echo x > ~/.claude/hooks/command-guard.py'.
-    self_protect_hit = command_hits_self_protect(command)
+    self_protect_hit = (command_hits_self_protect(command)
+                        or git_hits_self_protect(command, input_data.get("cwd")))
     if self_protect_hit:
         _audit(input_data, "Bash", command, "block", f"self_protect:{self_protect_hit}", "hard")
         # A one-liner naming the path is blocked even when it only READS.
