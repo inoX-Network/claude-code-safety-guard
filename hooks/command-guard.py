@@ -371,6 +371,14 @@ _MESSAGES = {
         "asks the coordinator → coordinator decides with the owner about "
         "adjusting the override file."
     ),
+    "sudo.writes_as_root": (
+        "BLOCKED: '{command}' writes as root and requires override level 1+. "
+        "Reading as root stays free. {extra}"
+    ),
+    "sudo.setuid": (
+        "BLOCKED: '{command}' sets a setuid/setgid bit as root — a lasting way "
+        "to root, not part of a deploy. Requires override level 2. {extra}"
+    ),
     "lifecycle.needs_override": (
         "BLOCKED: '{command}' changes or tears down and requires override "
         "level 1+. Read-only forms (ps, logs, inspect, images, stats) run "
@@ -2713,22 +2721,16 @@ def _sudo_words(text: str) -> list[str]:
     return words
 
 
-def check_sudo(command: str, allowed: list[str],
-               check_subcommands: bool = True) -> str | None:
-    """Return the first sudo command that is NOT in `allowed`, otherwise None.
+def _sudo_invocations(command: str) -> list[tuple[str, list[str]]]:
+    """Every sudo in the line: (the command it raises, the words after it).
 
-    `allowed` is the already fully assembled allowlist (base + level grants).
-    The override merge happens in the caller (main), so the entire level logic
-    sits in one place and load_override is not called twice (here without
-    agent_id).
+    One parser for every sudo check -- check_sudo and the write and setuid
+    gates must read a line the same way, or one of them is the gap.
     """
+    found = []
     # 'sudo' as a standalone word, followed by whitespace (space, tab, ...).
     # \bsudo\b prevents matching 'pseudo'; \s+ closes the tab bypass (M2).
-    matches = list(re.finditer(r"\bsudo\b\s+", command))
-    if not matches:
-        return None
-
-    for m in matches:
+    for m in re.finditer(r"\bsudo\b\s+", command):
         # The words as the shell runs them (see _sudo_words). `sudo -n -l 2>&1`
         # lists one's own rights and changes nothing — measured 26 real refusals
         # of that shape when `2>&1` was taken for the command. `sudo -l | rm -rf
@@ -2744,6 +2746,72 @@ def check_sudo(command: str, allowed: list[str],
             cmd_after_sudo = word
             rest_tokens = words[idx + 1:]
             break
+        found.append((cmd_after_sudo, rest_tokens))
+    return found
+
+
+# Commands that write files when sudo runs them. Measured 2026-10-01: with cp,
+# mv, chmod, chown on the allowlist, level 0 wrote as root wherever
+# blocked_paths_write did not reach -- a root crontab, root's shell profile, a
+# setuid-root shell. The gate sits on the verb, not on a list of paths that
+# would never be complete; reading as root stays free.
+_SUDO_WRITE_VERBS = {"cp", "mv", "install", "tee", "dd", "ln", "rsync", "chmod",
+                     "chown", "chgrp", "mkdir", "touch", "truncate", "rm", "rmdir",
+                     "unlink"}
+
+
+def check_sudo_writes(command: str) -> str | None:
+    """The first sudo whose command writes, else None. Needs level 1."""
+    for cmd, _ in _sudo_invocations(command):
+        if os.path.basename(cmd) in _SUDO_WRITE_VERBS:
+            return cmd
+    return None
+
+
+def _mode_sets_id_bit(mode: str) -> bool:
+    """Does a chmod/install mode set setuid or setgid? 1777 (sticky) does not."""
+    mode = mode.strip("\"'")
+    if re.fullmatch(r"[0-7]+", mode):
+        return bool(int(mode, 8) & 0o6000)
+    # Symbolic: any clause that adds or sets 's' (u+s, +s, g=rwxs, a+rws).
+    return any(re.fullmatch(r"[ugoa]*[+=][rwxXst]*s[rwxXst]*", clause)
+               for clause in mode.split(","))
+
+
+def check_sudo_setuid(command: str) -> str | None:
+    """The first sudo that sets a setuid/setgid bit, else None. Needs level 2.
+
+    chmod: the first word that is not an option is the mode. install: the
+    value of -m / --mode. A lasting way to root is not part of a deploy.
+    """
+    for cmd, rest in _sudo_invocations(command):
+        name = os.path.basename(cmd)
+        modes: list[str] = []
+        if name == "chmod":
+            modes = [next((t for t in rest if not t.startswith("-")), "")]
+        elif name == "install":
+            for i, t in enumerate(rest):
+                if t in ("-m", "--mode") and i + 1 < len(rest):
+                    modes.append(rest[i + 1])
+                elif t.startswith("--mode="):
+                    modes.append(t.split("=", 1)[1])
+                elif t.startswith("-m") and len(t) > 2:
+                    modes.append(t[2:])
+        if any(_mode_sets_id_bit(m) for m in modes if m):
+            return f"{name} {next(m for m in modes if m and _mode_sets_id_bit(m))}"
+    return None
+
+
+def check_sudo(command: str, allowed: list[str],
+               check_subcommands: bool = True) -> str | None:
+    """Return the first sudo command that is NOT in `allowed`, otherwise None.
+
+    `allowed` is the already fully assembled allowlist (base + level grants).
+    The override merge happens in the caller (main), so the entire level logic
+    sits in one place and load_override is not called twice (here without
+    agent_id).
+    """
+    for cmd_after_sudo, rest_tokens in _sudo_invocations(command):
         if cmd_after_sudo and cmd_after_sudo not in allowed:
             return cmd_after_sudo
         # The command name alone is not enough: a service manager entry would
@@ -5122,6 +5190,22 @@ def main():
         if bad_sudo:
             _audit(input_data, "Bash", command, "block", f"sudo_not_allowed:{bad_sudo}", level)
             print(msg("sudo.disallowed", command=bad_sudo,
+                      extra=_override_note(override, level, agent_id)),
+                  file=sys.stderr)
+            sys.exit(2)
+        # Allowed command, but it writes as root: level 1, like a service
+        # manager's changing subcommands.
+        writing = check_sudo_writes(command) if level < 1 else None
+        if writing:
+            _audit(input_data, "Bash", command, "block", f"sudo_writes:{writing}", level)
+            print(msg("sudo.writes_as_root", command=writing,
+                      extra=_override_note(override, level, agent_id)),
+                  file=sys.stderr)
+            sys.exit(2)
+        setuid = check_sudo_setuid(command)
+        if setuid:
+            _audit(input_data, "Bash", command, "block", f"sudo_setuid:{setuid}", level)
+            print(msg("sudo.setuid", command=setuid,
                       extra=_override_note(override, level, agent_id)),
                   file=sys.stderr)
             sys.exit(2)

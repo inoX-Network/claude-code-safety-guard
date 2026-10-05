@@ -142,7 +142,7 @@ The first group runs **always** — an active override never weakens it:
 Only after those does the hook load the override for the calling context and run the **level-dependent** checks:
 
 6. **Protected paths** — level 0: none; level 1: only explicitly granted paths; level 2+: all protected paths (single ops — recursive-on-system stays hard-blocked above). Then the fixed **root rule**: deleting `/` or the home directory itself is refused at every level, a recursive delete one level below `/` needs level 2
-7. **Sudo allowlist** — base allowlist plus `additional_sudo` grants; level 2+ (or `additional_sudo: "all"`) allows all sudo
+7. **Sudo allowlist** — base allowlist plus `additional_sudo` grants; level 2+ (or `additional_sudo: "all"`) allows all sudo. An allowed command that **writes** as root (`cp`, `mv`, `install`, `tee`, `dd`, `ln`, `rsync`, `chmod`, `chown`, `chgrp`, `mkdir`, `touch`, `truncate`, `rm`, `rmdir`, `unlink`) needs level 1 — locally and on a remote host; reading as root stays free. Setting a **setuid/setgid** bit (`chmod 4755`, `u+s`, `install -m 4755`) needs level 2 (since 2026.10.05-5)
 8. **Confirmation** desktop notification, then **prompt-injection** warning
 
 ### Read checks
@@ -272,7 +272,7 @@ A static blocklist isn't enough — sometimes you legitimately need extra `sudo`
 
 - **Allowed:** write to explicitly granted paths (`grants.allowed_paths`, path-boundary-exact); extra sudo commands (`grants.additional_sudo`); single-file ops on normally protected paths.
 - **A grant covers what it names, nothing around it.** A grant on `/opt/inox/billing` allows writes below that directory — not to a sibling service, and not to the tree above it. The reverse holds as well: a broad grant on `/etc` does not cover a more specific protected entry such as `/etc/shadow`. Until 2026.08.29 the first half was missing, and a grant on a subdirectory opened its whole zone.
-- **Not allowed:** recursive operations on protected paths; operations on system paths (`/usr/`, `/lib/`, `/bin/`, `/sbin/`); `chown`/`chmod` on `/etc/` beyond explicitly named files.
+- **Not allowed:** recursive operations on protected paths; operations on system paths (`/usr/`, `/lib/`, `/bin/`, `/sbin/`); `chown`/`chmod` on `/etc/` beyond explicitly named files; setting a setuid/setgid bit as root.
 - **Explanation duty:** WHAT + WHY.
 
 ### Level 2 — FULL (system maintenance, security fixes)
