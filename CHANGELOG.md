@@ -9,6 +9,27 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.14
+
+### security — a hook file that could not be loaded let every call through
+
+- The crash net that turns errors into denials lives inside
+  `command-guard.py`. A syntax error from an edit, or a hook file missing from
+  where the setting points, stops Python before that net exists: exit `1`, and
+  Claude Code treats a hook that fails as not blocking — the call runs.
+  Measured on copies of 2026.10.05-5: a broken copy exits `1` bare.
+- `settings.example.json` and INSTALL.md now run the guard behind a wrapper:
+  `python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }`.
+  While the guard works nothing changes — an allow stays an allow, a block a
+  block. **The hook itself is unchanged**; existing installs must append the
+  wrapper to their eight entries (and to a managed settings copy, if any).
+- `tools/verify-install.py` reports every guard entry without the wrapper
+  ("load failure").
+- New test `tests/test_fail_closed_launch.py` (before 4/10, after 10/10,
+  4 of 4 mutations caught).
+
+---
+
 ## 2026.10.05-5
 
 ### security — level 0 wrote as root anywhere the path list did not reach

@@ -125,6 +125,32 @@ def check_interpreter(guard_commands: list[str]) -> None:
              "from a different interpreter than the one that guards you.")
 
 
+# `cmd || { …; exit 2; }` — what turns a failing launch into a denial.
+FAIL_CLOSED_WRAPPER = re.compile(r"\|\|.*\bexit\s+2\b")
+
+
+def check_load_failure(guard_commands: list[str]) -> None:
+    """What happens if the hook file cannot even be loaded.
+
+    The crash net lives inside command-guard.py. A syntax error from an edit
+    stops Python before any of it runs: exit 1, which the tool chain treats as
+    a failing hook, not a blocking one — the call is allowed. Measured
+    2026-10-14 on copies of the release. Nothing else in this report notices,
+    because every probe below runs the hook directly, never the registered line.
+    """
+    bare = [c for c in guard_commands if not FAIL_CLOSED_WRAPPER.search(c)]
+    if not bare:
+        note(OK, "load failure",
+             f"all {len(guard_commands)} guard entries fail closed if the hook cannot be loaded")
+        return
+    note(WARN, "load failure",
+         f"{len(bare)} of {len(guard_commands)} guard entries run the hook bare. If "
+         "command-guard.py fails to load (a syntax error from an edit, a missing "
+         "file), Python exits 1 and the call is ALLOWED. Append "
+         "'|| { echo safety guard failed to load - call denied >&2; exit 2; }' "
+         "as in settings.example.json.")
+
+
 def find_hook_from_settings() -> Path | None:
     """The hook path AS THE TOOL CHAIN SEES IT — not where we hope it is.
 
@@ -158,6 +184,7 @@ def find_hook_from_settings() -> Path | None:
     note(OK, "PreToolUse entry", f"{len(guard)} registered")
 
     check_matchers(guard_matchers)
+    check_load_failure(guard)
 
     # Every registered entry, not just the first. With seven matchers the other
     # six went unchecked, so one left pointing at an old path stayed invisible

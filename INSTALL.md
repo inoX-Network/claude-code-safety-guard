@@ -87,14 +87,14 @@ chmod +x ~/.claude/bin/grant-override ~/.claude/bin/hook-dev-mode
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Bash",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
-      { "matcher": "Read",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
-      { "matcher": "Write",        "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
-      { "matcher": "Edit",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
-      { "matcher": "MultiEdit",    "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
-      { "matcher": "NotebookEdit", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
-      { "matcher": "Grep",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] },
-      { "matcher": "mcp__.*",      "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py" }] }
+      { "matcher": "Bash",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }" }] },
+      { "matcher": "Read",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }" }] },
+      { "matcher": "Write",        "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }" }] },
+      { "matcher": "Edit",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }" }] },
+      { "matcher": "MultiEdit",    "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }" }] },
+      { "matcher": "NotebookEdit", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }" }] },
+      { "matcher": "Grep",         "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }" }] },
+      { "matcher": "mcp__.*",      "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }" }] }
     ]
   }
 }
@@ -115,6 +115,20 @@ session so the new hook configuration is picked up.
 
 > All eight matchers run the **same** script. The hook decides what to check based
 > on the `tool_name` it reads from stdin, so you do not need separate scripts.
+
+**Keep the part after `||`.** The guard turns its own crashes into denials, but
+only once Python has loaded the file. A syntax error from an edit, or a hook
+file that is not where the setting says, stops Python first with exit code `1`
+— and Claude Code treats a hook that fails as *not blocking*: the call runs.
+The wrapper maps every failure onto `2`, so a broken guard denies instead of
+waving everything through. It changes nothing while the guard works: an allow
+stays an allow, a block stays a block (pinned by
+`tests/test_fail_closed_launch.py`). Until 2026.10.14 the example ran the hook
+bare; if you installed before that, append the wrapper to all eight entries.
+`tools/verify-install.py` names every entry that lacks it.
+
+If you also register the guard in a managed settings file (so that it runs
+before anything a plugin adds), give those entries the same wrapper.
 
 ### Alternative: run the hook from a release checkout
 
@@ -340,8 +354,9 @@ dirs consistently across the hook and both scripts:
 
 ### `settings.json`
 
-The `command` of each matcher (`python3 ~/.claude/hooks/command-guard.py`) is a
-literal path. If you move the hook, update all eight matchers.
+The `command` of each matcher (`python3 ~/.claude/hooks/command-guard.py || …`) is a
+literal path. If you move the hook, update all eight matchers — and keep the
+wrapper after `||` on each (section A, step 6).
 
 ### Script-internal paths
 
@@ -403,8 +418,9 @@ python3 tools/verify-install.py          # add --wiring-only to skip the probes
 
 This reads `settings.json` to find the hook **the way the tool chain does** —
 not where the docs hope it is — then checks that a file actually exists at that
-path, that the rules load from wherever `guard-config.json` says, that the
-owner-only scripts are executable, and that no dev window is open. Then it
+path, that every entry fails closed if the file cannot be loaded, that the
+rules load from wherever `guard-config.json` says, that the owner-only scripts
+are executable, and that no dev window is open. Then it
 feeds the hook the cases below as payloads and reads only its exit code;
 nothing is executed.
 
