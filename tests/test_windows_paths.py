@@ -79,6 +79,28 @@ def test_conversion_is_the_identity_on_unix(path):
     assert GUARD._to_cmp(path, windows=False) == path
 
 
+B = "\\"
+# (command line, after conversion) -- paths inside a command, everything else untouched
+COMMAND_CONVERSIONS = [
+    ("rm -rf /C/Users/Bjoer/x", "rm -rf /c/users/bjoer/x"),
+    (f"cat C:{B}Users{B}Bjoer{B}.SSH{B}x", "cat /c/users/bjoer/.ssh/x"),
+    (f"dir {B}{B}?{B}C:{B}Users{B}X", "dir /c/users/x"),
+    (f"cat {B}{B}localhost{B}c${B}Users{B}Bjoer{B}.ssh{B}id_rsa", "cat /c/users/bjoer/.ssh/id_rsa"),
+    (f"python -c \"open('C:{B}{B}Users{B}{B}Bjoer{B}{B}.SSH{B}{B}x')\"",
+     "python -c \"open('/c/users/bjoer/.ssh/x')\""),
+    ("echo x > ~/.CLAUDE/A", "echo x > ~/.claude/a"),
+    ("cat $HOME/.SSH/x", "cat $HOME/.ssh/x"),
+    ("git add -A", "git add -A"),                       # options keep their case
+    ("echo 3/4 http://a.b/C/D", "echo 3/4 http://a.b/C/D"),
+    ("cmd //c dir", "cmd //c dir"),
+]
+
+
+@pytest.mark.parametrize("command,expected", COMMAND_CONVERSIONS, ids=[c[0] for c in COMMAND_CONVERSIONS])
+def test_paths_inside_a_command_line(command, expected):
+    assert GUARD._win_command_paths(command, windows=True) == expected
+
+
 # --- behaviour on a real Windows host ---------------------------------------
 def _write(file_path: str, env_extra: dict | None = None) -> int:
     env = dict(os.environ)
@@ -176,6 +198,20 @@ BASH_CASES = [
     ("redirect into settings.json, upper case", lambda h: f"echo x > {_gitbash(h).upper()}/.CLAUDE/SETTINGS.JSON", 2),
     ("read private key, Git Bash form", lambda h: f"cat {_gitbash(h)}/.ssh/id_ed25519", 2),
     ("read private key, drive + slash", lambda h: f"cat {_slash(h)}/.ssh/id_ed25519", 2),
+    # inline interpreter code: Windows literals, escaped and raw
+    ("python writes settings.json, escaped backslashes",
+     lambda h: "python3 -c \"open('" + h.replace("\\", "\\\\") + "\\\\.claude\\\\settings.json','w').write('x')\"", 2),
+    ("python writes settings.json, raw string",
+     lambda h: "python3 -c \"open(r'" + h + "\\.claude\\settings.json','w').write('x')\"", 2),
+    ("python reads private key, forward slash",
+     lambda h: "python3 -c \"print(open('" + _slash(h) + "/.ssh/id_ed25519').read())\"", 2),
+    ("python writes a project file stays free",
+     lambda h: "python3 -c \"open(r'" + h + "\\Projekte\\x\\out.txt','w').write('x')\"", 0),
+    # ~ and $HOME with upper case: the protected list is compared in lower case
+    ("redirect via ~ with upper case", lambda h: "echo x > ~/.CLAUDE/settings.json", 2),
+    ("read via $HOME with upper case", lambda h: "cat $HOME/.SSH/id_ed25519", 2),
+    # a cd in Windows spelling before a relative write
+    ("cd into ~/.claude/hooks, then write", lambda h: f"cd '{h}\\.claude\\hooks' && echo x > guard.py", 2),
     ("listing the home stays free", lambda h: f"ls -la {_gitbash(h)}", 0),
     ("ordinary project file stays free", lambda h: f"cat {_gitbash(h)}/Projekte/x/README.md", 0),
     ("flags keep their case: git add -a is not -A", lambda h: "git status -s", 0),

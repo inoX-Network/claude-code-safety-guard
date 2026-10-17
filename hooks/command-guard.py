@@ -127,6 +127,20 @@ def _to_cmp(path: str, windows: bool = _WINDOWS) -> str:
 _HOME_CMP = _to_cmp(str(_HOME))
 
 
+def _real_from_cmp(path: str | None) -> str | None:
+    """The comparison form back to a path a process can be started in.
+
+    Only needed where the guard itself runs a program (git rev-parse): on
+    Windows '/c/users/x' is no directory, the call fails, and a failed call
+    reads as "no repository" -- the branch guard went silent (2026-10-17).
+    The file system ignores case, so the lower-case form is fine.
+    """
+    if not _WINDOWS or not path:
+        return path
+    m = re.match(r"^/([a-z])(/.*)?$", path)
+    return (m.group(1).upper() + ":" + (m.group(2) or "/")) if m else path
+
+
 def expand_path(path: str) -> str:
     """Expand ~ and $HOME/${HOME} to the home directory.
 
@@ -693,7 +707,7 @@ def _redirected_startup_files() -> list[str]:
     whole tree.
     """
     def value(name: str) -> str:
-        raw = os.environ.get(name, "").strip()
+        raw = _to_cmp(os.environ.get(name, "").strip())   # Windows: C:\x counts too
         return raw if raw.startswith(("/", "~")) else ""
 
     targets: list[str] = []
@@ -703,7 +717,8 @@ def _redirected_startup_files() -> list[str]:
                     (".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout")]
     for name in ("ENV", "BASH_ENV"):
         path = value(name)
-        if path and not os.path.isdir(expand_path(path)):
+        # isdir needs the real path: the comparison form is no file name on Windows
+        if path and not os.path.isdir(_expand_real(os.environ.get(name, "").strip())):
             targets.append(path)
     xdg = value("XDG_CONFIG_HOME")
     if xdg:
@@ -1692,7 +1707,40 @@ def _normalize_obfuscation(command: str) -> str:
     command = _IFS_RE.sub(" ", command)
     command = _EMPTY_QUOTES_RE.sub("", command)
     command = _expand_brace_word(command)
+    if _WINDOWS:
+        command = _win_command_paths(command)
     return command
+
+
+# Windows: path spellings inside a command line, converted to the comparison
+# form like every other path (_to_cmp). Only text that STARTS like a path is
+# touched -- a drive letter, \\?\ or \\host\, a one-letter Git Bash root, ~ or
+# $HOME -- so options keep their case (`git add -A` is not `-a`). Doubled
+# backslashes count as one: inside a Python string literal `C:\\Users` is
+# `C:\Users`. Measured 2026-10-17: `python3 -c "print(open('C:/Users/<u>/.ssh/
+# id_ed25519').read())"` passed, the same read through `cat` was refused.
+_WIN_CMD_PATH_RE = re.compile(
+    r"""(?<![\w$])(?:
+        [A-Za-z]:(?:\\{1,2}|/)                    # drive letter, either separator
+      | \\{2}[?.]\\{1,2}                           # device namespace (?/. prefix)
+      | \\{2}[\w.-]+\\{1,2}                        # UNC host, admin shares
+      | /[A-Za-z](?=/|[\s'"`;|&<>)]|$)             # Git Bash drive root /c/
+      # NOTE: no comment above may END in a backslash -- in verbose mode it
+      # swallows the line break and with it the next alternative.
+      | ~(?=/)                                     # ~/
+      | \$\{?HOME\}?(?=/)                          # $HOME/ ${HOME}/
+    )[^\s'"`;|&<>()]*""", re.X)
+
+
+def _win_command_paths(command: str, windows: bool = True) -> str:
+    def convert(hit: re.Match) -> str:
+        text = hit.group(0)
+        if text.startswith(("~", "$")):
+            head, _, tail = text.partition("/")
+            return head + "/" + tail.lower()        # ~ and $HOME are expanded later
+        return _to_cmp(re.sub(r"\\{2,}", "\\\\", text) if not text.startswith("\\\\")
+                       else "\\\\" + re.sub(r"\\{2,}", "\\\\", text[2:]), windows=windows)
+    return _WIN_CMD_PATH_RE.sub(convert, command)
 
 
 # Heredoc bodies: text, or command? The question is not WHETHER there is a
@@ -4360,7 +4408,7 @@ def check_git_commit_on_protected_branch(
     if not protected or not _GIT_COMMIT_RE.search(command):
         return None
 
-    directory = _git_working_dir(command, cwd)
+    directory = _real_from_cmp(_git_working_dir(command, cwd))
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
