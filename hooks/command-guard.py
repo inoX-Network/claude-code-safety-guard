@@ -4988,6 +4988,873 @@ def enforce_project_control_files(input_data: dict, tool_name: str,
             sys.exit(2)
 
 
+# ===========================================================================
+# PowerShell (2026-10-17)
+#
+# Until here main() let every PowerShell call through: the choke point reads
+# tool_input fields, and the command text is excluded on purpose. Measured on
+# Windows 11: `Get-Content $env:USERPROFILE\.ssh\id_ed25519`, `Remove-Item
+# ~\.claude\hooks -Recurse` and `Set-Content ~\.claude\settings.json '{}'` all
+# exited 0.
+#
+# The answer is not a second set of rules. This section works out what a
+# PowerShell command DOES -- which cmdlet behind which alias, which parameter
+# is a path, what flows through the pipeline, what .NET calls and nested
+# shells do -- and writes each operation as one line in the language the
+# Bash checks already speak:
+#
+#   delete   rm -f / rm -rf 'path'      write   : > 'path'
+#   read     cat 'path'                 move    mv 'src' 'dst'
+#   copy     cp 'src' 'dst'             external program: its own argv
+#
+# That text goes through check_command. Self-protection, control files,
+# protected reads, the delete and root rules and the approval levels are
+# therefore the SAME code for both shells -- there is nothing to drift apart.
+#
+# A target that is only known at run time (pipeline input, $_, a variable
+# the text does not assign, a computed command name) is checked against every
+# absolute path spelled out anywhere in the command: coarse, and coarse in the
+# safe direction. Environment variables resolve through the shell's known
+# folders, never through the environment -- that would reopen the hole
+# _real_home closes.
+#
+# Limit, named: a script FILE (`& .\x.ps1`, `pwsh -File x.ps1`) is not read.
+# The guard judges text, and the text is only the call.
+# ===========================================================================
+_PS_DELETE = {"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir", "clear-content",
+              "clc", "clear-item", "cli", "remove-itemproperty", "rp", "clear-itemproperty",
+              "clp"}
+_PS_WRITE_FIRST = {"set-content", "sc", "add-content", "ac", "out-file", "tee-object", "tee",
+                   "set-itemproperty", "sp", "new-itemproperty", "rename-itemproperty",
+                   "set-acl", "export-csv", "export-clixml", "set-item", "si", "new-item",
+                   "ni", "start-transcript", "export-alias", "export-formatdata"}
+_PS_WRITE_ALL = {"mkdir", "md"}
+_PS_MOVE = {"move-item", "mv", "mi", "move", "rename-item", "ren", "rni", "rename"}
+_PS_COPY = {"copy-item", "cp", "cpi", "copy", "xcopy", "robocopy"}
+_PS_META = {"ls", "dir", "gci", "get-childitem", "test-path", "get-item", "gi",
+            "resolve-path", "rvpa", "split-path", "join-path", "get-acl", "get-itemproperty",
+            "gp", "get-filehash", "measure-object", "push-location", "pushd", "set-location",
+            "sl", "cd", "chdir", "pop-location", "popd", "invoke-item", "ii", "start-sleep",
+            "get-location", "pwd", "where-object", "select-object", "sort-object",
+            "format-table", "format-list", "group-object", "get-member", "get-service",
+            "get-process", "get-command", "gcm", "get-help"}
+_PS_ECHO = {"echo", "write-output", "write", "write-host", "write-verbose", "write-warning",
+            "write-error", "write-information", "write-debug", "out-host", "out-null",
+            "out-string", "rem", "title"}
+_PS_CD = {"set-location", "sl", "cd", "chdir", "push-location", "pushd"}
+_PS_SHELLS = {"powershell", "pwsh", "powershell_ise"}
+_PS_PATH_PARAMS = {"path": "main", "literalpath": "main", "lp": "main", "pspath": "main",
+                   "filepath": "main", "destination": "dest", "destinationpath": "dest",
+                   "outfile": "dest", "outputpath": "dest", "infile": "src", "target": "src"}
+_PS_VALUE_PARAMS = {
+    "value", "encoding", "filter", "include", "exclude", "itemtype", "type", "name",
+    "propertytype", "newname", "erroraction", "ea", "warningaction", "wa", "errorvariable",
+    "ev", "outvariable", "ov", "credential", "delimiter", "depth", "stream", "totalcount",
+    "head", "tail", "first", "last", "skip", "pattern", "scope", "verb", "windowstyle",
+    "argumentlist", "args", "inputobject", "attributes", "readcount", "width", "property",
+    "id", "method", "uri", "body", "headers", "contenttype", "useragent", "timeoutsec",
+    "command", "scriptblock", "computername", "session", "workingdirectory", "wd",
+    "root", "psprovider",
+}
+_PS_UNI = {0x2013: "-", 0x2014: "-", 0x2015: "-", 0x2212: "-", 0x2010: "-", 0x2011: "-",
+           0x2018: "'", 0x2019: "'", 0x201a: "'", 0x201b: "'",
+           0x201c: '"', 0x201d: '"', 0x201e: '"',
+           0x00a0: " ", 0x2007: " ", 0x202f: " ", 0x3000: " ",
+           0x200b: None, 0x200c: None, 0x200d: None, 0x2060: None, 0xfeff: None}
+_PS_UNI.update({c: " " for c in range(0x2000, 0x200b)})
+_PS_MAX_DEPTH = 6
+
+
+def _ps_known_dirs() -> dict:
+    """Variables a command may use, resolved through known folders only."""
+    home = str(_HOME)
+    win = _WINDOWS_DIR
+    return {
+        "userprofile": home, "home": home, "homedrive": home[:2] if _WINDOWS else "",
+        "homepath": home[2:] if _WINDOWS else home,
+        "appdata": os.path.join(home, "AppData", "Roaming"),
+        "localappdata": os.path.join(home, "AppData", "Local"),
+        "temp": os.path.join(home, "AppData", "Local", "Temp"),
+        "tmp": os.path.join(home, "AppData", "Local", "Temp"),
+        "windir": win, "systemroot": win, "systemdrive": win[:2],
+        "programdata": "C:/ProgramData", "programfiles": "C:/Program Files",
+        "profile": os.path.join(home, "Documents", "PowerShell",
+                                "Microsoft.PowerShell_profile.ps1"),
+    }
+
+
+class _PsTok:
+    __slots__ = ("val", "raw", "quoted", "redir", "unres")
+
+    def __init__(self, val, raw, quoted=False, redir=None, unres=False):
+        self.val, self.raw, self.quoted, self.redir, self.unres = val, raw, quoted, redir, unres
+
+
+class _PsSeg:
+    def __init__(self, flavor, sep=";"):
+        self.flavor, self.sep, self.call = flavor, sep, sep == "&call"
+        self.toks, self.verb, self.args, self.redirs = [], "", [], []
+        self.prev = None
+        self.implicit = False
+        self.cwd = None
+
+
+def _ps_match_close(src: str, i: int) -> int:
+    depth, j, n = 0, i, len(src)
+    while j < n:
+        c = src[j]
+        if c in "'\"":
+            k = src.find(c, j + 1)
+            j = n if k < 0 else k + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return n
+
+
+def _ps_lex(src: str, flavor: str):
+    """Tokens and separators of a PowerShell (flavor 'ps') or cmd (flavor 'cmd') line."""
+    ps = flavor == "ps"
+    items, subs = [], []
+    st = {"buf": [], "start": None, "quoted": False, "unres": False, "redir": None}
+    n, i = len(src), 0
+
+    def begin(pos):
+        if st["start"] is None:
+            st["start"] = pos
+
+    def flush(end):
+        if st["buf"] or st["quoted"]:
+            start = st["start"] if st["start"] is not None else end
+            items.append(_PsTok("".join(st["buf"]), src[start:end], st["quoted"],
+                                st["redir"], st["unres"]))
+            st["redir"] = None
+        st["buf"], st["start"], st["quoted"], st["unres"] = [], None, False, False
+
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        buf = st["buf"]
+        if c == "\n":
+            flush(i)
+            items.append(";")
+            i += 1
+            continue
+        if c in " \t\f\v\r":
+            flush(i)
+            i += 1
+            continue
+        if ps and c == "<" and nxt == "#":
+            flush(i)
+            j = src.find("#>", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ps and c == "#" and not buf and not st["quoted"]:
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if ps and c == "@" and nxt in ("'", '"') and src[i + 2:i + 3] == "\n":
+            j = src.find("\n" + nxt + "@", i + 2)
+            begin(i)
+            st["quoted"] = True
+            buf.append(src[i + 3:n if j < 0 else j])
+            i = n if j < 0 else j + 3
+            continue
+        if ps and c == "'":
+            begin(i)
+            st["quoted"] = True
+            j = i + 1
+            while j < n:
+                if src[j] == "'":
+                    if src[j + 1:j + 2] == "'":
+                        buf.append("'")
+                        j += 2
+                        continue
+                    break
+                buf.append(src[j])
+                j += 1
+            i = j + 1
+            continue
+        if c == '"':
+            begin(i)
+            st["quoted"] = True
+            j = i + 1
+            while j < n:
+                d, d2 = src[j], src[j + 1:j + 2]
+                if d == '"':
+                    if d2 == '"':
+                        buf.append('"')
+                        j += 2
+                        continue
+                    break
+                if ps and d == "`" and d2:
+                    buf.append(d2)
+                    j += 2
+                    continue
+                if ps and d == "$" and d2 == "(":
+                    k = _ps_match_close(src, j + 1)
+                    subs.append(src[j + 2:k])
+                    buf.append("\x00")
+                    st["unres"] = True
+                    j = k + 1
+                    continue
+                buf.append(d)
+                j += 1
+            i = j + 1
+            continue
+        if ps and c == "$" and nxt == "(":
+            begin(i)
+            k = _ps_match_close(src, i + 1)
+            subs.append(src[i + 2:k])
+            buf.append("\x00")
+            st["unres"] = True
+            i = k + 1
+            continue
+        if ps and c == "$" and nxt == "{":
+            begin(i)
+            k = src.find("}", i + 2)
+            k = n - 1 if k < 0 else k
+            buf.append(src[i:k + 1])
+            i = k + 1
+            continue
+        if (ps and c == "`") or (not ps and c == "^"):
+            if nxt == "\n":
+                i += 2
+                continue
+            begin(i)
+            buf.append(nxt)
+            i += 2
+            continue
+        if c in "<>":
+            word = "".join(buf)
+            if buf and not st["quoted"] and (word.isdigit() or word == "*"):
+                st["buf"], st["start"] = [], None
+            else:
+                flush(i)
+            j = i + 1
+            if c == ">" and src[j:j + 1] == ">":
+                j += 1
+            if src[j:j + 1] == "&":
+                j += 1
+                while j < n and src[j].isdigit():
+                    j += 1
+                i = j
+                continue
+            st["redir"] = c
+            i = j
+            continue
+        if c in ";|&":
+            flush(i)
+            if c == nxt and c in "|&":
+                items.append(";")
+                i += 2
+                continue
+            if c == "|":
+                items.append("|")
+                i += 1
+                continue
+            items.append("&call" if (ps and c == "&") else ";")
+            i += 1
+            continue
+        if ps and c == ",":
+            flush(i)
+            i += 1
+            continue
+        if c in "(){}":
+            if (not ps or buf) and c in "{}":
+                begin(i)
+                buf.append(c)
+                i += 1
+                continue
+            flush(i)
+            items.append(";")
+            i += 1
+            continue
+        begin(i)
+        buf.append(c)
+        i += 1
+    flush(n)
+    return items, subs
+
+
+def _ps_segments(items, flavor: str) -> list:
+    segs, cur = [], _PsSeg(flavor)
+    for it in items:
+        if isinstance(it, _PsTok):
+            cur.toks.append(it)
+            continue
+        if cur.toks:
+            segs.append(cur)
+            new = _PsSeg(flavor, it)
+        else:
+            new = _PsSeg(flavor, it)
+            new.call = cur.call or it == "&call"
+        if it == "|" and segs:
+            new.prev = segs[-1]
+        cur = new
+    if cur.toks:
+        segs.append(cur)
+    return segs
+
+
+class _PsContext:
+    def __init__(self, cwd):
+        self.cwd0 = _to_cmp(cwd) if cwd else None
+        self.vars, self.env, self.aliases = {}, {}, {}
+        self.drives = {}                           # substitute drive letter -> real place
+        self.known = _ps_known_dirs()
+        self.segs, self.ir, self.literals = [], [], []
+
+
+_PS_VAR_RE = re.compile(r"\$\{env:([\w()]+)\}|\$env:([\w()]+)|%([\w()]+)%|\$\{(\w+)\}"
+                        r"|\$(?:script:|global:|local:)?(\w+)", re.I)
+
+
+def _ps_expand(ctx: _PsContext, s: str, depth: int = 0) -> str:
+    if "$" not in s and "%" not in s:
+        return s
+
+    def rep(m):
+        env_name = m.group(1) or m.group(2) or m.group(3)
+        if env_name:
+            key = env_name.lower()
+            if key in ctx.env and ctx.env[key] is not None:
+                return ctx.env[key]
+            return ctx.known.get(key, m.group(0))
+        name = (m.group(4) or m.group(5)).lower()
+        if name in ctx.vars and ctx.vars[name] is not None:
+            return _ps_expand(ctx, ctx.vars[name], depth + 1) if depth < 4 else ctx.vars[name]
+        if name in ("home", "profile"):
+            return ctx.known[name]
+        return m.group(0)
+    return _PS_VAR_RE.sub(rep, s)
+
+
+def _ps_unresolved(s: str) -> bool:
+    return "\x00" in s or bool(re.search(r"\$[\w{]|%\w+%|^@\w", s))
+
+
+def _ps_verb(ctx: _PsContext, tok: _PsTok) -> str:
+    val = _ps_expand(ctx, tok.val)
+    if tok.unres or _ps_unresolved(val):
+        return "?"
+    base = re.split(r"[\\/]", val.lower())[-1]
+    base = re.sub(r"\.(exe|com|bat|cmd)$", "", base)
+    if base in ctx.aliases:
+        base = ctx.aliases[base]
+    return base
+
+
+def _ps_is_option(tok: _PsTok, flavor: str, verb: str) -> bool:
+    v = tok.val
+    if len(v) < 2:
+        return False
+    if v.startswith("-"):
+        return not (flavor == "ps" and tok.quoted)
+    if v.startswith("/") and (flavor == "cmd" or verb in ("robocopy", "xcopy", "cmd")):
+        return re.fullmatch(r"/[a-z?][\w?:+=.,\-*]*", v, re.I) is not None
+    return False
+
+
+def _ps_canon_param(name: str) -> str:
+    if name in _PS_PATH_PARAMS or name in _PS_VALUE_PARAMS:
+        return name
+    for full, minimum in (("literalpath", 3), ("destination", 4), ("destinationpath", 12),
+                          ("outfile", 3), ("filepath", 5), ("path", 2), ("value", 2),
+                          ("encoding", 3), ("filter", 4), ("argumentlist", 2), ("command", 3),
+                          ("itemtype", 2), ("newname", 4), ("scriptblock", 2)):
+        if len(name) >= minimum and full.startswith(name):
+            return full
+    return name
+
+
+def _ps_args(seg: _PsSeg) -> tuple[list, dict, list]:
+    """Positional arguments, parameters with a value, switches."""
+    pos, params, flags = [], {}, []
+    cmdlet = seg.flavor == "ps"
+    i = 0
+    while i < len(seg.args):
+        t = seg.args[i]
+        if _ps_is_option(t, seg.flavor, seg.verb):
+            m = re.match(r"^[-/]+([^:=]+)(?:[:=](.*))?$", t.val, re.S)
+            name = (m.group(1) if m else t.val.lstrip("-/")).lower()
+            attached = m.group(2) if m else None
+            if cmdlet:
+                name = _ps_canon_param(name)
+            if attached:
+                params.setdefault(name, []).append(attached)
+            elif cmdlet and (name in _PS_PATH_PARAMS or name in _PS_VALUE_PARAMS) \
+                    and i + 1 < len(seg.args):
+                params.setdefault(name, []).append(seg.args[i + 1].val)
+                i += 1
+            else:
+                flags.append(name)
+        else:
+            pos.append(t.val)
+        i += 1
+    return pos, params, flags
+
+
+def _ps_collect(ctx: _PsContext, src: str, flavor: str, depth: int,
+                implicit: bool = False) -> None:
+    """Parse one command text and append its segments (and nested ones) to ctx."""
+    if depth > _PS_MAX_DEPTH:
+        return
+    src = src.translate(_PS_UNI).replace("\r\n", "\n")
+    if flavor == "ps":
+        _ps_scan_text(ctx, src, depth)
+    items, subs = _ps_lex(src, flavor)
+    for seg in _ps_segments(items, flavor):
+        seg.implicit = implicit
+        _ps_prepare(ctx, seg, depth)
+    for code in subs:
+        _ps_collect(ctx, code, "ps", depth + 1)
+
+
+def _ps_prepare(ctx: _PsContext, seg: _PsSeg, depth: int) -> None:
+    seg.redirs = [t for t in seg.toks if t.redir]
+    toks = [t for t in seg.toks if not t.redir and t.val != "@"]
+    toks = _ps_assignments(ctx, seg, toks, depth)
+    if not toks:
+        ctx.segs.append(seg)
+        return
+    first = toks[0]
+    # A segment that starts with a string, a type, a member access, an unknown
+    # variable or an operator (`-match`, `-split`, ...) is an expression.
+    if seg.flavor == "ps" and not seg.call and (
+            first.quoted or (first.val.startswith("-") and not first.quoted)
+            or first.val.startswith(("@", "[")) or re.match(r"^\.\w", first.val)
+            or (first.val.startswith("$") and _ps_unresolved(_ps_expand(ctx, first.val)))):
+        seg.verb, seg.args = "", toks              # an expression, not a command
+        ctx.segs.append(seg)
+        return
+    args = toks[1:]
+    glued = re.fullmatch(r"([A-Za-z]+)(/.+)", first.val) if seg.flavor == "cmd" else None
+    if glued:                                      # rd/s/q: switches glued to the name
+        first = _PsTok(glued.group(1), glued.group(1))
+        args = [_PsTok(s, s) for s in re.findall(r"/[^/]+", glued.group(2))] + args
+    verb = _ps_verb(ctx, first)
+    if seg.flavor == "cmd":
+        while verb in ("call", "start") and args:
+            if verb == "start" and args and args[0].quoted:
+                args = args[1:]
+            while args and args[0].val.startswith("/"):
+                args = args[1:]
+            if not args:
+                break
+            verb, args = _ps_verb(ctx, args[0]), args[1:]
+    seg.verb, seg.args = verb, args
+    ctx.segs.append(seg)
+    _ps_wrappers(ctx, seg, depth)
+
+
+def _ps_assignments(ctx: _PsContext, seg: _PsSeg, toks: list, depth: int) -> list:
+    if seg.flavor == "cmd":
+        if toks and toks[0].val.lower() == "set" and len(toks) > 1:
+            name, _, value = toks[1].val.partition("=")
+            ctx.env[name.lower()] = value
+            return []
+        return toks
+    if not toks:
+        return toks
+    t0 = toks[0]
+    m = re.match(r"^\$(?:\{)?(?:script:|global:|local:)?([\w:]+?)(?:\})?\s*(?:[+\-*/%]|\?\?)?=(.*)$",
+                 t0.val, re.S)
+    rest = None
+    if m:
+        name, first = m.group(1), m.group(2)
+        rest = ([_PsTok(first, first, t0.quoted)] if first else []) + toks[1:]
+    elif t0.val.startswith("$") and len(toks) > 1 and re.fullmatch(r"(?:[+\-*/%]|\?\?)?=", toks[1].val):
+        name = re.sub(r"^\$\{?(?:script:|global:|local:)?|\}$", "", t0.val)
+        rest = toks[2:]
+    if rest is None:
+        return toks
+    value = rest[0].val if len(rest) == 1 else None
+    key = name.lower()
+    if key.startswith("env:"):
+        ctx.env[key[4:]] = value
+    else:
+        ctx.vars[key] = value
+    for tok in rest:                               # @{Path='x'} and lists feed the pool
+        for entry in tok.val.strip("@{}() ").split(";"):
+            _ps_pool(ctx, entry.split("=", 1)[-1].strip("{}() "))
+    if rest and not (len(rest) == 1 and rest[0].quoted):
+        _ps_collect(ctx, " ".join(t.raw for t in rest), "ps", depth + 1)
+    return []
+
+
+def _ps_pool(ctx: _PsContext, value: str) -> None:
+    """Remember a spelled-out absolute path for targets known only at run time."""
+    value = _ps_expand(ctx, value.strip())
+    if value and not _ps_unresolved(value) and re.match(
+            r"^([a-z]:|[\\/]|~)", value, re.I):
+        ctx.literals.append(value)
+
+
+def _ps_inner(toks: list) -> list:
+    raw = " ".join(t.raw for t in toks).strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1]
+    vals = " ".join(t.val for t in toks)
+    return [raw] if raw == vals else [raw, vals]
+
+
+def _ps_wrappers(ctx: _PsContext, seg: _PsSeg, depth: int) -> None:
+    v, args = seg.verb, seg.args
+    vals = [a.val.lower() for a in args]
+
+    def nested(codes, flavor):
+        seg.verb = "*wrapper*"
+        for code in codes:
+            _ps_collect(ctx, code, flavor, depth + 1)
+
+    if v in ("set-variable", "sv", "new-variable", "nv", "set-alias", "sal", "new-alias", "nal"):
+        pos, params, _ = _ps_args(seg)
+        name = (params.get("name") or pos[:1] or [None])[0]
+        value = (params.get("value") or pos[1:2] or [None])[0]
+        if name and value:
+            if v in ("set-alias", "sal", "new-alias", "nal"):
+                ctx.aliases[name.lower()] = _ps_verb(ctx, _PsTok(value, value))
+            else:
+                ctx.vars[name.lower()] = value
+                _ps_pool(ctx, value)
+    elif v in ("new-psdrive", "ndr", "subst", "net"):
+        # A substitute drive: Q:\x then means <root>\x. Without this the
+        # protected target stays invisible behind a letter of its own.
+        pos, params, _ = _ps_args(seg)
+        if v == "net":
+            pos = pos[1:] if pos[:1] and pos[0].lower() == "use" else []
+        letter = (params.get("name") or pos[:1] or [""])[0].rstrip(":").lower()
+        root = (params.get("root") or pos[1:2] or [None])[0]
+        if re.fullmatch(r"[a-z]", letter) and root:
+            ctx.drives[letter] = _ps_expand(ctx, root)
+    elif v == "cmd":
+        for i, a in enumerate(vals):
+            if re.fullmatch(r"//?[ckr]", a):
+                nested(_ps_inner(args[i + 1:]), "cmd")
+                break
+    elif v in _PS_SHELLS:
+        i = 0
+        while i < len(args):
+            name = args[i].val.lower().lstrip("-/")
+            if not args[i].val.startswith(("-", "/")):
+                nested(_ps_inner(args[i:]), "ps")
+                return
+            if name.startswith("ex") or name == "ep":
+                i += 2
+                continue
+            if name in ("e", "ec") or (len(name) >= 2 and "encodedcommand".startswith(name)):
+                if i + 1 < len(args):
+                    seg.verb = "*wrapper*"
+                    try:
+                        code = __import__("base64").b64decode(
+                            args[i + 1].val + "=" * (-len(args[i + 1].val) % 4)).decode("utf-16-le")
+                    except ValueError:
+                        return
+                    _ps_collect(ctx, code, "ps", depth + 1)
+                return
+            if name and "command".startswith(name):
+                if i + 1 < len(args) and args[i + 1].val == "-" and seg.prev is not None:
+                    nested([" ".join(a.val for a in seg.prev.args)], "ps")
+                else:
+                    nested(_ps_inner(args[i + 1:]), "ps")
+                return
+            if name and "file".startswith(name):
+                return
+            if name in ("windowstyle", "w", "workingdirectory", "wd", "configurationname",
+                        "outputformat", "of", "inputformat", "settingsfile"):
+                i += 2
+                continue
+            i += 1
+    elif v in ("bash", "sh", "wsl", "zsh"):
+        seg.verb = "*bash*"                        # Bash speaks for itself: hand it over
+    elif v in ("iex", "invoke-expression"):
+        pos, params, _ = _ps_args(seg)
+        code = (params.get("command") or pos[:1] or [None])[0]
+        if code is None and seg.prev is not None and seg.prev.verb == "":
+            code = " ".join(a.val for a in seg.prev.args)
+        if code is not None and not _ps_unresolved(_ps_expand(ctx, code)):
+            nested([_ps_expand(ctx, code)], "ps")
+    elif v in ("start-process", "saps", "start") and seg.flavor == "ps":
+        pos, params, _ = _ps_args(seg)
+        exe = (params.get("filepath") or [None])[0]
+        rest = pos if exe else pos[1:]
+        exe = exe or (pos[:1] or [None])[0]
+        arglist = params.get("argumentlist", []) + rest
+        if exe:
+            nested([exe + " " + " ".join(arglist)], "cmd" if _ps_verb(ctx, _PsTok(exe, exe))
+                   not in _PS_SHELLS else "ps")
+            if _ps_verb(ctx, _PsTok(exe, exe)) in _PS_SHELLS:
+                nested([" ".join(arglist)], "ps")
+
+
+_PS_NET_FILE_RE = re.compile(r"\[(?:system\.)?io\.(file|directory)\]::(\w+)\s*\(", re.I)
+_PS_NET_DELETE_RE = re.compile(r"\.(delete|deletefile|deletefolder|moveto)\s*\(", re.I)
+_PS_STRING_RE = re.compile(r"""'((?:[^']|'')*)'|"((?:[^"`]|`.)*)"|(\$[\w:{}]+)""")
+
+
+def _ps_call_args(ctx: _PsContext, text: str) -> list:
+    out = []
+    for m in _PS_STRING_RE.finditer(text):
+        if m.group(3):
+            val = _ps_expand(ctx, m.group(3))
+            if not _ps_unresolved(val):
+                out.append(val)
+        else:
+            out.append(m.group(1) if m.group(1) is not None else m.group(2))
+    return out
+
+
+def _ps_scan_text(ctx: _PsContext, src: str, depth: int) -> None:
+    """What the lexer does not see as a command: .NET calls, the call operator
+    on an expression, and literal strings handed to a script-block factory."""
+    for m in _PS_NET_FILE_RE.finditer(src):
+        meth = m.group(2).lower()
+        k = _ps_match_close(src, m.end() - 1)
+        lits = _ps_call_args(ctx, src[m.end():k])
+        if meth == "delete":
+            roles = ["delete"]
+        elif meth in ("move", "replace"):
+            roles = ["move", "write"]
+        elif meth == "copy":
+            roles = ["read", "write"]
+        elif meth.startswith(("write", "append", "create", "set", "encrypt", "decrypt", "openwrite")):
+            roles = ["write"]
+        elif meth.startswith(("read", "open")):
+            roles = ["read"]
+        else:
+            continue
+        if not lits:
+            ctx.ir.append(("implicit", roles[0]))
+        for idx, lit in enumerate(lits):
+            ctx.ir.append((roles[min(idx, len(roles) - 1)], lit))
+            _ps_pool(ctx, lit)
+    for m in _PS_NET_DELETE_RE.finditer(src):
+        k = _ps_match_close(src, m.end() - 1)
+        lits = _ps_call_args(ctx, src[m.end():k])
+        if lits and m.group(1).lower() in ("deletefile", "deletefolder"):
+            ctx.ir.extend(("delete", lit) for lit in lits)
+        else:
+            ctx.ir.append(("implicit", "delete"))
+    for m in re.finditer(r"(?:invokescript|addscript|\[scriptblock\]::create)\s*\(", src, re.I):
+        k = _ps_match_close(src, m.end() - 1)
+        for lit in _ps_call_args(ctx, src[m.end():k]):
+            _ps_collect(ctx, lit, "ps", depth + 1)
+    for m in re.finditer(r"(?:^|[;|{(\s])[&.]\s*\(", src):
+        k = _ps_match_close(src, m.end() - 1)
+        expr = src[m.end():k]
+        lit = r"""'[^']*'|"[^"$`]*\""""
+        if re.fullmatch(r"\s*(?:%s)(?:\s*\+\s*(?:%s))*\s*" % (lit, lit), expr):
+            name = "".join(a or b for a, b in re.findall(r"""'([^']*)'|"([^"$`]*)\"""", expr))
+            end = re.search(r"[;\n|]", src[k + 1:])
+            rest = src[k + 1:k + 1 + (end.start() if end else len(src))]
+            _ps_collect(ctx, name + " " + rest, "ps", depth + 1)
+
+
+def _ps_roles(ctx: _PsContext, seg: _PsSeg) -> list:
+    """(role, path) pairs for one segment; role is read/write/delete/delete-r/move/copy."""
+    v = seg.verb
+    roles = [("write", t.val) for t in seg.redirs if t.redir == ">"
+             and t.val.lower().lstrip("\\") not in ("nul", "$null", "null", "/dev/null")]
+    roles += [("read", t.val) for t in seg.redirs if t.redir == "<"]
+    if v in ("", "*wrapper*", "*bash*") or v in _PS_ECHO:
+        return roles
+    pos, params, flags = _ps_args(seg)
+    main = sum((params.get(k, []) for k in ("path", "literalpath", "lp", "pspath", "filepath")), [])
+    dest = sum((params.get(k, []) for k in ("destination", "destinationpath", "outfile",
+                                             "outputpath")), [])
+    roles += [("write", d) for d in dest] + [("read", s) for s in params.get("infile", [])]
+    recursive = any(f in ("s", "r") or (len(f) >= 2 and "recurse".startswith(f)) for f in flags)
+    if v in _PS_DELETE:
+        roles += [("delete-r" if recursive else "delete", p) for p in main + pos]
+        if not (main + pos):
+            seg.implicit_role = "delete-r" if recursive else "delete"
+    elif v in _PS_WRITE_FIRST:
+        targets = main or pos[:1]
+        if v in ("new-item", "ni") and params.get("name"):
+            targets = [os.path.join((targets or ["."])[0], params["name"][0])]
+        roles += [("write", p) for p in targets]
+        if not targets:
+            seg.implicit_role = "write"
+    elif v in _PS_WRITE_ALL:
+        roles += [("write", p) for p in main + pos]
+    elif v in _PS_MOVE:
+        srcs = main or pos[:1]
+        tgt = dest or pos[1:2] if main else dest or pos[1:2]
+        if v in ("rename-item", "ren", "rni", "rename") and srcs:
+            new = (params.get("newname") or pos[1:2] or [None])[0]
+            tgt = [os.path.join(os.path.dirname(_ps_expand(ctx, srcs[0])), new)] if new else []
+        roles += [("move", p) for p in srcs] + [("write", p) for p in tgt]
+        if not srcs:
+            seg.implicit_role = "move"
+    elif v in _PS_COPY:
+        if v == "robocopy":
+            srcs, tgt = pos[:1], pos[1:2]
+            if {"mir", "purge"} & {f.lower() for f in flags}:
+                roles += [("delete-r", p) for p in tgt]
+        elif dest:
+            srcs, tgt = main + pos, []
+        else:
+            allp = main + pos
+            srcs, tgt = (allp[:-1], allp[-1:]) if len(allp) >= 2 else (allp, ["."])
+        roles += [("read", p) for p in srcs] + [("write", p) for p in tgt]
+    elif v in _PS_META:
+        pass
+    elif v in ("type", "get-content", "gc", "cat", "select-string", "sls", "import-csv",
+               "import-clixml", "format-hex", "fhx", "get-filehash"):
+        roles += [("read", p) for p in main + pos]
+        if not (main + pos) and seg.prev is not None:
+            seg.implicit_role = "read"
+    elif v == "?" or "-" in v:
+        # A computed command name, or a cmdlet without its own rule. Only
+        # arguments that LOOK like paths count -- a bare word (`-DriveLetter E`,
+        # `Select-Object Name`) is a value; taking it as a file under the working
+        # directory produced false refusals in C:\Windows\System32 (measured on
+        # 203 real calls). What it does to them follows the approved verb.
+        looks = [p for p in main + pos if re.search(r"[\\/~]|^[a-z]:", p, re.I)]
+        prefix = v.split("-", 1)[0]
+        if v == "?" or prefix not in _PS_READING_VERBS:
+            roles += [("write", p) for p in looks]
+        roles += [("read", p) for p in looks]
+    return roles
+
+
+# Approved PowerShell verbs that only look: an unknown cmdlet with one of
+# these reads its paths, every other verb (Set, New, Export, Invoke, ...) is
+# taken to write them.
+_PS_READING_VERBS = {"get", "test", "select", "where", "measure", "format", "show", "find",
+                     "search", "resolve", "compare", "convertto", "convertfrom", "read",
+                     "wait", "sort", "group", "join", "split", "trace", "debug", "confirm",
+                     "ping", "out"}
+
+
+def _ps_quote(path: str) -> str:
+    return path if re.fullmatch(r"[\w@%+=:,./~-]+", path) else shlex.quote(path)
+
+
+def powershell_to_command(command: str, cwd: str | None) -> str:
+    """The command as Bash-check lines: one line per operation (see above)."""
+    ctx = _PsContext(cwd)
+    _ps_collect(ctx, command, "ps", 0)
+    here = ctx.cwd0
+    lines = []
+
+    def place(raw: str) -> str | None:
+        value = _ps_expand(ctx, raw.strip())
+        if not value or _ps_unresolved(value) or "://" in value:
+            return None
+        value = re.sub(r"^(?:microsoft\.powershell\.core\\)?filesystem::", "", value, flags=re.I)
+        drive = re.match(r"^([a-z]):[\\/]?(.*)$", value, re.I | re.S)
+        if drive and drive.group(1).lower() in ctx.drives:
+            value = ctx.drives[drive.group(1).lower()].rstrip("\\/") + "/" + drive.group(2)
+        value = _to_cmp(value)
+        if here and not re.match(r"^([a-z]:|/|~)", value, re.I):
+            value = posixpath.join(here, value)
+        return value
+
+    def emit(role: str, raw: str) -> None:
+        p = place(raw)
+        if p is None:
+            return
+        q = _ps_quote(p)
+        lines.append({"read": f"cat {q}", "read-r": f"grep -r x {q}", "write": f": > {q}",
+                      "delete": f"rm -f {q}", "delete-r": f"rm -rf {q}",
+                      "move": f"mv {q} /dev/null/x"}[role])
+
+    # Every absolute path spelled out anywhere, BEFORE anything is emitted: a
+    # target that only arrives at run time ($_, pipeline input) is held
+    # against all of them, including those of an expression in front of a pipe.
+    for seg in ctx.segs:
+        for tok in seg.args + seg.toks[:1]:
+            if not tok.val.startswith("-"):
+                _ps_pool(ctx, tok.val)
+
+    for item in list(ctx.ir):                      # .NET calls found in the text
+        if item[0] == "implicit":
+            for lit in ctx.literals:
+                emit(item[1], lit)
+        else:
+            emit(item[0], item[1])
+    for seg in ctx.segs:
+        seg.cwd = here
+        if seg.verb in _PS_CD:
+            pos, _, _ = _ps_args(seg)
+            pos = [p for p in pos if p.lower() != "/d"]
+            if pos:
+                here = place(pos[0]) or here
+            continue
+        if seg.verb == "*bash*":
+            inner = " ".join(_ps_quote(a.val) if not _ps_unresolved(a.val) else a.val
+                             for a in seg.args)
+            if seg.flavor and seg.args and seg.args[0].val.lower() not in ("-c",):
+                inner = re.sub(r"/mnt/([a-zA-Z])(?=/|\s|$)", r"/\1", inner)
+            lines.append(("bash " if not inner.startswith("-") else "bash ") + inner)
+            continue
+        for role, raw in _ps_roles(ctx, seg):
+            emit(role, raw)
+            _ps_pool(ctx, raw)
+        role = getattr(seg, "implicit_role", None)
+        if role:
+            pool = []
+            prev = seg.prev
+            while prev is not None:
+                pool += [a.val for a in prev.args if not a.val.startswith("-")]
+                prev = prev.prev
+            # what flows in may be every file BELOW a listed directory
+            role = "read-r" if role == "read" else role
+            for lit in [p for p in pool if place(p)] or ctx.literals:
+                emit(role, lit)
+        if seg.verb and seg.verb not in _PS_META and seg.verb not in _PS_ECHO \
+                and seg.verb not in ("*wrapper*", "") and "-" not in seg.verb \
+                and seg.verb not in _PS_DELETE | _PS_WRITE_FIRST | _PS_WRITE_ALL \
+                | _PS_MOVE | _PS_COPY | {"type", "cat", "gc", "?", "iex", "sls"}:
+            # an external program: its own argv, judged as Bash would judge it
+            argv = [seg.verb] + [a.val for a in seg.args]
+            lines.append(" ".join(_ps_quote(_ps_expand(ctx, a)) for a in argv))
+        unresolved_args = [a for a in seg.args if _ps_unresolved(_ps_expand(ctx, a.val))]
+        if unresolved_args and seg.verb in _PS_DELETE | _PS_WRITE_FIRST | _PS_MOVE | {"?"}:
+            fallback = ("delete-r" if seg.verb in _PS_DELETE else
+                        "move" if seg.verb in _PS_MOVE else "write")
+            for lit in ctx.literals:
+                emit(fallback, lit)
+        elif unresolved_args and seg.verb in ("get-content", "gc", "cat", "type", "select-string"):
+            for lit in ctx.literals:
+                emit("read", lit)
+    return "\n".join(lines) if lines else ":"
+
+
+def check_powershell(input_data: dict, session_id: str | None) -> None:
+    """Judge a PowerShell call with the Bash checks (see the section above)."""
+    command = (input_data.get("tool_input", {}) or {}).get("command", "")
+    if not command:
+        sys.exit(0)
+    translated = powershell_to_command(command, input_data.get("cwd"))
+    # Text rules (pipe to a shell, force push patterns, blocked_patterns) read
+    # the original as well: they look at words, not at operations.
+    check_command(translated + "\n" + _ps_text_rules_line(command), input_data,
+                  session_id, tool="PowerShell")
+
+
+def _ps_text_rules_line(command: str) -> str:
+    """The original text, reduced to what the word-based rules may read in it.
+
+    A download piped into Invoke-Expression is the PowerShell form of
+    `curl | sh`; it is rewritten into that form so blocked_patterns catches it.
+    """
+    low = command.lower()
+    if re.search(r"\b(iwr|irm|invoke-webrequest|invoke-restmethod|curl|wget|downloadstring)\b"
+                 r"[^\n;]*\|\s*(iex|invoke-expression)\b", low) or \
+            re.search(r"\b(iex|invoke-expression)\b[^\n;]*\b(iwr|irm|invoke-webrequest|"
+                      r"invoke-restmethod|downloadstring|net\.webclient)\b", low):
+        return "curl x | sh"
+    return ":"
+
+
 def main():
     """Main function — reads tool input from stdin, checks against rules."""
     try:
@@ -5108,6 +5975,9 @@ def main():
         _audit(input_data, tool_name, tool_name, "allow", "mcp_ok")
         sys.exit(0)
 
+    if tool_name == "PowerShell":
+        check_powershell(input_data, session_id)
+
     if tool_name != "Bash":
         sys.exit(0)
 
@@ -5117,6 +5987,18 @@ def main():
     if not command:
         sys.exit(0)
 
+    check_command(command, input_data, session_id)
+
+
+def check_command(command: str, input_data: dict, session_id: str | None,
+                  tool: str = "Bash") -> None:
+    """The command checks, in order. Always ends the process: 0 allows, 2 blocks.
+
+    Its own function so that a second shell can be judged by the SAME checks:
+    the PowerShell branch turns what a command does into a command line in
+    this function's language and hands it over, instead of repeating every
+    decision. `tool` only names the caller in the audit log.
+    """
     # De-obfuscate IFS-style word-splitting once, so EVERY downstream check
     # (blocked_patterns, paths, sudo, self-protect, reads) sees real whitespace.
     command = _normalize_obfuscation(command)
@@ -5133,7 +6015,7 @@ def main():
     # 1. Blocked patterns — ALWAYS active, even with an override
     blocked = check_blocked_patterns(command, rules.get("blocked_patterns", []))
     if blocked:
-        _audit(input_data, "Bash", command, "block", f"blocked_pattern:{blocked}", "hard")
+        _audit(input_data, tool, command, "block", f"blocked_pattern:{blocked}", "hard")
         print(msg("bash.blocked_pattern", pattern=blocked), file=sys.stderr)
         sys.exit(2)
 
@@ -5141,7 +6023,7 @@ def main():
     #     Only the owner's !-invocation bypasses the guard and reaches the script.
     owner_only = check_owner_only(command, rules.get("owner_only_commands", []))
     if owner_only and not is_chain_approval(command):
-        _audit(input_data, "Bash", command, "block", f"owner_only:{owner_only}", "hard")
+        _audit(input_data, tool, command, "block", f"owner_only:{owner_only}", "hard")
         print(msg("bash.owner_only", command=owner_only), file=sys.stderr)
         sys.exit(2)
 
@@ -5149,7 +6031,7 @@ def main():
     #     session without the user's hooks. ALWAYS blocked, no override.
     agent_cli = check_agent_cli(command)
     if agent_cli:
-        _audit(input_data, "Bash", command, "block", f"agent_cli:{agent_cli}", "hard")
+        _audit(input_data, tool, command, "block", f"agent_cli:{agent_cli}", "hard")
         print(msg("bash.agent_cli", command=agent_cli), file=sys.stderr)
         sys.exit(2)
 
@@ -5158,14 +6040,14 @@ def main():
         command, rules.get("blocked_bash_patterns_force_push", [])
     )
     if force_push:
-        _audit(input_data, "Bash", command, "block", "force_push", "hard")
+        _audit(input_data, tool, command, "block", "force_push", "hard")
         print(msg("git.force_push"), file=sys.stderr)
         sys.exit(2)
 
     # 2b. Git-safety checks — ALWAYS blocked, even with an override
     git_violation = check_git_safety(command, rules.get("blocked_git_ops", []))
     if git_violation:
-        _audit(input_data, "Bash", command, "block", f"git_safety:{git_violation}", "hard")
+        _audit(input_data, tool, command, "block", f"git_safety:{git_violation}", "hard")
         print(msg("git.safety", pattern=git_violation), file=sys.stderr)
         sys.exit(2)
 
@@ -5175,7 +6057,7 @@ def main():
         command, input_data.get("cwd"), rules.get("protected_git_branches", [])
     )
     if protected_branch:
-        _audit(input_data, "Bash", command, "block",
+        _audit(input_data, tool, command, "block",
                f"git_branch:{protected_branch}", "hard")
         print(msg("git.protected_branch", branch=protected_branch), file=sys.stderr)
         sys.exit(2)
@@ -5185,7 +6067,7 @@ def main():
     self_protect_hit = (command_hits_self_protect(command)
                         or git_hits_self_protect(command, input_data.get("cwd")))
     if self_protect_hit:
-        _audit(input_data, "Bash", command, "block", f"self_protect:{self_protect_hit}", "hard")
+        _audit(input_data, tool, command, "block", f"self_protect:{self_protect_hit}", "hard")
         # A one-liner naming the path is blocked even when it only READS.
         # "write access" sent people looking for a write that is not there, and
         # hid the way out.
@@ -5202,13 +6084,13 @@ def main():
     if control_hit:
         what, hard, inline = control_hit
         if hard:
-            _audit(input_data, "Bash", command, "block", f"project_control:{what}", "hard")
+            _audit(input_data, tool, command, "block", f"project_control:{what}", "hard")
             print(msg("control.hard_inline" if inline else "control.hard",
                       what=what), file=sys.stderr)
             sys.exit(2)
         override = load_override(input_data.get("agent_id"), session_id)
         if not override or override.get("override_level", 0) < 1:
-            _audit(input_data, "Bash", command, "block", f"project_control:{what}", 0)
+            _audit(input_data, tool, command, "block", f"project_control:{what}", 0)
             print(msg("control.gated_inline" if inline else "control.gated",
                       what=what), file=sys.stderr)
             sys.exit(2)
@@ -5220,7 +6102,7 @@ def main():
     #     WRITE_INDICATOR, so it slips under 2c and needs its own check.
     docker_always, docker_reason = check_docker_always(command, rules)
     if docker_always:
-        _audit(input_data, "Bash", command, "block", f"docker:{docker_reason}", "hard")
+        _audit(input_data, tool, command, "block", f"docker:{docker_reason}", "hard")
         print(msg("docker.always_blocked", reason=docker_reason), file=sys.stderr)
         sys.exit(2)
 
@@ -5242,12 +6124,12 @@ def main():
             # Mirror the path/sudo blocks: state who/level and the escalation path.
             override = load_override(agent_id, session_id)
             level = override.get("override_level", 0) if override else 0
-            _audit(input_data, "Bash", command, "block", "protected_read", level)
+            _audit(input_data, tool, command, "block", "protected_read", level)
             print(msg("bash.read_blocked", reason=read_reason,
                       extra=_override_note(override, level, agent_id)),
                   file=sys.stderr)
         else:
-            _audit(input_data, "Bash", command, "block", "protected_read", "hard")
+            _audit(input_data, tool, command, "block", "protected_read", "hard")
             print(msg("bash.read_blocked_hard", reason=read_reason), file=sys.stderr)
         sys.exit(2)
 
@@ -5290,14 +6172,14 @@ def main():
         if root_hit in FIXED_TREE_ROOTS_ALWAYS:
             # The root or the home directory ITSELF: no approval turns this
             # into a maintenance task.
-            _audit(input_data, "Bash", command, "block",
+            _audit(input_data, tool, command, "block",
                    f"root_delete:{root_hit}", "hard")
             print(msg("root_delete.always", path=root_hit), file=sys.stderr)
             sys.exit(2)
         if root_hit:
             allowed, need = path_decision(root_hit, level, grants)
             if not allowed:
-                _audit(input_data, "Bash", command, "block",
+                _audit(input_data, tool, command, "block",
                        f"root_delete:{root_hit}", level)
                 key = ("root_delete.configured_tree"
                        if root_hit in [str(r) for r in configured_roots]
@@ -5322,7 +6204,7 @@ def main():
                                           _command_deletes if delete_only else None),
                                       liste)
         if not allowed:
-            _audit(input_data, "Bash", command, "block", f"protected_path:{blocked_path}", level)
+            _audit(input_data, tool, command, "block", f"protected_path:{blocked_path}", level)
             print(msg("path.delete_blocked" if delete_only else "path.write_blocked",
                       path=blocked_path, needed=need,
                       extra=_override_note(override, level, agent_id)),
@@ -5338,7 +6220,7 @@ def main():
         )
         bad_sudo = check_sudo(command, merged, check_subcommands=(level < 1))
         if bad_sudo:
-            _audit(input_data, "Bash", command, "block", f"sudo_not_allowed:{bad_sudo}", level)
+            _audit(input_data, tool, command, "block", f"sudo_not_allowed:{bad_sudo}", level)
             print(msg("sudo.disallowed", command=bad_sudo,
                       extra=_override_note(override, level, agent_id)),
                   file=sys.stderr)
@@ -5347,14 +6229,14 @@ def main():
         # manager's changing subcommands.
         writing = check_sudo_writes(command) if level < 1 else None
         if writing:
-            _audit(input_data, "Bash", command, "block", f"sudo_writes:{writing}", level)
+            _audit(input_data, tool, command, "block", f"sudo_writes:{writing}", level)
             print(msg("sudo.writes_as_root", command=writing,
                       extra=_override_note(override, level, agent_id)),
                   file=sys.stderr)
             sys.exit(2)
         setuid = check_sudo_setuid(command)
         if setuid:
-            _audit(input_data, "Bash", command, "block", f"sudo_setuid:{setuid}", level)
+            _audit(input_data, tool, command, "block", f"sudo_setuid:{setuid}", level)
             print(msg("sudo.setuid", command=setuid,
                       extra=_override_note(override, level, agent_id)),
                   file=sys.stderr)
@@ -5367,7 +6249,7 @@ def main():
     if level < 1:
         bad_lifecycle = check_lifecycle(command)
         if bad_lifecycle:
-            _audit(input_data, "Bash", command, "block",
+            _audit(input_data, tool, command, "block",
                    f"lifecycle_needs_override:{bad_lifecycle}", level)
             print(msg("lifecycle.needs_override", command=bad_lifecycle),
                   file=sys.stderr)
@@ -5403,7 +6285,7 @@ def main():
                                      keywords=", ".join(injections)))
 
     # All good — allow through
-    _audit(input_data, "Bash", command, "allow", "ok", level)
+    _audit(input_data, tool, command, "allow", "ok", level)
     sys.exit(0)
 
 
