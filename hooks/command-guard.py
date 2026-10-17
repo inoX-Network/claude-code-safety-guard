@@ -12,6 +12,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -44,10 +45,87 @@ def _real_home() -> Path:
             return Path(pwd.getpwuid(os.getuid()).pw_dir)
         except (KeyError, OSError):
             pass
+    profile = _known_folder_profile()
+    if profile:
+        return Path(profile)
     return Path(os.path.expanduser("~"))
 
 
+def _known_folder_profile() -> str | None:
+    """The Windows profile directory from the shell, not from the environment.
+
+    Windows has no password database. `expanduser` reads USERPROFILE there, and
+    that is settable just like HOME -- measured 2026-10-17: with USERPROFILE
+    redirected, `expanduser` followed it while SHGetKnownFolderPath kept the
+    real profile. Standard library only (ctypes); None off Windows or on error.
+    """
+    return _known_folder("{5E6C858F-0E22-4760-9AFE-EA3317B67173}")   # FOLDERID_Profile
+
+
+def _known_folder(folder_id: str) -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import uuid
+        folder = uuid.UUID(folder_id)
+        guid = (ctypes.c_byte * 16).from_buffer_copy(folder.bytes_le)
+        out = ctypes.c_wchar_p()
+        hr = ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None,
+                                                        ctypes.byref(out))
+        try:
+            return out.value if hr == 0 and out.value else None
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(out)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
 _HOME = _real_home()
+
+# Windows: every path is compared in ONE form -- '/c/users/<user>/...', the
+# spelling Git Bash uses anyway. Every protected path and control-file pattern
+# is written with '/'; with backslashes, case differences, the device namespace
+# or an admin share they all walked past (measured 2026-10-17, see
+# tests/test_windows_paths.py). Off Windows the conversion is the identity.
+_WINDOWS = os.name == "nt"
+_DRIVE_RE = re.compile(r"^([a-zA-Z]):/*")          # C:\x, C:/x, C: and drive-relative C:x
+_ADMIN_SHARE_RE = re.compile(r"^//[^/]+/([a-zA-Z])\$(?=/|$)", re.I)
+# Like the profile: from the shell, not from SystemRoot (settable).
+_WINDOWS_DIR = _known_folder("{F38BF404-1D43-42F2-9305-67DE0B28FC23}") or "C:/Windows"  # FOLDERID_Windows
+
+
+def _to_cmp(path: str, windows: bool = _WINDOWS) -> str:
+    """A path in the form it is compared in. Purely lexical, no file access."""
+    if not windows:
+        return path
+    p = path.replace("\\", "/")
+    low = p.lower()
+    if low.startswith(("//?/unc/", "//./unc/")):
+        p = "//" + p[8:]
+    elif low.startswith(("//?/", "//./")):
+        p = p[4:]
+    m = _ADMIN_SHARE_RE.match(p)
+    if m:
+        p = "/" + m.group(1) + p[m.end():]
+    elif re.match(r"^//[^/]+/admin\$(?=/|$)", p, re.I):
+        p = _WINDOWS_DIR.replace("\\", "/") + p.split("$", 1)[1]   # ADMIN$ is the Windows folder
+    m = _DRIVE_RE.match(p)
+    if m:
+        p = "/" + m.group(1) + "/" + p[m.end():]
+    parts = []
+    for comp in p.split("/"):
+        if comp not in (".", ".."):
+            comp = comp.split(":", 1)[0].rstrip(" .")   # NTFS streams, trailing dot/blank
+        parts.append(comp)
+    p = "/".join(parts)
+    if len(p) > 1:
+        p = p.rstrip("/") or "/"
+    return p.lower()
+
+
+_HOME_CMP = _to_cmp(str(_HOME))
+
 
 def expand_path(path: str) -> str:
     """Expand ~ and $HOME/${HOME} to the home directory.
@@ -57,7 +135,16 @@ def expand_path(path: str) -> str:
     expand it before execution, but the hook sees the literal string first.
     User-defined variables (`D=~/.ssh; ... $D`) stay out of scope (the hook
     does not run a shell), same inherent limit as blocked_patterns.
+
+    Returns the COMPARISON form (see _to_cmp). For opening a file use
+    _expand_real, which keeps the platform's own spelling.
     """
+    home = _HOME_CMP
+    return _to_cmp(path.replace("~", home).replace("${HOME}", home).replace("$HOME", home))
+
+
+def _expand_real(path: str) -> str:
+    """~ expanded for file access -- the real path, not the comparison form."""
     home = str(_HOME)
     return path.replace("~", home).replace("${HOME}", home).replace("$HOME", home)
 
@@ -418,7 +505,7 @@ def _load_language() -> dict:
     candidates = []
     configured = _INSTALLATION.get("lang_dir")
     if isinstance(configured, str) and configured.strip():
-        candidates.append(Path(expand_path(configured.strip())) / f"{code}.json")
+        candidates.append(Path(_expand_real(configured.strip())) / f"{code}.json")
     try:
         candidates.append(Path(__file__).resolve().parent / "lang" / f"{code}.json")
     except OSError:
@@ -762,6 +849,14 @@ _PROJECT_CONTROL_GATED = [
     (re.compile(r"(?:^|/)[._]agents?/agents(?:/|$)"), ".agents/agents/"),
     (re.compile(r"(?:^|/)[._]agents?/workflows(?:/|$)"), ".agents/workflows/"),
 ]
+
+# Windows compares paths in lower case (_to_cmp), so every pattern with an
+# upper-case letter (trustedFolders.json) has to ignore case there as well.
+if _WINDOWS:
+    _PROJECT_CONTROL_HARD = [(re.compile(rx.pattern, rx.flags | re.I), what)
+                             for rx, what in _PROJECT_CONTROL_HARD]
+    _PROJECT_CONTROL_GATED = [(re.compile(rx.pattern, rx.flags | re.I), what)
+                              for rx, what in _PROJECT_CONTROL_GATED]
 
 # Tools that only ever read. Everything else counts as potentially writing, so a
 # tool branch nobody has thought of yet is checked rather than skipped. A false
@@ -2970,7 +3065,7 @@ def dev_mode_active() -> bool:
     The flag file lives in SELF_PROTECT — only the owner can set it via !.
     """
     flag_env = _env("CLAUDE_HOOK_DEV_FLAG")
-    flag = Path(flag_env) if flag_env else Path(expand_path(HOOK_DEV_FLAG))
+    flag = Path(flag_env) if flag_env else Path(_expand_real(HOOK_DEV_FLAG))
     if not flag.exists():
         return False
     try:
@@ -3243,9 +3338,9 @@ _GIT_VALUE_OPTIONS = {"-C", "-c", "--work-tree", "--git-dir", "--namespace",
 def _git_place(path: str, base: str | None) -> str:
     """A path as git would use it: ~ expanded, relative to `base`."""
     path = expand_path(path.strip("'\""))
-    if not os.path.isabs(path) and base:
-        path = os.path.join(base, path)
-    return os.path.normpath(path)
+    if not posixpath.isabs(path) and base:
+        path = posixpath.join(_to_cmp(base), path)
+    return posixpath.normpath(path)
 
 
 def git_hits_self_protect(command: str, cwd: str | None) -> str | None:
@@ -3502,7 +3597,7 @@ _WORKING_DIR = None
 
 def _set_working_dir(reported: str | None) -> None:
     global _WORKING_DIR
-    _WORKING_DIR = reported
+    _WORKING_DIR = _to_cmp(reported) if isinstance(reported, str) else reported
 
 
 def _working_dirs() -> list[str]:
@@ -3511,7 +3606,7 @@ def _working_dirs() -> list[str]:
     if _WORKING_DIR:
         out.append(_WORKING_DIR)
     try:
-        here = os.getcwd()
+        here = _to_cmp(os.getcwd())
     except OSError:
         here = ""
     if here and here not in out:
@@ -3550,7 +3645,7 @@ def _cd_targets(command: str) -> list[str]:
             out.append(_norm_path(target))
             continue
         for base in _working_dirs():                 # relative cd
-            out.append(_norm_path(os.path.join(base, target)))
+            out.append(_norm_path(posixpath.join(base, target)))
     return out
 
 
@@ -3561,12 +3656,13 @@ def _norm_path_variants(p: str, extra_bases: list[str] | None = None) -> list[st
     resolution against every candidate working directory — a write target must
     be refused if ANY of them lands on a protected path (fail-closed).
     """
+    p = _to_cmp(p)
     base = _norm_path(p)
     if not _looks_relative(p):
         return [base]
     out = [base]
     for d in list(extra_bases or []) + _working_dirs():
-        cand = _norm_path(os.path.join(d, p))
+        cand = _norm_path(posixpath.join(_to_cmp(d), p))
         if cand not in out:
             out.append(cand)
     return out
@@ -3583,7 +3679,9 @@ def _norm_path(p: str) -> str:
     sources stay out of scope (filesystem boundary, see THREAT-MODEL).
     """
     expanded = re.sub(r"/{2,}", "/", expand_path(p))   # normpath keeps a leading //
-    return os.path.normpath(expanded).rstrip("/")
+    # posixpath, not os.path: on Windows os.path.normpath turns every '/' back
+    # into '\' and no protected path matches any more. Identical on Unix.
+    return posixpath.normpath(expanded).rstrip("/")
 
 
 def _collapse_path_traversal(s: str) -> str:
@@ -4725,7 +4823,11 @@ def _path_candidates(value, depth: int = 0):
         return
     if isinstance(value, str):
         if "/" in value or value.startswith("~"):
-            yield value
+            yield _to_cmp(value)
+        elif _WINDOWS and ("\\" in value or _DRIVE_RE.match(value)):
+            # Windows spelling: without this a backslash path skipped the whole
+            # choke point -- control files AND the read guard (2026-10-17).
+            yield _to_cmp(value)
     elif isinstance(value, dict):
         for key, v in value.items():
             if key in _CONTENT_FIELDS:
@@ -4792,9 +4894,9 @@ def enforce_grep_read_protection(input_data: dict, rules: dict,
     """
     tool_input = input_data.get("tool_input", {}) or {}
     base = input_data.get("cwd") or os.getcwd()
-    path = tool_input.get("path") or base
-    if not os.path.isabs(os.path.expanduser(path)):
-        path = os.path.join(base, path)
+    path = _to_cmp(tool_input.get("path") or base)
+    if not posixpath.isabs(expand_path(path)):
+        path = posixpath.join(_to_cmp(base), path)
     command = f"grep -r x {path}"
     file_filter = tool_input.get("glob")
     if isinstance(file_filter, str) and file_filter:
