@@ -16,6 +16,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -96,7 +97,7 @@ def _run(command: str) -> int:
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
         payload = {"session_id": "sudo-words-test", "hook_event_name": "PreToolUse",
                    "cwd": "/tmp", "tool_name": "Bash", "tool_input": {"command": command}}
-        return subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        return subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                               capture_output=True, text=True, env=env).returncode
 
 

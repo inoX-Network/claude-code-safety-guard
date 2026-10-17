@@ -21,6 +21,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -77,7 +78,7 @@ def _run(tool_name: str, tool_input: dict) -> int:
         env["CLAUDE_AUDIT_DIR"] = ov
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
         p = subprocess.run(
-            ["python3", str(HOOK)],
+            [sys.executable, str(HOOK)],
             input=json.dumps({"session_id": "false-positive-test",
                               "hook_event_name": "PreToolUse",
                               "tool_name": tool_name, "tool_input": tool_input}),

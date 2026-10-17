@@ -89,7 +89,7 @@ def _denied(hook, command, override=None):
         if override:
             with open(os.path.join(ov, "test.json"), "w", encoding="utf-8") as f:
                 json.dump(override, f)
-        p = subprocess.run(["python3", str(hook)],
+        p = subprocess.run([sys.executable, str(hook)],
                            input=json.dumps({"session_id": "s",
                                              "hook_event_name": "PreToolUse",
                                              "tool_name": "Bash",

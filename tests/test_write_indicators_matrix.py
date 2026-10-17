@@ -15,6 +15,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -57,7 +58,7 @@ def _run(command: str, rules_path: str) -> int:
         env["CLAUDE_AUDIT_DIR"] = ov
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"   # Dev-Modus garantiert aus
         p = subprocess.run(
-            ["python3", str(HOOK)],
+            [sys.executable, str(HOOK)],
             input=json.dumps(payload),
             capture_output=True,
             text=True,

@@ -23,6 +23,7 @@ environment files, next to `.example` and `.sample`.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -63,7 +64,7 @@ def _run(tool: str, tool_input: dict, config: dict | None, dev: bool = False) ->
             flag.write_text(json.dumps({"expires_at": until, "reason": "test"}), encoding="utf-8")
         env["CLAUDE_HOOK_DEV_FLAG"] = str(flag)
         env["CLAUDE_GUARD_CONFIG"] = str(cfg)
-        p = subprocess.run(["python3", str(HOOK)],
+        p = subprocess.run([sys.executable, str(HOOK)],
                            input=json.dumps({"session_id": "chain-switch", "tool_name": tool,
                                              "tool_input": tool_input}),
                            capture_output=True, text=True, env=env, cwd=tmp)

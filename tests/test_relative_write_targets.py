@@ -21,6 +21,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -130,7 +131,7 @@ def _run(cwd: str, tool_name: str, tool_input: dict, proc_cwd: str | None = None
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
         payload = {"session_id": "relative-target-test", "hook_event_name": "PreToolUse",
                    "tool_name": tool_name, "tool_input": tool_input, "cwd": cwd}
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env,
                            cwd=proc_cwd or ov)
         return p.returncode

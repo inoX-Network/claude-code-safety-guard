@@ -10,6 +10,7 @@ maintainer's copy, whose refusals are German throughout.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def _refusal(language: str | None) -> tuple[int, str]:
         env["CLAUDE_AUDIT_DIR"] = tmp + "/audit"
         env["CLAUDE_HOOK_DEV_FLAG"] = tmp + "/_none"
         env["CLAUDE_GUARD_CONFIG"] = str(cfg)
-        p = subprocess.run(["python3", str(HOOK)],
+        p = subprocess.run([sys.executable, str(HOOK)],
                            input=json.dumps({"session_id": "needed-text", "tool_name": "Bash",
                                              "tool_input": {"command": f"echo x > {TARGET}"}}),
                            capture_output=True, text=True, env=env, cwd=tmp)

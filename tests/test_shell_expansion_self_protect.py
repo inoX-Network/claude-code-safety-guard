@@ -43,6 +43,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -156,7 +157,7 @@ def _run(command: str, rules_path: str) -> int:
         # Working directory stated, not inherited: a relative target would
         # otherwise be resolved against wherever the suite was started.
         payload["cwd"] = ov
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env, cwd=ov)
         return p.returncode
 

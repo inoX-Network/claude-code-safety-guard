@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def _run(command: str, tmp: Path, cwd: str | None = None) -> tuple[int, str]:
                "tool_input": {"command": command}}
     if cwd:
         payload["cwd"] = cwd
-    p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+    p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                        capture_output=True, text=True, env=env)
     return p.returncode, " ".join(p.stderr.split())
 

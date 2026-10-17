@@ -67,7 +67,7 @@ def _run(hook, tool, value, extra_env, rules_path=None):
             payload = {"tool_name": tool,
                        "tool_input": {"file_path": value, "content": "x"}}
         payload.update({"session_id": "s", "hook_event_name": "PreToolUse"})
-        p = subprocess.run(["python3", str(hook)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(hook)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env, timeout=60)
         return p.returncode == 2
 

@@ -97,7 +97,7 @@ def run_hook(command: str, agent_id: str | None, overrides_dir: Path,
         env["CLAUDE_HOOK_DEV_FLAG"] = str(overrides_dir / "_no_dev_flag")
 
     proc = subprocess.run(
-        ["python3", str(HOOK)],
+        [sys.executable, str(HOOK)],
         input=json.dumps(payload),
         capture_output=True,
         text=True,

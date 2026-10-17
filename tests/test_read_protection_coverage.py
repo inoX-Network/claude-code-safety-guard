@@ -19,6 +19,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -99,7 +100,7 @@ def _run(tool: str, path: str, rules_path: str, override_level: int | None = Non
         env["CLAUDE_AUDIT_DIR"] = ov
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
         p = subprocess.run(
-            ["python3", str(HOOK)],
+            [sys.executable, str(HOOK)],
             input=json.dumps(payload),
             capture_output=True,
             text=True,

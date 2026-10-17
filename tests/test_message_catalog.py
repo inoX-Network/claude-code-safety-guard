@@ -140,7 +140,7 @@ def check_guard_still_runs():
         env["CLAUDE_AUDIT_DIR"] = ov
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
         p = subprocess.run(
-            ["python3", str(HOOK)],
+            [sys.executable, str(HOOK)],
             input=json.dumps({"session_id": "catalog-test", "tool_name": "Bash",
                               "tool_input": {"command": "echo x > ~/.claude/hooks/x.py"}}),
             capture_output=True, text=True, env=env)

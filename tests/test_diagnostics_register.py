@@ -31,6 +31,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -97,13 +98,13 @@ class Bench:
         payload = json.dumps({"session_id": "probe",
                               "hook_event_name": "Stop",
                               "transcript_path": str(self.transcript)})
-        p = subprocess.run(["python3", str(SCRIPT), which],
+        p = subprocess.run([sys.executable, str(SCRIPT), which],
                            input=payload, capture_output=True, text=True,
                            env=self.env(), timeout=300)
         return p.returncode, p.stdout + p.stderr
 
     def run(self, *parts: str) -> tuple[int, str]:
-        p = subprocess.run(["python3", str(SCRIPT), *parts],
+        p = subprocess.run([sys.executable, str(SCRIPT), *parts],
                            capture_output=True, text=True, env=self.env(),
                            timeout=300)
         return p.returncode, p.stdout + p.stderr

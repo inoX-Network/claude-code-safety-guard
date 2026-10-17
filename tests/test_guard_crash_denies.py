@@ -44,7 +44,7 @@ def _run(hook, stdin_text):
         env["CLAUDE_SUDO_OVERRIDES_DIR"] = ov
         env["CLAUDE_AUDIT_DIR"] = ov
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
-        p = subprocess.run(["python3", str(hook)], input=stdin_text,
+        p = subprocess.run([sys.executable, str(hook)], input=stdin_text,
                            capture_output=True, text=True, env=env, timeout=60)
         return p.returncode, (p.stderr or "")
 

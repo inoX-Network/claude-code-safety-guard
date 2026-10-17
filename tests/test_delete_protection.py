@@ -26,6 +26,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -132,7 +133,7 @@ def _run(tool: str, text: str, rules_path: str,
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
         payload.update({"session_id": "delete-protection-test",
                         "hook_event_name": "PreToolUse"})
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env)
         return p.returncode
 
@@ -147,7 +148,7 @@ def _stderr(tool: str, text: str, rules_path: str) -> str:
         env["CLAUDE_SUDO_OVERRIDES_DIR"] = ov
         env["CLAUDE_AUDIT_DIR"] = ov
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env)
         return p.stderr
 

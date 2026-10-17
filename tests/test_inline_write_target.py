@@ -34,6 +34,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -150,7 +151,7 @@ def _run(command: str, rules_path: str) -> int:
         # Isolating the dev window matters: without it the suite measures
         # something different while the window happens to be open.
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env)
         return p.returncode
 

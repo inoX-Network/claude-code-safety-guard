@@ -3,6 +3,7 @@
 # rules path, unlike the CASES runner). Drop into tests/ or call from main().
 # ============================================================================
 import json, os, subprocess, tempfile
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent if (Path(__file__).resolve().parent.name == "tests") else Path("/tmp/ccsg")
@@ -17,7 +18,7 @@ def _run(command: str, rules_path: str) -> int:
         env["CLAUDE_SUDO_OVERRIDES_DIR"] = ov
         env["CLAUDE_AUDIT_DIR"] = ov
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env)
         return p.returncode
 

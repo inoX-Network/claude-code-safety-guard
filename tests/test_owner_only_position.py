@@ -48,6 +48,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -98,7 +99,7 @@ def _blocked_by_owner_rule(command: str, names: list[str] | None = None) -> bool
         env["CLAUDE_SUDO_OVERRIDES_DIR"] = ov
         env["CLAUDE_AUDIT_DIR"] = ov
         env["CLAUDE_HOOK_DEV_FLAG"] = ov + "/_none"   # dev mode guaranteed off
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env, timeout=60)
         low = (p.stderr or "").lower()
         return any(m in low for m in MARKERS)

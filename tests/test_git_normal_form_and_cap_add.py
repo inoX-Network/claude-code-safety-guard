@@ -27,6 +27,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -111,7 +112,7 @@ def _decide(command: str) -> int:
         payload = {"tool_name": "Bash", "tool_input": {"command": command},
                    "cwd": tmp, "session_id": "git-normal-form-test",
                    "hook_event_name": "PreToolUse"}
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env, cwd=tmp)
         return p.returncode
 

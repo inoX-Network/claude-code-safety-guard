@@ -19,6 +19,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def _blocks(command: str) -> tuple[bool, str]:
         env["CLAUDE_HOOK_DEV_FLAG"] = str(tmp / "_no_window")
         env["CLAUDE_GUARD_CONFIG"] = str(tmp / "_no_config.json")
         p = subprocess.run(
-            ["python3", str(HOOK)],
+            [sys.executable, str(HOOK)],
             input=json.dumps({"session_id": "write-path-boundary-test",
                               "tool_name": "Bash",
                               "tool_input": {"command": command}}),

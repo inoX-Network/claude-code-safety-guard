@@ -25,6 +25,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -122,7 +123,7 @@ def _decide(command: str, rules_path: str, level: int) -> int:
         payload = {"tool_name": "Bash", "tool_input": {"command": command},
                    "cwd": HOME, "session_id": "root-delete-test",
                    "hook_event_name": "PreToolUse"}
-        p = subprocess.run(["python3", str(HOOK)], input=json.dumps(payload),
+        p = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env)
         return p.returncode
 

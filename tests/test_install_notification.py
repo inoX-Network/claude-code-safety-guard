@@ -27,6 +27,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -81,7 +82,7 @@ def _run(command: str) -> tuple[bool, list[list[str]]]:
         env["PATH"] = str(binn) + os.pathsep + env["PATH"]
 
         subprocess.run(
-            ["python3", str(HOOK)],
+            [sys.executable, str(HOOK)],
             input=json.dumps({"session_id": "install-notification-test",
                               "tool_name": "Bash",
                               "tool_input": {"command": command}}),
