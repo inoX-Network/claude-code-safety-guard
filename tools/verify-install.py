@@ -127,6 +127,10 @@ def check_interpreter(guard_commands: list[str]) -> None:
 
 # `cmd || { …; exit 2; }` — what turns a failing launch into a denial.
 FAIL_CLOSED_WRAPPER = re.compile(r"\|\|.*\bexit\s+2\b")
+# The 2026.10.14 form: the `||` directly behind the hook also fires on a
+# regular block (exit 2) and prints "failed to load" under every refusal.
+# The current form saves the code first and lets 0 and 2 through.
+OLD_WRAPPER = re.compile(r"command-guard\.py\S*\s*\|\|")
 
 
 def check_load_failure(guard_commands: list[str]) -> None:
@@ -139,16 +143,22 @@ def check_load_failure(guard_commands: list[str]) -> None:
     because every probe below runs the hook directly, never the registered line.
     """
     bare = [c for c in guard_commands if not FAIL_CLOSED_WRAPPER.search(c)]
+    old = [c for c in guard_commands if c not in bare and OLD_WRAPPER.search(c)]
     if not bare:
         note(OK, "load failure",
              f"all {len(guard_commands)} guard entries fail closed if the hook cannot be loaded")
-        return
-    note(WARN, "load failure",
-         f"{len(bare)} of {len(guard_commands)} guard entries run the hook bare. If "
-         "command-guard.py fails to load (a syntax error from an edit, a missing "
-         "file), Python exits 1 and the call is ALLOWED. Append "
-         "'|| { echo safety guard failed to load - call denied >&2; exit 2; }' "
-         "as in settings.example.json.")
+    else:
+        note(WARN, "load failure",
+             f"{len(bare)} of {len(guard_commands)} guard entries run the hook bare. If "
+             "command-guard.py fails to load (a syntax error from an edit), Python "
+             "exits 1 and the call is ALLOWED. Use the command from "
+             "settings.example.json.")
+    if old:
+        note(WARN, "load-failure message",
+             f"{len(old)} of {len(guard_commands)} guard entries use the 2026.10.14 "
+             "wrapper ('… || { …; exit 2; }'). It still fails closed, but prints "
+             "'failed to load' under every regular block as well. Replace it with "
+             "the command from settings.example.json.")
 
 
 def find_hook_from_settings() -> Path | None:

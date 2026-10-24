@@ -43,6 +43,10 @@ EXAMPLE_COMMANDS = _guard_commands(json.loads(EXAMPLE_SETTINGS.read_text(encodin
 
 
 def _launch(command_template: str, hook: Path, command: str) -> int:
+    return _run(command_template, hook, command).returncode
+
+
+def _run(command_template: str, hook: Path, command: str) -> subprocess.CompletedProcess:
     """Run the registered command line the way the tool chain does: through a shell."""
     line = command_template.replace("~/.claude/hooks/command-guard.py", str(hook))
     payload = json.dumps({"session_id": "s", "hook_event_name": "PreToolUse",
@@ -54,7 +58,7 @@ def _launch(command_template: str, hook: Path, command: str) -> int:
         env["CLAUDE_AUDIT_DIR"] = state
         env["CLAUDE_HOOK_DEV_FLAG"] = state + "/_none"
         return subprocess.run(["/bin/sh", "-c", line], input=payload, capture_output=True,
-                              text=True, env=env, timeout=60).returncode
+                              text=True, env=env, timeout=60)
 
 
 def _broken_copy(tmp: Path) -> Path:
@@ -103,6 +107,19 @@ def check_wrapper_keeps_blocked_blocked():
     return _launch(EXAMPLE_COMMANDS[0], HOOK, BLOCKED) == 2
 
 
+def check_regular_block_does_not_claim_a_load_failure():
+    # The 2026.10.14 wrapper ('|| { …; exit 2; }') fired on every regular block,
+    # because a block ends with 2 as well, and appended "failed to load".
+    p = _run(EXAMPLE_COMMANDS[0], HOOK, BLOCKED)
+    return p.returncode == 2 and "failed to load" not in p.stderr and p.stderr.strip() != ""
+
+
+def check_load_failure_names_itself():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _run(EXAMPLE_COMMANDS[0], _broken_copy(Path(tmp)), HARMLESS)
+        return p.returncode == 2 and "failed to load" in p.stderr
+
+
 # --- verify-install notices a bare entry -------------------------------------
 
 def _verify(commands: list[str]) -> str:
@@ -125,7 +142,9 @@ def _verify(commands: list[str]) -> str:
                               text=True, env=env, timeout=300).stdout
 
 
-WRAPPED = "python3 {hook} || { echo guard failed to load >&2; exit 2; }"
+WRAPPED = ("python3 {hook}; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || "
+           "{ echo guard failed to load >&2; exit 2; }; exit $rc")
+OLD_WRAPPED = "python3 {hook} || { echo guard failed to load >&2; exit 2; }"
 BARE = "python3 {hook}"
 
 
@@ -135,7 +154,13 @@ def check_bare_entry_is_reported():
 
 def check_wrapped_entry_is_accepted():
     out = _verify([WRAPPED])
-    return "fail closed if the hook cannot be loaded" in out and "run the hook bare" not in out
+    return ("fail closed if the hook cannot be loaded" in out and "run the hook bare" not in out
+            and "2026.10.14 wrapper" not in out)
+
+
+def check_old_wrapper_is_reported():
+    out = _verify([OLD_WRAPPED])
+    return "fail closed if the hook cannot be loaded" in out and "1 of 1 guard entries use the 2026.10.14 wrapper" in out
 
 
 def check_mixed_entries_name_the_count():
