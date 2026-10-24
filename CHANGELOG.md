@@ -9,6 +9,60 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.24
+
+### security — a force push with another option in front of the force flag passed
+
+- The rules pattern wants the force flag right after `push`, and the git
+  normal form (2026.09.30-2) put the flags in front of remote and branch but
+  kept their order. So `git push -q --force-with-lease origin x` overwrote a
+  remote branch at level 0 — seen in real use — and so did `-v -f`, the
+  bundles `-fq`/`-qf` and `--force-with-lease=<ref>`.
+- In the normal form the force options now go first and drop a `=<value>`;
+  a bundle of value-less short options is split (`-fq` → `-f -q`), while
+  `-o<value>` stays one token. The raw text is still matched as before.
+- In the author's log not one allowed command used these spellings.
+
+### security — remote `inspect` and `compose config` printed every secret of an env_file
+
+- Both were filed as read-only. A container's inspect output holds every
+  value from its env_file in clear text, and `compose config` renders them
+  into the file it prints. Measured on a production host: reading the `.env`
+  file needed level 1, the same passwords came out of
+  `ssh host 'docker inspect …'` at level 0.
+- Remotely (`ssh`, `-H`, `--context`, also behind wrappers) they now need
+  level 1 unless nothing secret can come out: an inspect `--format` template
+  that names only listed fields (state, health, name, image, created, mounts,
+  networks, ports, labels, host config, …), or `compose config` with
+  `--services`, `--volumes`, `--images`, `--hash`, `--profiles`, `--networks`
+  or `--quiet`. Environment, command line, entrypoint, the whole object
+  (`{{.}}`, `{{json .}}`, `.Config`) and calls without a template need the
+  approval. A field missing from the list costs an approval, never a leak.
+- Locally both stay free, like `exec` and `run`.
+- The block has its own message (`lifecycle.remote_values`, English and
+  German); the old one said the command "changes or tears down".
+- Replayed against 1,866 allowed commands from the author's log: 42 newly
+  blocked, every one of them read the environment, the command line or the
+  whole object, or had no template.
+- New test `tests/test_push_flag_order_and_remote_inspect.py` (before 23 of
+  49 failing, after 49/49, 13 of 13 mutations caught).
+
+### fix — the load-failure wrapper printed "failed to load" under every regular block
+
+- 2026.10.14 wrapped the guard in `… || { echo safety guard failed to load …; exit 2; }`.
+  A regular block also ends with exit 2, so the `||` fired and appended the
+  failure message to every refusal — misleading, and the kind of noise people
+  learn to ignore.
+- New wrapper: `python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc`.
+  Exit 0 and 2 pass through unchanged; anything else becomes a denial with
+  the message. A missing hook file is denied too — Python itself ends with 2
+  and names the file.
+- `tools/verify-install.py` warns about entries still on the old wrapper.
+  **Existing installs should replace the command in their eight entries** (and
+  in a managed settings copy, if any).
+
+---
+
 ## 2026.10.14
 
 ### security — a hook file that could not be loaded let every call through

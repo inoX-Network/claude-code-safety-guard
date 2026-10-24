@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }"
+            "command": "python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }"
+            "command": "python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc"
           }
         ]
       },
@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }"
+            "command": "python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc"
           }
         ]
       },
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }"
+            "command": "python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc"
           }
         ]
       },
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }"
+            "command": "python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc"
           }
         ]
       },
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }"
+            "command": "python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc"
           }
         ]
       },
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }"
+            "command": "python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc"
           }
         ]
       },
@@ -69,7 +69,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.claude/hooks/command-guard.py || { echo safety guard failed to load - call denied >&2; exit 2; }"
+            "command": "python3 ~/.claude/hooks/command-guard.py; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || { echo safety guard failed to load - call denied >&2; exit 2; }; exit $rc"
           }
         ]
       }

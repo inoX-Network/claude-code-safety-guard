@@ -80,7 +80,10 @@ FREE = [
     "docker attach web",
     'ssh prod "docker ps"',
     "ssh prod docker logs --tail 50 web",
-    "ssh prod 'docker inspect db'",
+    # Since 2026.10.24 a bare remote inspect needs an approval -- it prints the
+    # env_file values (test_push_flag_order_and_remote_inspect.py). A template
+    # with harmless fields stays free.
+    "ssh prod \"docker inspect -f '{{.State.Status}}' db\"",
     "docker -H ssh://prod ps",
     "docker --context prod logs web",
     'echo "run ssh prod docker exec db ls to check"',

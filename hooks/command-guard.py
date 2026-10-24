@@ -379,6 +379,15 @@ _MESSAGES = {
         "BLOCKED: '{command}' sets a setuid/setgid bit as root — a lasting way "
         "to root, not part of a deploy. Requires override level 2. {extra}"
     ),
+    "lifecycle.remote_values": (
+        "BLOCKED: remote '{command}' can print a container's environment in "
+        "clear text (passwords and keys from its env_file) and requires "
+        "override level 1+. Free remotely: a --format template that names only "
+        "harmless fields (e.g. {{{{.State.Status}}}}, .Mounts, .Config.Labels), "
+        "and compose config with --services, --images, --hash or --quiet. "
+        "Locally it stays free. ESCALATION: the agent writes an override "
+        "proposal into the pending directory and asks the owner to approve it."
+    ),
     "lifecycle.needs_override": (
         "BLOCKED: '{command}' changes or tears down and requires override "
         "level 1+. Read-only forms (ps, logs, inspect, images, stats) run "
@@ -2418,6 +2427,62 @@ _CONTAINER_GROUP_FREE = {
     "builder": {"ls"},
 }
 
+# Two of the read-only forms print SECRETS: a container's inspect output holds
+# every value from its env_file in clear text, and 'compose config' renders
+# them into the file it prints. Measured 2026-10-15 on a production host: the
+# .env file itself needed level 1, the same passwords came out of inspect at
+# level 0 through a remote call.
+#
+# Locally they stay free, like exec and run. Remotely they stay free only in a
+# form that cannot show those values. In the author's log 503 of 516 allowed
+# remote inspect calls used a template, 49 of them read the environment --
+# so the template decides, not the word: every field it names must be on the
+# list below. A field missing here costs an approval, never a leak.
+_INSPECT_SAFE_FIELDS = {
+    "State", "Name", "Names", "Id", "ID", "Image", "Created", "CreatedAt",
+    "CreatedSince", "RestartCount", "Platform", "Driver", "Status", "Health",
+    "Size", "SizeRw", "SizeRootFs", "Repository", "Tag", "Containers",
+    "Output", "ExitCode", "Start", "End",
+    "Mounts", "Source", "Destination", "RW", "Type", "Mode", "Propagation",
+    "NetworkSettings", "Networks", "Ports", "IPAddress", "IPv4Address",
+    "IPv6Address", "Gateway", "MacAddress", "Aliases", "HostConfig", "Labels",
+    "Config.Image", "Config.Labels", "Config.Healthcheck", "Config.ExposedPorts",
+    "Config.WorkingDir", "Config.User", "Config.Hostname",
+}
+# Options of 'compose config' that print names or a hash instead of the file.
+_COMPOSE_CONFIG_SAFE = {"--services", "--volumes", "--images", "--hash",
+                        "--profiles", "--networks", "-q", "--quiet"}
+_TEMPLATE_RE = re.compile(r"\{\{(.*?)\}\}")
+# A field reference: '.Config.Env'. Not one after a word character or '$'
+# ('com.docker.x' in a string, '$v.Name' on a range variable of an allowed one).
+_FIELD_RE = re.compile(r"(?<![\w$])\.([A-Za-z]\w*(?:\.[A-Za-z]\w*)*)")
+# The whole object: '{{.}}', '{{json .}}'.
+_BARE_DOT_RE = re.compile(r"(?<![\w$\]])\.(?![A-Za-z])")
+# String literals inside a template, also with escaped quotes from a remote
+# call. Blanked before the checks: the dot in 'printf "%.15s"' is text.
+_TEMPLATE_STRING_RE = re.compile(r'\\?"[^"]*?\\?"')
+
+# Commands whose output, remotely, decides about secrets rather than changes.
+_REMOTE_VALUE_FORMS = {"inspect", "container inspect", "compose config"}
+
+
+def _field_safe(field: str) -> bool:
+    return any(field == f or field.startswith(f + ".") for f in _INSPECT_SAFE_FIELDS)
+
+
+def _inspect_template_safe(rest: str) -> bool:
+    """Does this inspect call print only fields that hold no secrets?"""
+    blocks = _TEMPLATE_RE.findall(rest)
+    if not blocks:
+        return False
+    for block in blocks:
+        block = _TEMPLATE_STRING_RE.sub('""', block)
+        if _BARE_DOT_RE.search(block):
+            return False
+        if not all(_field_safe(f) for f in _FIELD_RE.findall(block)):
+            return False
+    return True
+
 # Options that carry their own VALUE. Without this list the check mistakes the
 # value for the subcommand: a compose call with a file option would read the
 # file name and fail — on the single most common call there is.
@@ -2483,9 +2548,16 @@ def _container_subcommand_free(rest: str,
     if first in _CONTAINER_GROUP_FREE:
         rest_tokens = tokens[tokens.index(first) + 1:] if first in tokens else []
         second = _first_subcommand(rest_tokens)
-        return second in _CONTAINER_GROUP_FREE[first], f"{first} {second}".strip()
+        named = f"{first} {second}".strip()
+        if remote and named == "container inspect":
+            return _inspect_template_safe(rest), named
+        if remote and named == "compose config":
+            return bool(_COMPOSE_CONFIG_SAFE & set(rest_tokens)), named
+        return second in _CONTAINER_GROUP_FREE[first], named
     if remote and first in _CONTAINER_LOCAL_ONLY_FREE:
         return False, first
+    if remote and first == "inspect":
+        return _inspect_template_safe(rest), first
     return first in _CONTAINER_FREE, first
 
 
@@ -3943,9 +4015,30 @@ def _git_config_read(m: re.Match) -> str:
     return m.group(0)
 
 
+# The force options of 'git push'. The rules pattern wants one right after
+# 'push', so in the normal form they go FIRST and drop a '=<value>': 'git push
+# -q --force-with-lease origin x' passed, and so did '-fq' and
+# '--force-with-lease=<ref>' (measured 2026-10-24).
+_GIT_PUSH_FORCE = {"-f", "--force", "--force-with-lease"}
+# Short options of 'git push' that take no value. Only a bundle made of these
+# is split ('-fq' -> '-f -q'); '-o<value>' carries text that must not turn into
+# options.
+_GIT_PUSH_SHORT = set("vqfund46")
+
+
 def _git_push_flags_first(m: re.Match) -> str:
     parts = m.group(1).split()
-    flags = [t for t in parts if t.startswith("-")]
+    flags = []
+    for t in parts:
+        if not t.startswith("-"):
+            continue
+        if not t.startswith("--") and len(t) > 2 and set(t[1:]) <= _GIT_PUSH_SHORT:
+            flags.extend("-" + c for c in t[1:])
+        elif t.startswith("--force-with-lease="):
+            flags.append("--force-with-lease")
+        else:
+            flags.append(t)
+    flags.sort(key=lambda f: f not in _GIT_PUSH_FORCE)
     return "git push " + " ".join(flags + [t for t in parts if not t.startswith("-")])
 
 
@@ -5219,8 +5312,9 @@ def main():
         if bad_lifecycle:
             _audit(input_data, "Bash", command, "block",
                    f"lifecycle_needs_override:{bad_lifecycle}", level)
-            print(msg("lifecycle.needs_override", command=bad_lifecycle),
-                  file=sys.stderr)
+            key = ("lifecycle.remote_values" if bad_lifecycle in _REMOTE_VALUE_FORMS
+                   else "lifecycle.needs_override")
+            print(msg(key, command=bad_lifecycle), file=sys.stderr)
             sys.exit(2)
 
     # 5. Confirmation-required commands — desktop notification
