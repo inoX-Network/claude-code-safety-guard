@@ -68,6 +68,15 @@ PROJECT_TARGETS = [
     (".agents/rules/AGENTS.md", GATED),
     (".agents/agents/helper/AGENT.md", GATED),
     (".agents/workflows/flow.md", GATED),
+    # agy 1.3.3 loads its customization manifests from every .agents/
+    # directory (`strings` on the binary: rules.json, agents.json,
+    # workflows.json next to skills.json and plugins.json). The patterns knew
+    # the directories but not the manifests -- measured 2026-10-27: these three
+    # were writable at level 0.
+    (".agents/rules.json", GATED),
+    (".agents/agents.json", GATED),
+    (".agents/workflows.json", GATED),
+    ("_agent/rules.json", GATED),
     # Counter-probes. Without these the list only proves a total lockdown.
     # .agents/ is also the sub-agents' working directory -- these three MUST
     # stay writable or the CLI cannot run.

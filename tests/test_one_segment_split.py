@@ -118,7 +118,10 @@ def check_separator_pattern_lives_in_one_place():
     """The pattern may appear in exactly two constants — the plain and the
     keeping form — and nowhere else. Anything more is copy number seven."""
     source = HOOK.read_text(encoding="utf-8")
-    hits = [line.strip() for line in source.splitlines() if r"[;|\n]" in line]
+    # Both spellings: the current one, which keeps `>|` whole, and the earlier
+    # one -- a copy in the old form would split the clobber redirect again.
+    hits = [line.strip() for line in source.splitlines()
+            if r"[;|\n]" in line or r"[;\n]|(?<!>)\|" in line]
     if len(hits) != 2:
         return False, f"separator pattern on {len(hits)} lines: {hits}"
     named = [h for h in hits if h.startswith("_SEGMENT_RE")

@@ -411,13 +411,14 @@ expanding it duplicated the surrounding word — which put a second command name
 where a command name is read, and refused a perfectly ordinary line. Brace
 lists carrying `"key":` are left alone.
 
-**What this does not close.** The shell also removes *non-empty* quotes and
-backslashes, and those spellings still reach a protected path:
-`~/.claude/"settings".json` and `~/.claude/set\tings.json` are both allowed
-today. They behave identically before and after this change — the next class in
-the same family, needing a different answer, because removing them is not
-state-free in the same simple way: a quote can span words and a backslash can
-escape a separator.
+**Non-empty quotes and backslashes** were the next class in the same family,
+and stayed open longer than they should have: `~/.claude/"settings".json` and
+`~/.claude/set\tings.json` reached the settings file until 2026.10.28. Removing
+them is not state-free the way empty pairs are — a quote can span words, a
+backslash can escape a separator — so the target text is now compared a
+**second** time with quotes and backslashes removed, in addition to the
+original spelling, never instead of it. A variant that names nothing costs
+nothing; no refusal the original spelling earns can be lost.
 
 ### The shell's startup files
 
