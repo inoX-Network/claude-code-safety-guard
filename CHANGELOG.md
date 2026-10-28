@@ -9,6 +9,48 @@ matters to you. Entries marked **security** close a way around the guard.
 
 ---
 
+## 2026.10.28
+
+### security — a copy with a redirect of another shape wrote to protected files
+
+- `cp` and `install` tell source and target apart by position: the last word
+  is the target. The `>` family had been taken out of that count since
+  2026.08.21, the other redirect shapes had not. `cp <src> <protected>
+  < /dev/null` made /dev/null "the target", and so did `&>log`, `&>>log`,
+  `>| log`, `<<< x` and a trailing `&` -- the real target slid into the source
+  role, which counts as a read. Level 0, onto the settings file, hook files,
+  shell startup files, `authorized_keys`, project-local control files and
+  every entry of `blocked_paths_write`.
+- Every redirect shape (with a quoted operand too) is now taken out before the
+  position rule picks the target; output operands stay checked as targets.
+
+### security — quotes or a backslash inside a protected file name
+
+- The shell removes quotes and backslashes before the command runs, so
+  `~/.claude/"settings".json` and `~/.claude/sett\ings.json` write to the
+  settings file. The guard compared the text with them still in. Documented
+  as open since 2026.08.27.
+- The target text is now compared a second time with quotes and backslashes
+  removed -- in addition to the original spelling, never instead of it.
+
+### security — the clobber redirect `>|` was read as a pipe
+
+- `echo x >| <protected>` was cut at the `|`, which left the target alone in
+  a part of the line that writes nothing. `>|` now stays one redirect.
+
+### security — three Antigravity manifests were not protected
+
+- agy 1.3.3 loads `rules.json`, `agents.json` and `workflows.json` from every
+  `.agents/` directory. The patterns knew the directories, not the manifests;
+  they now need level 1 like the directories.
+
+All four were measured on a byte-identical copy of 2026.10.24 and are covered
+by `tests/test_copy_redirect_forms_and_quoted_targets.py` (201 cases, 166 of
+them failing before) and four new targets in
+`tests/test_third_toolchain_control_files.py`. Replayed against 95,542
+distinct commands from the author's log that these changes can touch and that
+were allowed: not one is newly refused.
+
 ## 2026.10.24
 
 ### security — a force push with another option in front of the force flag passed

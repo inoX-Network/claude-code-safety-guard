@@ -767,9 +767,9 @@ _PROJECT_CONTROL_GATED = [
     # .agents/ would cripple the CLI -- hence only the named subdirectories,
     # exactly as for .opencode/.
     (re.compile(r"(?:^|/)[._]agents?/skills(?:\.json|/|$)"), ".agents/skills/"),
-    (re.compile(r"(?:^|/)[._]agents?/rules(?:/|$)"), ".agents/rules/"),
-    (re.compile(r"(?:^|/)[._]agents?/agents(?:/|$)"), ".agents/agents/"),
-    (re.compile(r"(?:^|/)[._]agents?/workflows(?:/|$)"), ".agents/workflows/"),
+    (re.compile(r"(?:^|/)[._]agents?/rules(?:\.json|/|$)"), ".agents/rules/"),
+    (re.compile(r"(?:^|/)[._]agents?/agents(?:\.json|/|$)"), ".agents/agents/"),
+    (re.compile(r"(?:^|/)[._]agents?/workflows(?:\.json|/|$)"), ".agents/workflows/"),
 ]
 
 # Tools that only ever read. Everything else counts as potentially writing, so a
@@ -1202,8 +1202,12 @@ _DEST_OPTION_RE = re.compile(r"(?:^|\s)(?:-t\b|--target-directory)")
 # `keep` is not convenience. Two callers reassemble the line afterwards and need
 # the separators back in the result — a shared helper that could not do both
 # would be wrong at the first call site that puts the line together again.
-_SEGMENT_RE = re.compile(r"&&|\|\||[;|\n]")
-_SEGMENT_KEEP_RE = re.compile(r"(&&|\|\||[;|\n])")
+#
+# `>|` is not a pipe. It is the clobber redirect, and cutting at its `|` left
+# the target alone in a "segment" that writes nothing: `echo x >| <protected>`
+# ran free (measured 2026-10-28 on release 2026.10.24).
+_SEGMENT_RE = re.compile(r"&&|\|\||[;\n]|(?<!>)\|")
+_SEGMENT_KEEP_RE = re.compile(r"(&&|\|\||[;\n]|(?<!>)\|)")
 
 
 def split_segments(command: str, keep: bool = False) -> list[str]:
@@ -1214,6 +1218,43 @@ def split_segments(command: str, keep: bool = False) -> list[str]:
     line without losing what sat between them.
     """
     return (_SEGMENT_KEEP_RE if keep else _SEGMENT_RE).split(command)
+
+
+# Every redirect shape, with its operand. The position rule below takes the LAST
+# word as the copy target, so anything a redirect leaves in last place pushes
+# the real target into the source role -- which counts as a read.
+#
+# A HOLE (measured 2026-10-27 against release 2026.10.24): the `>` family had
+# been taken out since 2026-08-21, the rest had not. `cp <src> <protected>
+# < /dev/null` made /dev/null the "target"; `&>log` left a stray `&`, `<<< x`
+# left `x`, and `>| log` had the line cut at its `|`, leaving a bare `>`. All
+# of them ran free onto self-protected files and blocked_paths_write entries.
+# A trailing `&` (background job) did the same with no redirect at all.
+#
+# The operand may be quoted and may contain blanks (`<<< "a b"`); reading only
+# up to the next blank would leave `b"` as the "target".
+_ANY_REDIRECT_RE = re.compile(
+    r"(?:\d+|&)?(<<<|<<-?|<>|[<>]&|>>|>\||[<>])\s*"
+    r"((?:\"[^\"]*\"|'[^']*'|[^\s;&|<>\"'])*)")
+
+
+def _without_redirects(part: str) -> tuple[str, list[str]]:
+    """A copy segment with every redirect and a trailing `&` removed.
+
+    Returns the rest and the OUTPUT redirect operands, which are write targets
+    in their own right and must not vanish with the redirect: `cp a b >
+    <protected>` writes to the protected file, not to b.
+    """
+    outputs = []
+
+    def drop(m):
+        op, operand = m.group(1), m.group(2)
+        if ">" in op and not op.endswith("&") and operand:
+            outputs.append(operand)
+        return " "
+
+    rest = _ANY_REDIRECT_RE.sub(drop, part)
+    return re.sub(r"(?:^|\s)&\s*$", " ", rest), outputs
 
 
 def _without_copy_sources(command: str) -> str:
@@ -1233,8 +1274,10 @@ def _without_copy_sources(command: str) -> str:
         if (len(tokens) >= 3
                 and os.path.basename(tokens[0]) in _COPY_COMMANDS
                 and not _DEST_OPTION_RE.search(part)):
+            rest, outputs = _without_redirects(part)
+            tokens = rest.split()
             options = [t for t in tokens[1:-1] if t.startswith("-")]
-            out.append(" " + " ".join([tokens[0]] + options + [tokens[-1]]) + " ")
+            out.append(" " + " ".join([tokens[0]] + options + tokens[-1:] + outputs) + " ")
         else:
             out.append(part)
     return "".join(out)
@@ -1272,7 +1315,7 @@ _ASSIGNMENT_RE = re.compile(r"(?:^|[\s;&|])([A-Za-z_][A-Za-z_0-9]*)=([^\s;&|]+)"
 _VARIABLE_RE = re.compile(r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)")
 
 
-_REDIRECT_TARGET_RE = re.compile(r"\d*>>?(?![&\d])\s*([^\s;&|]+)")
+_REDIRECT_TARGET_RE = re.compile(r"\d*>(?:>|\|)?(?![&\d])\s*([^\s;&|]+)")
 
 
 def _write_target_text(segment: str) -> str:
@@ -1299,6 +1342,29 @@ def _write_target_text(segment: str) -> str:
     earlier the same day stood open again. The refusal half of a DIFFERENT test
     list caught it.
     """
+    text = _write_target_text_as_written(segment)
+    unquoted = _without_quoting(text)
+    return text if unquoted == text else text + " " + unquoted
+
+
+# The shell removes quotes and backslashes before the command runs, so
+# `~/.claude/"settings".json` and `~/.claude/sett\ings.json` write to the
+# settings file. The checks compare TEXT, and with the quotes still in, a
+# single protected FILE never matched (a protected directory mostly did, the
+# quote sitting behind the matched prefix).
+#
+# Documented as open since 2026-08-27 and passed over then because removing
+# quotes is "not state-free": a quote can span words, a backslash can escape a
+# separator. Both are true and neither matters here, because the unquoted form
+# is checked IN ADDITION to the original, never instead of it. A quote spanning
+# words merely adds a variant that names nothing; no refusal the original
+# spelling earns can be lost. The cost runs only in the safe direction: a quoted
+# `"~/x"` -- which the shell does NOT expand -- is now held against `~/x`.
+def _without_quoting(text: str) -> str:
+    return re.sub(r"\\(.)", r"\1", text).replace('"', "").replace("'", "")
+
+
+def _write_target_text_as_written(segment: str) -> str:
     targets = " ".join(_REDIRECT_TARGET_RE.findall(segment))
     if not targets:
         return _without_copy_sources(segment)

@@ -24,19 +24,11 @@
 # What is refused here is a protected path, however it was spelled -- never the
 # spelling itself.
 #
-# WHAT THIS DOES NOT CLOSE, measured rather than assumed. The shell also
-# removes NON-empty quotes and backslashes, and those spellings still reach a
-# protected path:
-#
-#   echo x > ~/.claude/"settings".json      still allowed
-#   echo x > ~/.claude/set\tings.json       still allowed
-#
-# Both behave identically before and after this change, so they are not a
-# regression -- they are the next class in the same family, and they need a
-# different answer: removing them is not state-free in the same simple way
-# (a quote can span words, a backslash can escape a separator), so it is not
-# a two-line addition here. Deliberately NOT asserted as "allowed": a test
-# that pins an open hole in place makes closing it look like a regression.
+# The shell also removes NON-empty quotes and backslashes. That next class in
+# the same family stayed open here and was closed later, by comparing the
+# target text a second time with quotes and backslashes removed -- in
+# addition to, never instead of, the original spelling. Its cases live in
+# test_copy_redirect_forms_and_quoted_targets.py.
 #
 # Pure dry run: only decisions are inspected. Nothing is written.
 # ============================================================================
